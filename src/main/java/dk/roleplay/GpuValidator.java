@@ -17,9 +17,10 @@ import java.util.List;
 public class GpuValidator implements CandidateValidator {
     private static final int MAX_RESULTS = 10000;
     private final CUfunction function;
+    private final CUcontext context;
 
     public GpuValidator() {
-        JCudaDriver.setExceptionsEnabled(false); // Disable to manually handle the error code
+        JCudaDriver.setExceptionsEnabled(false);
         int result = JCudaDriver.cuInit(0);
         if (result != CUresult.CUDA_SUCCESS) {
             throw new RuntimeException("cuInit failed: " + CUresult.stringFor(result));
@@ -27,8 +28,8 @@ public class GpuValidator implements CandidateValidator {
 
         CUdevice device = new CUdevice();
         JCudaDriver.cuDeviceGet(device, 0);
-        CUcontext context = new CUcontext();
-        JCudaDriver.cuCtxCreate(context, 0, device);
+        this.context = new CUcontext();
+        JCudaDriver.cuCtxCreate(this.context, 0, device);
 
         String ptxPath = "EternityKernel.ptx";
         if (!new File(ptxPath).exists()) {
@@ -57,59 +58,63 @@ public class GpuValidator implements CandidateValidator {
             return new ArrayList<>();
         }
 
-        CUdeviceptr d_candidates = new CUdeviceptr();
-        JCudaDriver.cuMemAlloc(d_candidates, (long) candidateBatch.length * Sizeof.INT);
-        JCudaDriver.cuMemcpyHtoD(d_candidates, Pointer.to(candidateBatch), (long) candidateBatch.length * Sizeof.INT);
+        // Push the context to the current thread
+        JCudaDriver.cuCtxPushCurrent(context);
 
-        CUdeviceptr d_results = new CUdeviceptr();
-        JCudaDriver.cuMemAlloc(d_results, (long) MAX_RESULTS * 16 * Sizeof.INT);
+        try {
+            CUdeviceptr d_candidates = new CUdeviceptr();
+            JCudaDriver.cuMemAlloc(d_candidates, (long) candidateBatch.length * Sizeof.INT);
+            JCudaDriver.cuMemcpyHtoD(d_candidates, Pointer.to(candidateBatch), (long) candidateBatch.length * Sizeof.INT);
 
-        CUdeviceptr d_counter = new CUdeviceptr();
-        JCudaDriver.cuMemAlloc(d_counter, Sizeof.INT);
-        JCudaDriver.cuMemsetD32(d_counter, 0, 1);
+            CUdeviceptr d_results = new CUdeviceptr();
+            JCudaDriver.cuMemAlloc(d_results, (long) MAX_RESULTS * 16 * Sizeof.INT);
 
-        Pointer kernelParameters = Pointer.to(
-                Pointer.to(d_candidates),
-                Pointer.to(d_results),
-                Pointer.to(d_counter),
-                Pointer.to(new int[]{numPermutations}),
-                Pointer.to(new int[]{MAX_RESULTS})
-        );
+            CUdeviceptr d_counter = new CUdeviceptr();
+            JCudaDriver.cuMemAlloc(d_counter, Sizeof.INT);
+            JCudaDriver.cuMemsetD32(d_counter, 0, 1);
 
-        int blockSizeX = 256;
-        int gridSizeX = (numPermutations + blockSizeX - 1) / blockSizeX;
+            Pointer kernelParameters = Pointer.to(
+                    Pointer.to(d_candidates),
+                    Pointer.to(d_results),
+                    Pointer.to(d_counter),
+                    Pointer.to(new int[]{numPermutations}),
+                    Pointer.to(new int[]{MAX_RESULTS})
+            );
 
-        JCudaDriver.cuLaunchKernel(function,
-                gridSizeX, 1, 1,
-                blockSizeX, 1, 1,
-                0, null,
-                kernelParameters, null
-        );
-        JCudaDriver.cuCtxSynchronize();
+            int blockSizeX = 256;
+            int gridSizeX = (numPermutations + blockSizeX - 1) / blockSizeX;
 
-        int[] countArr = new int[1];
-        JCudaDriver.cuMemcpyDtoH(Pointer.to(countArr), d_counter, Sizeof.INT);
-        int validFound = Math.min(countArr[0], MAX_RESULTS);
+            JCudaDriver.cuLaunchKernel(function,
+                    gridSizeX, 1, 1,
+                    blockSizeX, 1, 1,
+                    0, null,
+                    kernelParameters, null
+            );
+            JCudaDriver.cuCtxSynchronize();
 
-        int[] resultsArr = new int[validFound * 16];
-        if (validFound > 0) {
-            JCudaDriver.cuMemcpyDtoH(Pointer.to(resultsArr), d_results, (long) validFound * 16 * Sizeof.INT);
+            int[] countArr = new int[1];
+            JCudaDriver.cuMemcpyDtoH(Pointer.to(countArr), d_counter, Sizeof.INT);
+            int validFound = Math.min(countArr[0], MAX_RESULTS);
+
+            int[] resultsArr = new int[validFound * 16];
+            if (validFound > 0) {
+                JCudaDriver.cuMemcpyDtoH(Pointer.to(resultsArr), d_results, (long) validFound * 16 * Sizeof.INT);
+            }
+
+            JCudaDriver.cuMemFree(d_candidates);
+            JCudaDriver.cuMemFree(d_results);
+            JCudaDriver.cuMemFree(d_counter);
+
+            List<int[]> validList = new ArrayList<>();
+            for (int i = 0; i < validFound; i++) {
+                int[] tile = new int[16];
+                System.arraycopy(resultsArr, i * 16, tile, 0, 16);
+                validList.add(tile);
+            }
+            return validList;
+        } finally {
+            // Pop the context back
+            JCudaDriver.cuCtxPopCurrent(new CUcontext());
         }
-
-        JCudaDriver.cuMemFree(d_candidates);
-        JCudaDriver.cuMemFree(d_results);
-        JCudaDriver.cuMemFree(d_counter);
-
-        List<int[]> validList = new ArrayList<>();
-        for (
-                int i = 0;
-                i < validFound;
-                i++
-        ) {
-            int[] tile = new int[16];
-            System.arraycopy(resultsArr, i * 16, tile, 0, 16);
-            validList.add(tile);
-        }
-        return validList;
     }
 }

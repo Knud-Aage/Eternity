@@ -13,7 +13,7 @@ extern "C" __global__ void validateMacroTiles(
 
     int base = tid * 16;
 
-    // Internal Horizontal Checks
+    // Internal Horizontal Checks (Checking East of left piece against West of right piece)
     for (int r = 0; r < 4; r++) {
         for (int c = 0; c < 3; c++) {
             int leftIdx = base + (r * 4) + c;
@@ -22,11 +22,12 @@ extern "C" __global__ void validateMacroTiles(
             unsigned int leftPiece = (unsigned int)candidates[leftIdx];
             unsigned int rightPiece = (unsigned int)candidates[rightIdx];
 
+            // If the colors do not match exactly, kill this thread. It's a bad 4x4 block.
             if (((leftPiece >> 16) & 0xFF) != (rightPiece & 0xFF)) return;
         }
     }
 
-    // Internal Vertical Checks
+    // Internal Vertical Checks (Checking South of top piece against North of bottom piece)
     for (int c = 0; c < 4; c++) {
         for (int r = 0; r < 3; r++) {
             int topIdx = base + (r * 4) + c;
@@ -35,11 +36,13 @@ extern "C" __global__ void validateMacroTiles(
             unsigned int topPiece = (unsigned int)candidates[topIdx];
             unsigned int bottomPiece = (unsigned int)candidates[bottomIdx];
 
+            // If the colors do not match exactly, kill this thread.
             if (((topPiece >> 8) & 0xFF) != ((bottomPiece >> 24) & 0xFF)) return;
         }
     }
 
-    // If we reached here, the 4x4 is internally consistent
+    // If we survived all the loops, the 4x4 block is internally perfect!
+    // Safely add it to the results array so the Java CPU can use it.
     int pos = atomicAdd(resultCounter, 1);
     if (pos < maxResults) {
         int resBase = pos * 16;

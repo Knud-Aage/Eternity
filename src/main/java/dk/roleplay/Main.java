@@ -66,15 +66,13 @@ public class Main {
                 String[] pts = line.split(",");
                 if (pts.length < 4) continue;
 
-                // Inside Main.java -> loadPieces()
-                int n = Integer.parseInt(pts[0].trim());
-                int e = Integer.parseInt(pts[1].trim());
-                int s = Integer.parseInt(pts[2].trim());
-                int w = Integer.parseInt(pts[3].trim());
+                // CRITICAL FIX: The CSV is Top, Bottom, Left, Right
+                int n = Integer.parseInt(pts[0].trim()); // Top (North)
+                int s = Integer.parseInt(pts[1].trim()); // Bottom (South)
+                int w = Integer.parseInt(pts[2].trim()); // Left (West)
+                int e = Integer.parseInt(pts[3].trim()); // Right (East)
 
-                pieces[i++] = PieceUtils.pack(n, e, s, w);
-
-                // Pack them in the correct Clockwise (N, E, S, W) order for the bitwise engine
+                // Pack them into our 32-bit integer in the correct Clockwise order
                 pieces[i++] = PieceUtils.pack(n, e, s, w);
             }
             if (i == 256) {
