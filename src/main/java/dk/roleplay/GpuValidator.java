@@ -8,7 +8,9 @@ import jcuda.driver.CUdeviceptr;
 import jcuda.driver.CUfunction;
 import jcuda.driver.CUmodule;
 import jcuda.driver.JCudaDriver;
+import jcuda.driver.CUresult;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -17,17 +19,36 @@ public class GpuValidator implements CandidateValidator {
     private final CUfunction function;
 
     public GpuValidator() {
-        JCudaDriver.setExceptionsEnabled(true);
-        JCudaDriver.cuInit(0);
+        JCudaDriver.setExceptionsEnabled(false); // Disable to manually handle the error code
+        int result = JCudaDriver.cuInit(0);
+        if (result != CUresult.CUDA_SUCCESS) {
+            throw new RuntimeException("cuInit failed: " + CUresult.stringFor(result));
+        }
+
         CUdevice device = new CUdevice();
         JCudaDriver.cuDeviceGet(device, 0);
         CUcontext context = new CUcontext();
         JCudaDriver.cuCtxCreate(context, 0, device);
 
+        String ptxPath = "EternityKernel.ptx";
+        if (!new File(ptxPath).exists()) {
+            ptxPath = "src/main/resources/EternityKernel.ptx";
+        }
+        if (!new File(ptxPath).exists()) {
+             ptxPath = "../EternityKernel.ptx";
+        }
+
         CUmodule module = new CUmodule();
-        JCudaDriver.cuModuleLoad(module, "EternityKernel.ptx");
+        result = JCudaDriver.cuModuleLoad(module, ptxPath);
+        if (result != CUresult.CUDA_SUCCESS) {
+             throw new RuntimeException("cuModuleLoad failed with error code: " + CUresult.stringFor(result) + 
+                 " (" + result + "). Path: " + new File(ptxPath).getAbsolutePath() +
+                 ". Make sure your GPU supports sm_75 and your driver is up to date (CUDA 13.2 requires Driver 550+).");
+        }
+
         function = new CUfunction();
         JCudaDriver.cuModuleGetFunction(function, module, "validateMacroTiles");
+        JCudaDriver.setExceptionsEnabled(true);
     }
 
     @Override
@@ -41,11 +62,11 @@ public class GpuValidator implements CandidateValidator {
         JCudaDriver.cuMemcpyHtoD(d_candidates, Pointer.to(candidateBatch), (long) candidateBatch.length * Sizeof.INT);
 
         CUdeviceptr d_results = new CUdeviceptr();
-        JCudaDriver.cuMemAlloc(d_results, MAX_RESULTS * 16 * Sizeof.INT);
+        JCudaDriver.cuMemAlloc(d_results, (long) MAX_RESULTS * 16 * Sizeof.INT);
 
         CUdeviceptr d_counter = new CUdeviceptr();
         JCudaDriver.cuMemAlloc(d_counter, Sizeof.INT);
-        JCudaDriver.cuMemsetD8(d_counter, (byte) 0, Sizeof.INT);
+        JCudaDriver.cuMemsetD32(d_counter, 0, 1);
 
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_candidates),
@@ -71,7 +92,9 @@ public class GpuValidator implements CandidateValidator {
         int validFound = Math.min(countArr[0], MAX_RESULTS);
 
         int[] resultsArr = new int[validFound * 16];
-        JCudaDriver.cuMemcpyDtoH(Pointer.to(resultsArr), d_results, (long) validFound * 16 * Sizeof.INT);
+        if (validFound > 0) {
+            JCudaDriver.cuMemcpyDtoH(Pointer.to(resultsArr), d_results, (long) validFound * 16 * Sizeof.INT);
+        }
 
         JCudaDriver.cuMemFree(d_candidates);
         JCudaDriver.cuMemFree(d_results);
