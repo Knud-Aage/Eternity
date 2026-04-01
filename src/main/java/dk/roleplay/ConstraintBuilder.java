@@ -7,7 +7,7 @@ public class ConstraintBuilder {
     public static int[] build(int macroIdx, int[][] mainBoard) {
         int[] constraints = new int[16];
 
-        // CRITICAL FIX: Initialize all edges to WILDCARD (255) instead of Java's default 0 (Border)
+        // Initialize all edges to WILDCARD (255) instead of Java's default 0 (Border)
         int wildcardPacked = PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD);
         Arrays.fill(constraints, wildcardPacked);
 
@@ -29,40 +29,50 @@ public class ConstraintBuilder {
         }
 
         // 2. Adjacent Macro-Tile Borders (Dynamic Constraints)
-        // If there's a macro-tile already placed ABOVE us, we must match its bottom edge
+        // Match ABOVE neighbor
         if (mRow > 0 && mainBoard[macroIdx - 4] != null) {
             for (int c = 0; c < 4; c++) {
-                int pieceAbove = mainBoard[macroIdx - 4][12 + c]; // The 4 bottom-row pieces of the tile above
-                applyNorth(constraints, c, PieceUtils.getSouth(pieceAbove));
+                int pieceAbove = mainBoard[macroIdx - 4][12 + c];
+                if (pieceAbove != PieceUtils.WILDCARD) {
+                    applyNorth(constraints, c, PieceUtils.getSouth(pieceAbove));
+                }
             }
         }
 
-        // If there's a macro-tile already placed to the LEFT of us, we must match its right edge
+        // Match LEFT neighbor
         if (mCol > 0 && mainBoard[macroIdx - 1] != null) {
             for (int r = 0; r < 4; r++) {
-                int pieceLeft = mainBoard[macroIdx - 1][r * 4 + 3]; // The 4 rightmost-column pieces of the tile left
-                applyWest(constraints, r * 4, PieceUtils.getEast(pieceLeft));
+                int pieceLeft = mainBoard[macroIdx - 1][r * 4 + 3];
+                if (pieceLeft != PieceUtils.WILDCARD) {
+                    applyWest(constraints, r * 4, PieceUtils.getEast(pieceLeft));
+                }
             }
         }
 
-/*      // (Optional) If you ever decide to build out-of-order, check South and East macros
-        if (mRow < 3 && mainBoard[macroIdx + 4] != null) {
-            for (int c = 0; c < 4; c++) {
-                int pieceBelow = mainBoard[macroIdx + 4][c];
-                applySouth(constraints, 12 + c, PieceUtils.getNorth(pieceBelow));
-            }
+        // 3. Official Fixed Piece Match (#139: N=18, E=18, S=3, W=12 at Global 7,7)
+        // Global (7,7) is Macro-Tile 5, internal position 15
+        
+        if (macroIdx == 5) {
+            // Force Position 15 to perfectly match the centerpiece.
+            // The PermutationGenerator will be forced to use Piece #139 here.
+            applyNorth(constraints, 15, 18);
+            applyEast(constraints, 15, 18);
+            applySouth(constraints, 15, 3);
+            applyWest(constraints, 15, 12);
         }
-        if (mCol < 3 && mainBoard[macroIdx + 1] != null) {
-            for (int r = 0; r < 4; r++) {
-                int pieceRight = mainBoard[macroIdx + 1][r * 4];
-                applyEast(constraints, r * 4 + 3, PieceUtils.getWest(pieceRight));
-            }
-        }
-*/
+        
+        // Match West of fixed piece (Macro 5, Pos 14 matches Fixed Piece Pos 15 West)
+        if (macroIdx == 5) applyEast(constraints, 14, 12);
+
+        // Match East of fixed piece (Macro 6, Pos 12 matches Fixed Piece Pos 15 East)
+        if (macroIdx == 6) applyWest(constraints, 12, 18);
+        
+        // Match South of fixed piece (Macro 9, Pos 3 matches Fixed Piece Pos 15 South)
+        if (macroIdx == 9) applyNorth(constraints, 3, 3);
+
         return constraints;
     }
 
-    // Safely injects the 8-bit color ID into the exact edge slot, preserving the other 24 bits
     private static void applyNorth(int[] arr, int idx, int color) {
         arr[idx] = (arr[idx] & 0x00FFFFFF) | ((color & 0xFF) << 24);
     }
@@ -79,56 +89,3 @@ public class ConstraintBuilder {
         arr[idx] = (arr[idx] & 0xFFFFFF00) | (color & 0xFF);
     }
 }
-
-
-/*
-package dk.roleplay;
-
-import java.util.Arrays;
-
-public class ConstraintBuilder {
-    public static int[] build(int macroIdx, int[][] mainBoard) {
-        int[] constraints = new int[16];
-        Arrays.fill(constraints, PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD,
-                PieceUtils.WILDCARD));
-
-        int mRow = macroIdx / 4;
-        int mCol = macroIdx % 4;
-
-        for (
-                int i = 0;
-                i < 16;
-                i++
-        ) {
-            int r = i / 4, c = i % 4;
-            int n = PieceUtils.WILDCARD, e = PieceUtils.WILDCARD, s = PieceUtils.WILDCARD, w = PieceUtils.WILDCARD;
-
-            // Borders
-            if (mRow == 0 && r == 0) {
-                n = 0;
-            }
-            if (mRow == 3 && r == 3) {
-                s = 0;
-            }
-            if (mCol == 0 && c == 0) {
-                w = 0;
-            }
-            if (mCol == 3 && c == 3) {
-                e = 0;
-            }
-
-            // Neighbor match (North Macro)
-            if (r == 0 && mRow > 0 && mainBoard[macroIdx - 4] != null) {
-                n = PieceUtils.getSouth(mainBoard[macroIdx - 4][12 + c]);
-            }
-            // Neighbor match (West Macro)
-            if (c == 0 && mCol > 0 && mainBoard[macroIdx - 1] != null) {
-                w = PieceUtils.getEast(mainBoard[macroIdx - 1][r * 4 + 3]);
-            }
-
-            constraints[i] = PieceUtils.pack(n, e, s, w);
-        }
-        return constraints;
-    }
-}
-*/
