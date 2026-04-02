@@ -26,6 +26,18 @@ public class MasterSolver implements Runnable {
         this.scoreRef = scoreRef;
         this.rnd = new Random(seed);
         this.resumeBoard = CheckpointManager.load(); // Load state on startup
+
+        if (this.resumeBoard != null) {
+            int recoveredSteps = 0;
+            for (int i = 0; i < 16; i++) {
+                if (this.resumeBoard[i] != null) recoveredSteps++;
+            }
+            if (recoveredSteps > 0) {
+                // If we recovered 5 pieces, we successfully reached step 4!
+                this.maxMacroReached = recoveredSteps - 1;
+                System.out.println("Restored High Score Memory: " + recoveredSteps + " macro-tiles.");
+            }
+        }
     }
 
     @Override
@@ -33,13 +45,15 @@ public class MasterSolver implements Runnable {
         System.out.println("Solver thread started.");
         while (!solved) {
             reset();
-            System.out.println("Seeding Macro 0...");
+            // FIX: Print the actual macro we are starting with!
+            System.out.println("Seeding Macro " + solveOrder[0] + "...");
             seeding();
 
-            if (mainBoard[0] != null) {
-                System.out.println("Macro 0 successful. Starting solve...");
-                if (solve(1)) {
-                    solved = true;
+            int firstMacro = solveOrder[0];
+            if (mainBoard[firstMacro] != null) {
+                System.out.println("Macro " + firstMacro + " seeded successfully. Starting outward spiral...");
+                // Pass "1" because we are moving to step 1 of the solveOrder array
+                if (solve(1)) {                    solved = true;
                     Main.updateDisplay(256, mainBoard);
                     RecordManager.saveRecord(mainBoard, 16); // Final win save!
                     System.out.println("SOLVED!");
@@ -49,7 +63,8 @@ public class MasterSolver implements Runnable {
                     resumeBoard = null; // Clear resume board if branch fails completely
                 }
             } else {
-                System.out.println("Failed to seed Macro 0. Resetting...");
+                // FIX: Tell the truth about which macro failed!
+                System.out.println("Failed to seed Macro " + firstMacro + ". Resetting...");
                 try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             }
         }
@@ -61,41 +76,50 @@ public class MasterSolver implements Runnable {
     }
 
     private void seeding() {
-        // --- RESUME LOGIC FOR MACRO 0 ---
-        if (resumeBoard != null && resumeBoard[0] != null) {
-            mainBoard[0] = resumeBoard[0].clone();
-            markUsed(mainBoard[0]);
+        // Grab the very first macro-tile we are supposed to solve (Macro 5)
+        int firstMacro = solveOrder[0];
+
+        // --- RESUME LOGIC FOR THE FIRST MACRO ---
+        if (resumeBoard != null && resumeBoard[firstMacro] != null) {
+            mainBoard[firstMacro] = resumeBoard[firstMacro].clone();
+            markUsed(mainBoard[firstMacro]);
             Main.updateDisplay(16, mainBoard);
-            System.out.println("Resumed Macro 0 from checkpoint.");
+            System.out.println("Resumed Macro " + firstMacro + " from checkpoint.");
             return;
         }
 
-        int[] constraints = ConstraintBuilder.build(0, mainBoard);
+        int[] constraints = ConstraintBuilder.build(firstMacro, mainBoard);
         PermutationGenerator gen = new PermutationGenerator(inventory, usedPhysicalPieces);
-        List<int[]> candidates = gen.generate(0, constraints, 500);
+        List<int[]> candidates = gen.generate(firstMacro, constraints, 500);
 
         if (!candidates.isEmpty()) {
             List<int[]> valid = validator.validate(flatten(candidates), candidates.size());
             if (!valid.isEmpty()) {
                 int[] choice = valid.get(rnd.nextInt(valid.size()));
-                mainBoard[0] = choice;
+                mainBoard[firstMacro] = choice;
                 markUsed(choice);
                 Main.updateDisplay(16, mainBoard);
-                System.out.println("Seeded Macro 0 with " + valid.size() + " valid candidates found.");
+                System.out.println("Seeded Macro " + firstMacro + " with " + valid.size() + " valid candidates found.");
             }
         }
     }
 
-    private boolean solve(int macroIdx) {
-        if (macroIdx == 16) return true;
+    private boolean solve(int step) {
+        if (step == 16) return true; // All 16 macros placed!
         if (solved) return false;
 
-        // --- NEW RECORD LOGIC ---
-        if (macroIdx > maxMacroReached) {
-            maxMacroReached = macroIdx;
-            RecordManager.saveRecord(mainBoard, macroIdx);
+        // Fetch the actual Macro ID we should be working on right now
+        int macroIdx = solveOrder[step];
+
+        // --- FIXED RECORD LOGIC ---
+        // Use 'step' to track our depth, because macroIdx jumps around!
+        if (step > maxMacroReached) {
+            maxMacroReached = step;
+            // We pass (step + 1) because if we are on step 1, we actually have 2 macros placed on the board!
+            RecordManager.saveRecord(mainBoard, step + 1);
         }
 
+        // ... THE REST OF YOUR SOLVE LOGIC STAYS EXACTLY THE SAME ...
         int[] constraints = ConstraintBuilder.build(macroIdx, mainBoard);
         PermutationGenerator gen = new PermutationGenerator(inventory, usedPhysicalPieces);
 
@@ -123,7 +147,9 @@ public class MasterSolver implements Runnable {
 
             mainBoard[macroIdx] = tile;
             markUsed(tile);
-            Main.updateDisplay((macroIdx + 1) * 16, mainBoard);
+
+            // FIX 1: Pass the actual number of pieces placed to the display (using step)
+            Main.updateDisplay((step + 1) * 16, mainBoard);
 
             // --- CHECKPOINT SAVE LOGIC (Every 60 Seconds) ---
             long now = System.currentTimeMillis();
@@ -132,11 +158,15 @@ public class MasterSolver implements Runnable {
                 lastSaveTime = now;
             }
 
-            if (solve(macroIdx + 1)) return true;
+            // FIX 2: We must move to the next chronological step in the array, not the next physical macro ID!
+            if (solve(step + 1)) return true;
 
             unmarkUsed(tile);
             mainBoard[macroIdx] = null;
-            Main.updateDisplay(macroIdx * 16, mainBoard);
+
+            // FIX 3: Update display during backtracking (using step)
+            Main.updateDisplay(step * 16, mainBoard);
+
             if (solved) return false;
         }
         return false;

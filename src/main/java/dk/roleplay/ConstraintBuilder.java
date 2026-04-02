@@ -27,14 +27,24 @@ public class ConstraintBuilder {
             if (globalCol == 0)  applyWest(constraints, i, PieceUtils.BORDER_COLOR);
             if (globalCol == 15) applyEast(constraints, i, PieceUtils.BORDER_COLOR);
         }
+// 2. Adjacent Macro-Tile Borders (Dynamic Omnidirectional Constraints)
 
-        // 2. Adjacent Macro-Tile Borders (Dynamic Constraints)
         // Match ABOVE neighbor
         if (mRow > 0 && mainBoard[macroIdx - 4] != null) {
             for (int c = 0; c < 4; c++) {
-                int pieceAbove = mainBoard[macroIdx - 4][12 + c];
+                int pieceAbove = mainBoard[macroIdx - 4][12 + c]; // bottom row of above macro
                 if (pieceAbove != PieceUtils.WILDCARD) {
                     applyNorth(constraints, c, PieceUtils.getSouth(pieceAbove));
+                }
+            }
+        }
+
+        // Match BELOW neighbor (NEW for Spiral)
+        if (mRow < 3 && mainBoard[macroIdx + 4] != null) {
+            for (int c = 0; c < 4; c++) {
+                int pieceBelow = mainBoard[macroIdx + 4][c]; // top row of below macro
+                if (pieceBelow != PieceUtils.WILDCARD) {
+                    applySouth(constraints, 12 + c, PieceUtils.getNorth(pieceBelow));
                 }
             }
         }
@@ -42,33 +52,39 @@ public class ConstraintBuilder {
         // Match LEFT neighbor
         if (mCol > 0 && mainBoard[macroIdx - 1] != null) {
             for (int r = 0; r < 4; r++) {
-                int pieceLeft = mainBoard[macroIdx - 1][r * 4 + 3];
+                int pieceLeft = mainBoard[macroIdx - 1][r * 4 + 3]; // right col of left macro
                 if (pieceLeft != PieceUtils.WILDCARD) {
                     applyWest(constraints, r * 4, PieceUtils.getEast(pieceLeft));
                 }
             }
         }
 
-        // 3. Official Fixed Piece Match (#139: N=18, E=18, S=3, W=12 at Global 7,7)
-        // Global (7,7) is Macro-Tile 5, internal position 15
-        
-        if (macroIdx == 5) {
-            // Force Position 15 to perfectly match the centerpiece.
-            // The PermutationGenerator will be forced to use Piece #139 here.
-            applyNorth(constraints, 15, 18);
-            applyEast(constraints, 15, 18);
-            applySouth(constraints, 15, 3);
-            applyWest(constraints, 15, 12);
+        // Match RIGHT neighbor (NEW for Spiral)
+        if (mCol < 3 && mainBoard[macroIdx + 1] != null) {
+            for (int r = 0; r < 4; r++) {
+                int pieceRight = mainBoard[macroIdx + 1][r * 4]; // left col of right macro
+                if (pieceRight != PieceUtils.WILDCARD) {
+                    applyEast(constraints, r * 4 + 3, PieceUtils.getWest(pieceRight));
+                }
+            }
         }
-        
-        // Match West of fixed piece (Macro 5, Pos 14 matches Fixed Piece Pos 15 West)
-        if (macroIdx == 5) applyEast(constraints, 14, 12);
 
-        // Match East of fixed piece (Macro 6, Pos 12 matches Fixed Piece Pos 15 East)
-        if (macroIdx == 6) applyWest(constraints, 12, 18);
-        
-        // Match South of fixed piece (Macro 9, Pos 3 matches Fixed Piece Pos 15 South)
-        if (macroIdx == 9) applyNorth(constraints, 3, 3);
+        // 3. Official Fixed Piece Match (#139)
+        // Clockwise Colors: N=18, E=12, S=18, W=3
+
+        if (macroIdx == 5) {
+            // Force Position 15 to perfectly match the centerpiece in memory
+            applyNorth(constraints, 15, 18);
+            applyEast(constraints, 15, 12);
+            applySouth(constraints, 15, 18);
+            applyWest(constraints, 15, 3);
+
+            // INTERNAL CAGE: Give advanced warning to the immediate neighbors
+            // The piece to the LEFT (14) must connect to the centerpiece's West (3)
+            applyEast(constraints, 14, 3);
+            // The piece ABOVE (11) must connect to the centerpiece's North (18)
+            applySouth(constraints, 11, 18);
+        }
 
         return constraints;
     }
