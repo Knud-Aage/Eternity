@@ -1,5 +1,3 @@
-extern "C"
-
 // --- DEVICE HELPER FUNCTIONS ---
 // These run purely on the graphics card. We extract the 8-bit color codes from the 32-bit packed integers.
 __device__ inline int getNorth(int p) { return (p >> 24) & 0xFF; }
@@ -16,14 +14,16 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
 }
 
 // --- MAIN PIECE-BY-PIECE KERNEL ---
-__global__ void solvePBP(
+extern "C" __global__ void solvePBP(
     int* d_partialBoards,      // Input: The 50,000 starting setups the CPU gave us
     int numPartialBoards,      // How many boards are in the array
     int startingPos,           // The index where the GPU should start solving (e.g., pos 150)
     int* d_allOrientations,    // The 1024 array of packed piece colors
     int* d_physicalMapping,    // The 1024 array mapping to physical IDs (0-255)
     int* d_solution,           // Output: The winning 256-piece array
-    int* d_solvedFlag          // Global flag so the winner can tell everyone else to stop!
+    int* d_solvedFlag,          // Global flag so the winner can tell everyone else to stop!
+    int* d_gpuHighScore,        // Pointer to track the GPU's deepest run!
+    int* d_bestBoardOut
 ) {
     // Determine which partial board this specific thread is working on
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -57,6 +57,8 @@ __global__ void solvePBP(
     }
 
     int pos = startingPos;
+    int localMax = startingPos;
+    int bestLocalBoard[256];
 
     // 3. THE ITERATIVE BACKTRACKING LOOP (No Recursion!)
     while (pos >= startingPos && pos < 256) {
@@ -103,7 +105,12 @@ __global__ void solvePBP(
 
                     foundPiece = true;
                     pos++; // Move forward!
-                    break;
+                    if (pos > localMax) {
+                        localMax = pos;
+                        for (int i = 0; i < pos; i++) {
+                            bestLocalBoard[i] = board[i];
+                        }
+                    }                    break;
                 }
             }
         }
@@ -142,4 +149,23 @@ __global__ void solvePBP(
             }
         }
     }
+    // <--- NEW: Safely push the thread's best score to the global GPU scoreboard! --->
+     int currentMax = *d_gpuHighScore;
+     while (localMax > currentMax) {
+         // If the global high score hasn't changed since we checked, update it!
+         if (atomicCAS(d_gpuHighScore, currentMax, localMax) == currentMax) {
+
+             // We hold the lock! Copy our snapshot to the global output array.
+             for (int i = 0; i < localMax; i++) {
+                 d_bestBoardOut[i] = bestLocalBoard[i];
+             }
+             // Fill the rest of the array with -1 so Java doesn't get confused
+             for (int i = localMax; i < 256; i++) {
+                 d_bestBoardOut[i] = -1;
+             }
+             break; // We successfully submitted our score, exit the loop!
+         }
+         // If another thread beat us to it, refresh the currentMax and try again
+         currentMax = *d_gpuHighScore;
+     }
 }

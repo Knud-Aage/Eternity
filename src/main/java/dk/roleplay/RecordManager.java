@@ -26,11 +26,11 @@ public class RecordManager {
 
     public static synchronized void saveRecord(int[][] mainBoard, int macrosPlaced) {
         int piecesCount = macrosPlaced * 16;
-        String baseName = "records/Record_" + piecesCount + "Pieces";
+        String baseName = "records/Record_" + piecesCount/16 + "Pieces";
 
         saveImage(mainBoard, baseName + ".png");
         saveText(mainBoard, baseName + ".csv");
-        System.out.println(">>> NEW RECORD! Saved Image and Data for " + piecesCount + " pieces.");
+        System.out.println(">>> NEW RECORD! Saved Image and Data for " + piecesCount/16 + " pieces.");
     }
 
     private static void saveImage(int[][] mainBoard, String filename) {

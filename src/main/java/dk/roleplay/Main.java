@@ -47,7 +47,9 @@ public class Main {
             solverTask = new MasterSolverPBP(inventory);
 
             if (dialog.isUseGpu()) {
-                System.out.println("Note: PBP does not use the GPU Validator yet. Running natively on CPU.");
+                System.out.println("Hardware: GPU CUDA Handoff Enabled!");
+            } else {
+                System.out.println("Hardware: Running purely natively on CPU.");
             }
         } else {
             System.out.println("Strategy: Divide & Conquer (Outward Spiral).");
@@ -55,21 +57,6 @@ public class Main {
             solverTask = new MasterSolver(inventory, validator, scoreRef, System.currentTimeMillis());
         }
 
-//        int[] basePieces = loadPieces();
-//        PieceInventory inventory = new PieceInventory(basePieces);
-//        CandidateValidator validator;
-
-//        try {
-//            validator = new GpuValidator();
-//            System.out.println("GPU Validator Initialized.");
-//        } catch (Throwable e) {
-//            System.out.println("GPU unavailable (" + e.getMessage() + "). Using CPU Validator.");
-//            validator = new CpuValidator();
-//        }
-
-        MasterSolver solver = new MasterSolver(inventory, validator, currentScore, new Random().nextLong());
-//        Thread solverThread = new Thread(solver, "SolverThread");
-//        solverThread.setDaemon(true);
         // --- 5. START THE THREAD ---
         Thread solverThread = new Thread(solverTask, "SolverThread");
         solverThread.start();

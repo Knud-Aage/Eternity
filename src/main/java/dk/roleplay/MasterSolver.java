@@ -55,7 +55,7 @@ public class MasterSolver implements Runnable {
                 // Pass "1" because we are moving to step 1 of the solveOrder array
                 if (solve(1)) {                    solved = true;
                     Main.updateDisplay(256, mainBoard);
-                    RecordManager.saveRecord(mainBoard, 16); // Final win save!
+//                    RecordManager.saveRecord(mainBoard, 16); // Final win save!
                     System.out.println("SOLVED!");
                     break;
                 } else {
@@ -116,7 +116,7 @@ public class MasterSolver implements Runnable {
         if (step > maxMacroReached) {
             maxMacroReached = step;
             // We pass (step + 1) because if we are on step 1, we actually have 2 macros placed on the board!
-            RecordManager.saveRecord(mainBoard, step + 1);
+//            RecordManager.saveRecord(mainBoard, step + 1);
         }
 
         // ... THE REST OF YOUR SOLVE LOGIC STAYS EXACTLY THE SAME ...
