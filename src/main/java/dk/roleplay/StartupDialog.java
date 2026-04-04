@@ -23,15 +23,15 @@ public class StartupDialog extends JDialog {
 
         panel.add(new JLabel("Solving Strategy:"));
         strategyBox = new JComboBox<>(new String[]{
-                "Divide & Conquer (4x4 Macros)",
-                "Piece-by-Piece (Linear)"
+                "Piece-by-Piece (Linear)",
+                "Divide & Conquer (4x4 Macros)"
         });
         panel.add(strategyBox);
 
         panel.add(new JLabel("Hardware Validator:"));
         hardwareBox = new JComboBox<>(new String[]{
-                "CPU Only",
-                "GPU Accelerated (CUDA)"
+                "GPU Accelerated (CUDA)",
+                "CPU Only"
         });
         panel.add(hardwareBox);
 
@@ -41,8 +41,8 @@ public class StartupDialog extends JDialog {
         JButton startBtn = new JButton("Start Engine");
         startBtn.setFont(new Font("Arial", Font.BOLD, 14));
         startBtn.addActionListener((ActionEvent e) -> {
-            usePbp = strategyBox.getSelectedIndex() == 1;
-            useGpu = hardwareBox.getSelectedIndex() == 1;
+            usePbp = strategyBox.getSelectedIndex() == 0;
+            useGpu = hardwareBox.getSelectedIndex() == 0;
             startClicked = true;
             setVisible(false); // Close the dialog
         });

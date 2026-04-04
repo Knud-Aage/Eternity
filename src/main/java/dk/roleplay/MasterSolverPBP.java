@@ -1,5 +1,6 @@
 package dk.roleplay;
 
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
@@ -143,7 +144,7 @@ public class MasterSolverPBP implements Runnable {
         int blocksPerGrid = (int) Math.ceil((double) numBoards / threadsPerBlock);
 
         // 7. FIRE THE KERNEL!
-        System.out.println("LAUNCHING CUDA KERNEL: " + blocksPerGrid + " Blocks, " + threadsPerBlock + " Threads.");
+        System.out.println(Instant.now() + ": LAUNCHING CUDA KERNEL: " + blocksPerGrid + " Blocks, " + threadsPerBlock + " Threads.");
         long startTime = System.currentTimeMillis();
 
         cuLaunchKernel(function,
@@ -155,7 +156,7 @@ public class MasterSolverPBP implements Runnable {
         cuCtxSynchronize(); // Wait for all 50,000 threads to finish!
 
         cuMemcpyDtoH(Pointer.to(gpuScore), d_gpuHighScore, Sizeof.INT);
-        System.out.println("GPU Batch Finished! Deepest dive this run: " + gpuScore[0] + " pieces.");
+        System.out.println(Instant.now() + ": GPU Batch Finished! Deepest dive this run: " + gpuScore[0] + " pieces.");
 
         if (gpuScore[0] > deepestPos) {
             deepestPos = gpuScore[0];
@@ -180,7 +181,7 @@ public class MasterSolverPBP implements Runnable {
         // 8. Check if the GPU won!
         cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
         if (solvedFlag[0] == 1) {
-            System.out.println(">>> GPU FOUND THE SOLUTION IN " + timeTaken + "ms! <<<");
+            System.out.println(Instant.now() + ": >>> GPU FOUND THE SOLUTION IN " + timeTaken + "ms! <<<");
             int[] winningBoard = new int[256];
             cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
 
@@ -189,7 +190,7 @@ public class MasterSolverPBP implements Runnable {
             RecordManager.saveRecord(buildLegacyBoard(winningBoard), 256);
             System.exit(0);
         } else {
-            System.out.println("GPU exhausted all branches in " + timeTaken + "ms. No solution found on this run.");
+            System.out.println(Instant.now() + ": GPU exhausted all branches in " + timeTaken + "ms. No solution found on this run.");
         }
 
         // 9. Free VRAM to prevent memory leaks

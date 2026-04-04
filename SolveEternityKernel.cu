@@ -60,8 +60,18 @@ extern "C" __global__ void solvePBP(
     int localMax = startingPos;
     int bestLocalBoard[256];
 
+    unsigned int stepCounter = 0;
+
     // 3. THE ITERATIVE BACKTRACKING LOOP (No Recursion!)
     while (pos >= startingPos && pos < 256) {
+
+        stepCounter++;
+
+        // If a thread gets stuck in a massive maze, forcefully end it!
+        // (You can adjust this number up or down to change how often Java prints)
+        if (stepCounter > 5000000) {
+            break;
+        }
 
         // Check if another thread already won. If so, immediately kill this thread.
         if (*d_solvedFlag == 1) return;
