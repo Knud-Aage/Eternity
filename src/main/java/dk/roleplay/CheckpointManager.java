@@ -1,6 +1,8 @@
 package dk.roleplay;
 
 import java.io.*;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 
 public class CheckpointManager {
@@ -41,10 +43,14 @@ public class CheckpointManager {
                 }
                 board[mIdx] = macroTile;
             }
-            System.out.println(">>> Checkpoint found! Preparing to resume...");
+            String now = LocalDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            System.out.println(now + " >>> Checkpoint found! Preparing to resume...");
             return board;
         } catch (Exception e) {
-            System.err.println("Failed to load checkpoint. Starting fresh. Error: " + e.getMessage());
+            String now = LocalDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            System.err.println(now + " Failed to load checkpoint. Starting fresh. Error: " + e.getMessage());
             return null;
         }
     }

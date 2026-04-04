@@ -1,14 +1,14 @@
 package dk.roleplay;
 
-import java.time.Instant;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Random;
 import jcuda.Pointer;
 import jcuda.Sizeof;
 import jcuda.driver.*;
 import static jcuda.driver.JCudaDriver.*;
+
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Random;
 
 public class MasterSolverPBP implements Runnable {
     private final PieceInventory inventory;
@@ -20,19 +20,19 @@ public class MasterSolverPBP implements Runnable {
     private final Random rnd = new Random();
     private int centerPhysicalIdx = -1;
     private int deepestPos = 0;
+
+    // --- GPU VARIABLES ---
     private final List<int[]> gpuSeedBoards = new ArrayList<>();
-    private final int HANDOFF_DEPTH = 80; // The piece where the CPU hands off to the GPU
+    private final int HANDOFF_DEPTH = 50;
+    private int forceBacktrackTarget = -1;
 
     public MasterSolverPBP(PieceInventory inventory) {
         this.inventory = inventory;
 
-        // --- THE CRITICAL FIX: FILL ALL ARRAYS WITH -1 ---
-        // Without this, Java defaults them to 0, which instantly breaks the constraints!
         Arrays.fill(flatBoard, -1);
         Arrays.fill(bestBoard, -1);
         Arrays.fill(flatResumeBoard, -1);
 
-        // Find the physical ID of the true Centerpiece (N=18, E=12, S=18, W=3)
         int targetPiece = PieceUtils.pack(18, 12, 18, 3);
         for (int i = 0; i < 1024; i++) {
             if (inventory.allOrientations[i] == targetPiece) {
@@ -43,8 +43,9 @@ public class MasterSolverPBP implements Runnable {
 
         int[][] loaded = CheckpointManager.load();
         if (loaded != null) {
+            int validPieceCount = 0;
             int highestPosLoaded = -1;
-            // Translate the 2D Macro-Tile array back into our 1D PBP array
+
             for (int i = 0; i < 256; i++) {
                 int gRow = i / 16;
                 int gCol = i % 16;
@@ -53,20 +54,27 @@ public class MasterSolverPBP implements Runnable {
 
                 if (loaded[mIdx] != null) {
                     int p = loaded[mIdx][pIdx];
-                    // Verify it is a real piece and not a Wildcard filler
                     if (isValidPiece(p) && p != targetPiece) {
                         flatResumeBoard[i] = p;
-                        bestBoard[i] = p; // Pre-fill the High Score memory
+                        bestBoard[i] = p;
+                        validPieceCount++;
                         highestPosLoaded = Math.max(highestPosLoaded, i);
                     }
                 }
             }
-            if (highestPosLoaded > -1) {
+            if (validPieceCount > 0) {
                 this.deepestPos = highestPosLoaded;
-                bestBoard[119] = targetPiece; // Don't forget the center piece!
+                bestBoard[119] = targetPiece;
                 System.out.println(">>> PBP Checkpoint Loaded! Fast-forwarding up to piece " + highestPosLoaded + "...");
             }
         }
+    }
+
+    private boolean isValidPiece(int p) {
+        for(int i = 0; i < 1024; i++) {
+            if(inventory.allOrientations[i] == p) return true;
+        }
+        return false;
     }
 
     // --- THE JCUDA BRIDGE ---
@@ -74,7 +82,6 @@ public class MasterSolverPBP implements Runnable {
         System.out.println(">>> INITIATING GPU HANDOFF...");
         System.out.println("Shipping " + partialBoardsList.size() + " partial boards to VRAM...");
 
-        // 1. Initialize JCuda
         JCudaDriver.setExceptionsEnabled(true);
         cuInit(0);
         CUdevice device = new CUdevice();
@@ -82,20 +89,17 @@ public class MasterSolverPBP implements Runnable {
         CUcontext context = new CUcontext();
         cuCtxCreate(context, 0, device);
 
-        // 2. Load the Compiled C++ Kernel
         CUmodule module = new CUmodule();
         cuModuleLoad(module, "SolveEternityKernel.ptx");
         CUfunction function = new CUfunction();
         cuModuleGetFunction(function, module, "solvePBP");
 
-        // 3. Flatten the Partial Boards for the GPU
         int numBoards = partialBoardsList.size();
         int[] flatBoards = new int[numBoards * 256];
         for (int i = 0; i < numBoards; i++) {
             System.arraycopy(partialBoardsList.get(i), 0, flatBoards, i * 256, 256);
         }
 
-        // 4. Allocate GPU VRAM (Device Pointers)
         CUdeviceptr d_partialBoards = new CUdeviceptr();
         cuMemAlloc(d_partialBoards, (long) numBoards * 256 * Sizeof.INT);
         cuMemcpyHtoD(d_partialBoards, Pointer.to(flatBoards), (long) numBoards * 256 * Sizeof.INT);
@@ -108,25 +112,22 @@ public class MasterSolverPBP implements Runnable {
         cuMemAlloc(d_physicalMapping, 1024L * Sizeof.INT);
         cuMemcpyHtoD(d_physicalMapping, Pointer.to(inventory.physicalMapping), 1024L * Sizeof.INT);
 
-        // Setup the WINNER Output Array
         CUdeviceptr d_solution = new CUdeviceptr();
         cuMemAlloc(d_solution, 256L * Sizeof.INT);
 
-        // Setup the Global Kill Switch Flag (starts at 0)
         int[] solvedFlag = { 0 };
         CUdeviceptr d_solvedFlag = new CUdeviceptr();
         cuMemAlloc(d_solvedFlag, Sizeof.INT);
         cuMemcpyHtoD(d_solvedFlag, Pointer.to(solvedFlag), Sizeof.INT);
 
-        // Setup the GPU High Score Tracker
         int[] gpuScore = { 0 };
         CUdeviceptr d_gpuHighScore = new CUdeviceptr();
         cuMemAlloc(d_gpuHighScore, Sizeof.INT);
         cuMemcpyHtoD(d_gpuHighScore, Pointer.to(gpuScore), Sizeof.INT);
+
         CUdeviceptr d_bestBoardOut = new CUdeviceptr();
         cuMemAlloc(d_bestBoardOut, 256L * Sizeof.INT);
 
-        // 5. Package the Arguments for C++
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards),
                 Pointer.to(new int[]{numBoards}),
@@ -139,36 +140,41 @@ public class MasterSolverPBP implements Runnable {
                 Pointer.to(d_bestBoardOut)
         );
 
-        // 6. Calculate Grid/Block sizes (50,000 threads)
         int threadsPerBlock = 256;
         int blocksPerGrid = (int) Math.ceil((double) numBoards / threadsPerBlock);
 
-        // 7. FIRE THE KERNEL!
-        System.out.println(Instant.now() + ": LAUNCHING CUDA KERNEL: " + blocksPerGrid + " Blocks, " + threadsPerBlock + " Threads.");
+        System.out.println("LAUNCHING CUDA KERNEL: " + blocksPerGrid + " Blocks, " + threadsPerBlock + " Threads.");
         long startTime = System.currentTimeMillis();
 
         cuLaunchKernel(function,
-                blocksPerGrid, 1, 1,      // Grid dimension
-                threadsPerBlock, 1, 1,    // Block dimension
-                0, null,                  // Shared memory size and stream
-                kernelParameters, null    // Kernel parameters
+                blocksPerGrid, 1, 1,
+                threadsPerBlock, 1, 1,
+                0, null,
+                kernelParameters, null
         );
-        cuCtxSynchronize(); // Wait for all 50,000 threads to finish!
+        cuCtxSynchronize();
+
+        long timeTaken = System.currentTimeMillis() - startTime;
+
+        cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
+        if (solvedFlag[0] == 1) {
+            System.out.println(">>> GPU FOUND THE SOLUTION IN " + timeTaken + "ms! <<<");
+            int[] winningBoard = new int[256];
+            cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
+            updateDisplay(buildLegacyBoard(winningBoard));
+            RecordManager.saveRecord(buildLegacyBoard(winningBoard), 256);
+            System.exit(0);
+        }
 
         cuMemcpyDtoH(Pointer.to(gpuScore), d_gpuHighScore, Sizeof.INT);
-        System.out.println(Instant.now() + ": GPU Batch Finished! Deepest dive this run: " + gpuScore[0] + " pieces.");
+        System.out.println("GPU Batch Finished in " + timeTaken + "ms! Deepest dive: " + gpuScore[0] + " pieces.");
 
         if (gpuScore[0] > deepestPos) {
             deepestPos = gpuScore[0];
-
-            // Pull the winning board out of VRAM
             int[] gpuWinningBoard = new int[256];
             cuMemcpyDtoH(Pointer.to(gpuWinningBoard), d_bestBoardOut, 256L * Sizeof.INT);
-
-            // Overwrite Java's memory with the GPU's masterpiece
             System.arraycopy(gpuWinningBoard, 0, bestBoard, 0, 256);
 
-            // Translate it, paint the screen, and permanently save the image and checkpoint!
             int[][] legacyBoard = buildLegacyBoard(bestBoard);
             updateDisplay(legacyBoard);
             RecordManager.saveRecord(legacyBoard, deepestPos);
@@ -176,24 +182,7 @@ public class MasterSolverPBP implements Runnable {
 
             System.out.println(">>> GPU BROKE THE RECORD! Image and Checkpoint permanently saved.");
         }
-        long timeTaken = System.currentTimeMillis() - startTime;
 
-        // 8. Check if the GPU won!
-        cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
-        if (solvedFlag[0] == 1) {
-            System.out.println(Instant.now() + ": >>> GPU FOUND THE SOLUTION IN " + timeTaken + "ms! <<<");
-            int[] winningBoard = new int[256];
-            cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
-
-            // Save the ultimate record!
-            updateDisplay(buildLegacyBoard(winningBoard));
-            RecordManager.saveRecord(buildLegacyBoard(winningBoard), 256);
-            System.exit(0);
-        } else {
-            System.out.println(Instant.now() + ": GPU exhausted all branches in " + timeTaken + "ms. No solution found on this run.");
-        }
-
-        // 9. Free VRAM to prevent memory leaks
         cuMemFree(d_partialBoards);
         cuMemFree(d_allOrientations);
         cuMemFree(d_physicalMapping);
@@ -203,33 +192,17 @@ public class MasterSolverPBP implements Runnable {
         cuMemFree(d_bestBoardOut);
     }
 
-    private boolean isValidPiece(int p) {
-        for(int i = 0; i < 1024; i++) {
-            if(inventory.allOrientations[i] == p) return true;
-        }
-        return false;
-    }
-
     @Override
     public void run() {
         System.out.println("Starting Piece-By-Piece (PBP) Solver...");
 
         flatBoard[119] = PieceUtils.pack(18, 12, 18, 3);
-        if (centerPhysicalIdx != -1) {
-            usedPhysicalPieces[centerPhysicalIdx] = true;
-        }
+        if (centerPhysicalIdx != -1) usedPhysicalPieces[centerPhysicalIdx] = true;
 
-        // Force the GUI to show the loaded checkpoint immediately
-        if (deepestPos > 0) {
-            updateDisplay(buildLegacyBoard(bestBoard));
-        }
+        if (deepestPos > 0) updateDisplay(buildLegacyBoard(bestBoard));
 
-        // Start the solver at the top-left corner (position 0)
-        if (solve(0)) {
-            System.out.println("SOLVED!");
-        } else {
-            System.out.println("Exhausted search space. No solution found.");
-        }
+        if (solve(0)) System.out.println("SOLVED!");
+        else System.out.println("Exhausted search space. No solution found.");
     }
 
     private boolean solve(int pos) {
@@ -237,38 +210,32 @@ public class MasterSolverPBP implements Runnable {
 
         // --- GPU HANDOFF TRIGGER ---
         if (pos == HANDOFF_DEPTH) {
-            // We reached depth 80! Save this board.
             int[] clonedBoard = new int[256];
             System.arraycopy(flatBoard, 0, clonedBoard, 0, 256);
             gpuSeedBoards.add(clonedBoard);
 
-            // Once we have 50,000 starting points, STOP THE CPU and fire the GPU!
-            if (gpuSeedBoards.size() >= 50000) {
+            // Send the cargo ship as soon as we have 10,000!
+            if (gpuSeedBoards.size() >= 10000) {
                 runGpuHandoff(gpuSeedBoards, HANDOFF_DEPTH);
-                gpuSeedBoards.clear(); // Clear memory after GPU finishes
-            }
+                gpuSeedBoards.clear();
 
-            // Force the CPU to backtrack and find a different path!
+                // We just shipped 10,000 seeds. Assume this timeline is dead!
+                // Force the CPU to violently rewind to a random piece between 10 and 20.
+                forceBacktrackTarget = 10 + rnd.nextInt(11);
+            }
             return false;
         }
 
-        // --- HIGH SCORE & RECORDS ---
+        if (pos == 256) return true;
+
+        // --- HIGH SCORE & INSTANT CHECKPOINT ---
         if (pos > deepestPos) {
             deepestPos = pos;
-
-            // 1. Lock the board into memory
             System.arraycopy(flatBoard, 0, bestBoard, 0, 256);
-
-            // 2. Translate it for the Visualizer
             int[][] legacyBoard = buildLegacyBoard(bestBoard);
             updateDisplay(legacyBoard);
-
-            // 3. Save the image to the Records folder
             RecordManager.saveRecord(legacyBoard, deepestPos);
-
-            // 4. INSTANTLY save the Checkpoint! (Timer removed)
             CheckpointManager.save(legacyBoard);
-            System.out.println(">>> PBP Checkpoint Permanently Locked at: " + deepestPos + " pieces");
         }
 
         int row = pos / 16;
@@ -298,7 +265,6 @@ public class MasterSolverPBP implements Runnable {
             int p = inventory.allOrientations[orientationIdx];
             int physicalIdx = inventory.physicalMapping[orientationIdx];
 
-            // --- THE FAST-FORWARD FIX ---
             if (flatResumeBoard[pos] != -1) {
                 if (p != flatResumeBoard[pos]) continue;
             }
@@ -306,6 +272,7 @@ public class MasterSolverPBP implements Runnable {
             if (usedPhysicalPieces[physicalIdx]) continue;
 
             if (matches(p, n_req, e_req, s_req, w_req)) {
+
                 flatBoard[pos] = p;
                 usedPhysicalPieces[physicalIdx] = true;
 
@@ -314,8 +281,22 @@ public class MasterSolverPBP implements Runnable {
 
                 if (solve(pos + 1)) return true;
 
+                // BACKTRACK!
                 flatBoard[pos] = -1;
                 usedPhysicalPieces[physicalIdx] = false;
+
+                // <--- NEW: STACK COLLAPSE LOGIC --->
+                if (forceBacktrackTarget != -1) {
+                    if (pos > forceBacktrackTarget) {
+                        // We haven't gone deep enough yet. Keep collapsing!
+                        return false;
+                    } else if (pos == forceBacktrackTarget) {
+                        // We arrived at the target! Turn off the jumper and resume normal solving.
+                        forceBacktrackTarget = -1;
+                        System.out.println(">>> Branch Jumper wiped the board back to piece " + pos + ". Exploring new timeline...");
+                    }
+                }
+
             }
         }
         return false;
@@ -335,6 +316,7 @@ public class MasterSolverPBP implements Runnable {
 
             int gRow = i / 16;
             int gCol = i % 16;
+
             int mIdx = (gRow / 4) * 4 + (gCol / 4);
             int pIdx = (gRow % 4) * 4 + (gCol % 4);
 

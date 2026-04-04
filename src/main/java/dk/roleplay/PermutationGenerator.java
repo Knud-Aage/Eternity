@@ -44,12 +44,6 @@ public class PermutationGenerator {
 
         backtrack(0, mIdx, current, macroConstraints, results, limit, order);
 
-//        if (mIdx == 0 && results.isEmpty()) {
-//            System.out.println("--- Macro 0: FAILED (No valid 4x4 configuration found) ---");
-//            System.out.println("DEBUG: The CPU got stuck at position " + deepestPos + " inside the 4x4 block.");
-//        } else if (mIdx == 0) {
-//            System.out.println("Found " + results.size() + " candidates for Macro 0");
-//        }
         return results;
     }
 

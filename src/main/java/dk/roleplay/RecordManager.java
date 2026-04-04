@@ -5,6 +5,9 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.PrintWriter;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
@@ -30,7 +33,9 @@ public class RecordManager {
 
         saveImage(mainBoard, baseName + ".png");
         saveText(mainBoard, baseName + ".csv");
-        System.out.println(">>> NEW RECORD! Saved Image and Data for " + piecesCount/16 + " pieces.");
+        String now = LocalDateTime.now()
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+        System.out.println(now + " >>> NEW RECORD! Saved Image and Data for " + piecesCount/16 + " pieces.");
     }
 
     private static void saveImage(int[][] mainBoard, String filename) {

@@ -1,5 +1,4 @@
 // --- DEVICE HELPER FUNCTIONS ---
-// These run purely on the graphics card. We extract the 8-bit color codes from the 32-bit packed integers.
 __device__ inline int getNorth(int p) { return (p >> 24) & 0xFF; }
 __device__ inline int getEast(int p)  { return (p >> 16) & 0xFF; }
 __device__ inline int getSouth(int p) { return (p >> 8)  & 0xFF; }
@@ -15,41 +14,45 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
 
 // --- MAIN PIECE-BY-PIECE KERNEL ---
 extern "C" __global__ void solvePBP(
-    int* d_partialBoards,      // Input: The 50,000 starting setups the CPU gave us
-    int numPartialBoards,      // How many boards are in the array
-    int startingPos,           // The index where the GPU should start solving (e.g., pos 150)
-    int* d_allOrientations,    // The 1024 array of packed piece colors
-    int* d_physicalMapping,    // The 1024 array mapping to physical IDs (0-255)
-    int* d_solution,           // Output: The winning 256-piece array
-    int* d_solvedFlag,          // Global flag so the winner can tell everyone else to stop!
-    int* d_gpuHighScore,        // Pointer to track the GPU's deepest run!
+    int* d_partialBoards,
+    int numPartialBoards,
+    int startingPos,
+    int* d_allOrientations,
+    int* d_physicalMapping,
+    int* d_solution,
+    int* d_solvedFlag,
+    int* d_gpuHighScore,
     int* d_bestBoardOut
 ) {
-    // Determine which partial board this specific thread is working on
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numPartialBoards) return;
 
-    // 1. Thread-Local Memory (Registers/L1 Cache)
     int board[256];
-    int pieceStack[256];       // Remembers which orientation (0-1023) we left off at for each position
-
-    // 256 bits representing physical pieces. 1 = Available, 0 = Used.
+    int pieceStack[256];
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
 
-    // 2. Initialize this thread's board from global memory
+    // --- NEW: PRE-CALCULATE PIECE COLORS FOR FAST AUDITING ---
+    // This allows the thread to instantly know what colors are left in the inventory
+    int physColors[256][4];
+    for (int i = 0; i < 1024; i++) {
+        int phys = d_physicalMapping[i];
+        int val = d_allOrientations[i];
+        physColors[phys][0] = getNorth(val);
+        physColors[phys][1] = getEast(val);
+        physColors[phys][2] = getSouth(val);
+        physColors[phys][3] = getWest(val);
+    }
+
     int offset = tid * 256;
     for (int i = 0; i < 256; i++) {
         board[i] = d_partialBoards[offset + i];
-        pieceStack[i] = 0; // Reset search stack
+        pieceStack[i] = 0;
 
-        // If the CPU pre-placed a piece here, mark it as USED in our bitboard
         if (i < startingPos && board[i] != -1) {
-            // We have to reverse-lookup the physical ID.
-            // (For speed, the CPU usually passes the initial bitboard, but we do it here for clarity)
             for(int o = 0; o < 1024; o++) {
                 if(d_allOrientations[o] == board[i]) {
                     int physId = d_physicalMapping[o];
-                    inventoryMask[physId / 64] &= ~(1ULL << (physId % 64)); // Mark Used
+                    inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
                     break;
                 }
             }
@@ -59,24 +62,15 @@ extern "C" __global__ void solvePBP(
     int pos = startingPos;
     int localMax = startingPos;
     int bestLocalBoard[256];
-
     unsigned int stepCounter = 0;
 
-    // 3. THE ITERATIVE BACKTRACKING LOOP (No Recursion!)
+    // 3. THE ITERATIVE BACKTRACKING LOOP
     while (pos >= startingPos && pos < 256) {
 
         stepCounter++;
-
-        // If a thread gets stuck in a massive maze, forcefully end it!
-        // (You can adjust this number up or down to change how often Java prints)
-        if (stepCounter > 5000000) {
-            break;
-        }
-
-        // Check if another thread already won. If so, immediately kill this thread.
+        if (stepCounter > 5000000) break; // Timebox Kill Switch
         if (*d_solvedFlag == 1) return;
 
-        // If we hit the pre-placed centerpiece at index 119, just skip over it
         if (pos == 119) {
             pos++;
             continue;
@@ -85,7 +79,6 @@ extern "C" __global__ void solvePBP(
         int row = pos / 16;
         int col = pos % 16;
 
-        // Dynamic Constraints (255 = Wildcard)
         int n_req = (row == 0) ? 0 : (board[pos - 16] != -1 ? getSouth(board[pos - 16]) : 255);
         int s_req = (row == 15) ? 0 : 255;
         int w_req = (col == 0) ? 0 : (board[pos - 1] != -1 ? getEast(board[pos - 1]) : 255);
@@ -94,55 +87,89 @@ extern "C" __global__ void solvePBP(
         bool foundPiece = false;
         int startIdx = pieceStack[pos];
 
-        // Search the inventory starting from where we left off
         for (int idx = startIdx; idx < 1024; idx++) {
             int physId = d_physicalMapping[idx];
 
-            // BITWISE CHECK: Is this physical piece available?
             if (inventoryMask[physId / 64] & (1ULL << (physId % 64))) {
 
                 int p = d_allOrientations[idx];
 
-                // MATCHING CHECK
                 if (matches(p, n_req, e_req, s_req, w_req)) {
 
-                    // IT FITS! Lock it in.
+                    // Temporarily place the piece to run the audit
                     board[pos] = p;
-                    pieceStack[pos] = idx + 1; // Remember to check the next piece if we backtrack here
-
-                    // Mark as USED
                     inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
 
+                    // --- THE LOOK-AHEAD HEURISTIC (Color Starvation) ---
+                    bool doomed = false;
+
+                    // Only run this heavy audit if we just finished a full row!
+                    if ((pos + 1) % 16 == 0 && (pos + 1) < 240) {
+                        int exposed[32] = {0};
+                        int available[32] = {0};
+
+                        // 1. Count exposed South colors of the row we just finished
+                        for (int i = (pos + 1) - 16; i <= pos; i++) {
+                            exposed[getSouth(board[i])]++;
+                        }
+
+                        // 2. Count the colors of all remaining unused pieces
+                        for (int pId = 0; pId < 256; pId++) {
+                            if (inventoryMask[pId / 64] & (1ULL << (pId % 64))) {
+                                available[physColors[pId][0]]++;
+                                available[physColors[pId][1]]++;
+                                available[physColors[pId][2]]++;
+                                available[physColors[pId][3]]++;
+                            }
+                        }
+
+                        // 3. The Kill Switch! (Ignore Color 0, which is the border)
+                        for (int c = 1; c < 32; c++) {
+                            if (exposed[c] > available[c]) {
+                                doomed = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (doomed) {
+                        // Starvation detected! Undo this piece and try the next one in the inventory.
+                        board[pos] = -1;
+                        inventoryMask[physId / 64] |= (1ULL << (physId % 64));
+                        continue;
+                    }
+                    // --- END HEURISTIC ---
+
+                    // The piece passed the audit! Lock it in.
+                    pieceStack[pos] = idx + 1;
                     foundPiece = true;
-                    pos++; // Move forward!
+                    pos++;
+
+                    // Snapshot the new record!
                     if (pos > localMax) {
                         localMax = pos;
-                        for (int i = 0; i < pos; i++) {
-                            bestLocalBoard[i] = board[i];
-                        }
-                    }                    break;
+                        for (int i = 0; i < pos; i++) bestLocalBoard[i] = board[i];
+                    }
+
+                    break;
                 }
             }
         }
 
-        // BACKTRACKING: No pieces fit in this spot.
         if (!foundPiece) {
-            pieceStack[pos] = 0; // Reset search for this spot
-            pos--;               // Step backwards
+            pieceStack[pos] = 0;
+            pos--;
 
-            // Skip back over the centerpiece if we hit it in reverse
             if (pos == 119) pos--;
 
-            // Un-mark the piece we just removed so it becomes AVAILABLE again
             if (pos >= startingPos) {
                 int pToUndo = board[pos];
                 board[pos] = -1;
 
-                // Find physical ID to unmark
                 for(int o = 0; o < 1024; o++) {
                     if(d_allOrientations[o] == pToUndo) {
                         int physId = d_physicalMapping[o];
-                        inventoryMask[physId / 64] |= (1ULL << (physId % 64)); // Mark Available
+                        inventoryMask[physId / 64] |= (1ULL << (physId % 64));
                         break;
                     }
                 }
@@ -152,30 +179,19 @@ extern "C" __global__ void solvePBP(
 
     // 4. WIN CONDITION
     if (pos == 256) {
-        // Atomic lock to ensure only the first thread to finish writes the solution
         if (atomicExch(d_solvedFlag, 1) == 0) {
-            for (int i = 0; i < 256; i++) {
-                d_solution[i] = board[i];
-            }
+            for (int i = 0; i < 256; i++) d_solution[i] = board[i];
         }
     }
-    // <--- NEW: Safely push the thread's best score to the global GPU scoreboard! --->
-     int currentMax = *d_gpuHighScore;
-     while (localMax > currentMax) {
-         // If the global high score hasn't changed since we checked, update it!
-         if (atomicCAS(d_gpuHighScore, currentMax, localMax) == currentMax) {
 
-             // We hold the lock! Copy our snapshot to the global output array.
-             for (int i = 0; i < localMax; i++) {
-                 d_bestBoardOut[i] = bestLocalBoard[i];
-             }
-             // Fill the rest of the array with -1 so Java doesn't get confused
-             for (int i = localMax; i < 256; i++) {
-                 d_bestBoardOut[i] = -1;
-             }
-             break; // We successfully submitted our score, exit the loop!
-         }
-         // If another thread beat us to it, refresh the currentMax and try again
-         currentMax = *d_gpuHighScore;
-     }
+    // 5. COMPARE-AND-SWAP GATE
+    int currentMax = *d_gpuHighScore;
+    while (localMax > currentMax) {
+        if (atomicCAS(d_gpuHighScore, currentMax, localMax) == currentMax) {
+            for (int i = 0; i < localMax; i++) d_bestBoardOut[i] = bestLocalBoard[i];
+            for (int i = localMax; i < 256; i++) d_bestBoardOut[i] = -1;
+            break;
+        }
+        currentMax = *d_gpuHighScore;
+    }
 }
