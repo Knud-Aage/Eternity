@@ -2,99 +2,77 @@ package dk.roleplay;
 
 import javax.swing.*;
 import java.awt.*;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Random;
 
 public class BoardVisualizer extends JPanel {
-    private static final int PIECE_SIZE = 40; // Adjusted for better fit
-    private static final Map<Integer, Color> COLORS = new HashMap<>();
+    private final int[][] board;
+    private final int TILE_SIZE = 45;
 
-    static {
-        COLORS.put(0, Color.DARK_GRAY); // Border color - dark gray, not black
-        COLORS.put(PieceUtils.WILDCARD, Color.MAGENTA);
-        Random r = new Random(123);
-        for (int i = 1; i <= 255; i++) {
-            COLORS.put(i, new Color(r.nextInt(200) + 55, r.nextInt(200) + 55, r.nextInt(200) + 55));
-        }
-    }
-
-    private final int[][] mainBoardRef;
-
-    public BoardVisualizer(int[][] mainBoardRef) {
-        this.mainBoardRef = mainBoardRef;
-        setPreferredSize(new Dimension(16 * PIECE_SIZE, 16 * PIECE_SIZE));
+    public BoardVisualizer(int[][] board) {
+        this.board = board;
+        setPreferredSize(new Dimension(16 * TILE_SIZE, 16 * TILE_SIZE));
         setBackground(new Color(40, 40, 40));
     }
 
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);
-        Graphics2D g2d = (Graphics2D) g;
-        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        Graphics2D g2 = (Graphics2D) g;
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-        for (int m = 0; m < 16; m++) {
-            int[] tile = mainBoardRef[m];
-            
-            // Macro-tile coordinates (4x4 grid of macro-tiles)
-            int mRow = m / 4;
-            int mCol = m % 4; // FIX: Corrected from m / 4 to m % 4
-            
-            int xOffset = mCol * 4 * PIECE_SIZE;
-            int yOffset = mRow * 4 * PIECE_SIZE;
-
-            if (tile == null) {
-                g2d.setColor(new Color(60, 60, 60));
-                g2d.fillRect(xOffset, yOffset, PIECE_SIZE * 4, PIECE_SIZE * 4);
-                g2d.setColor(new Color(80, 80, 80));
-                g2d.drawRect(xOffset, yOffset, PIECE_SIZE * 4, PIECE_SIZE * 4);
-                continue;
-            }
-
-            // Draw each piece in the 4x4 macro-tile
-            for (int p = 0; p < 16; p++) {
-                int pRow = p / 4;
-                int pCol = p % 4;
-                
-                int x = xOffset + (pCol * PIECE_SIZE);
-                int y = yOffset + (pRow * PIECE_SIZE);
-                
-                drawPiece(g2d, x, y, tile[p]);
+        for (int r = 0; r < 16; r++) {
+            if (board[r] == null) continue;
+            for (int c = 0; c < 16; c++) {
+                int p = board[r][c];
+                if (p != -1 && p != PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD)) {
+                    drawPiece(g2, c * TILE_SIZE, r * TILE_SIZE, p);
+                }
             }
         }
     }
 
-    private void drawPiece(Graphics2D g2d, int x, int y, int piece) {
-        if (piece == PieceUtils.WILDCARD) {
-            g2d.setColor(new Color(100, 100, 100, 50));
-            g2d.fillRect(x, y, PIECE_SIZE, PIECE_SIZE);
-            g2d.setColor(Color.BLACK);
-            g2d.drawRect(x, y, PIECE_SIZE, PIECE_SIZE);
-            return;
+    private void drawPiece(Graphics2D g2, int x, int y, int piece) {
+        int n = PieceUtils.getNorth(piece);
+        int e = PieceUtils.getEast(piece);
+        int s = PieceUtils.getSouth(piece);
+        int w = PieceUtils.getWest(piece);
+
+        int cx = x + TILE_SIZE / 2;
+        int cy = y + TILE_SIZE / 2;
+
+        // Draw solid, clean triangles using the official color palette
+        g2.setColor(getBackgroundColor(n));
+        g2.fillPolygon(new int[]{x, x + TILE_SIZE, cx}, new int[]{y, y, cy}, 3);
+
+        g2.setColor(getBackgroundColor(e));
+        g2.fillPolygon(new int[]{x + TILE_SIZE, x + TILE_SIZE, cx}, new int[]{y, y + TILE_SIZE, cy}, 3);
+
+        g2.setColor(getBackgroundColor(s));
+        g2.fillPolygon(new int[]{x, x + TILE_SIZE, cx}, new int[]{y + TILE_SIZE, y + TILE_SIZE, cy}, 3);
+
+        g2.setColor(getBackgroundColor(w));
+        g2.fillPolygon(new int[]{x, x, cx}, new int[]{y, y + TILE_SIZE, cy}, 3);
+
+        // Draw the subtle black grid lines
+        g2.setColor(new Color(30, 30, 30));
+        g2.drawRect(x, y, TILE_SIZE, TILE_SIZE);
+        g2.drawLine(x, y, x + TILE_SIZE, y + TILE_SIZE);
+        g2.drawLine(x, y + TILE_SIZE, x + TILE_SIZE, y);
+    }
+
+    private Color getBackgroundColor(int val) {
+        switch (val) {
+            case 0: return new Color(100, 105, 110); // Border Grey
+            case 1: case 17: return new Color(100, 200, 230); // Light Blue
+            case 2: case 6: case 13: return new Color(230, 130, 180); // Light Pink
+            case 3: case 9: case 15: return new Color(80, 180, 100); // Green
+            case 4: case 12: case 20: return new Color(40, 60, 120); // Dark Blue
+            case 5: case 19: return new Color(240, 150, 50); // Orange
+            case 7: case 8: return new Color(130, 80, 160); // Purple
+            case 10: return new Color(80, 100, 200); // Royal Blue
+            case 11: case 14: case 18: return new Color(240, 220, 80); // Yellow
+            case 16: case 22: return new Color(160, 100, 80); // Brown
+            case 21: return new Color(180, 60, 100); // Dark Pink
+            default: return Color.BLACK;
         }
-
-        int cx = x + (PIECE_SIZE / 2), cy = y + (PIECE_SIZE / 2);
-        int n = PieceUtils.getNorth(piece), e = PieceUtils.getEast(piece);
-        int s = PieceUtils.getSouth(piece), w = PieceUtils.getWest(piece);
-
-        // North triangle
-        g2d.setColor(COLORS.getOrDefault(n, Color.GRAY));
-        g2d.fillPolygon(new int[]{x, x + PIECE_SIZE, cx}, new int[]{y, y, cy}, 3);
-        
-        // East triangle
-        g2d.setColor(COLORS.getOrDefault(e, Color.GRAY));
-        g2d.fillPolygon(new int[]{x + PIECE_SIZE, x + PIECE_SIZE, cx}, new int[]{y, y + PIECE_SIZE, cy}, 3);
-        
-        // South triangle
-        g2d.setColor(COLORS.getOrDefault(s, Color.GRAY));
-        g2d.fillPolygon(new int[]{x, x + PIECE_SIZE, cx}, new int[]{y + PIECE_SIZE, y + PIECE_SIZE, cy}, 3);
-        
-        // West triangle
-        g2d.setColor(COLORS.getOrDefault(w, Color.GRAY));
-        g2d.fillPolygon(new int[]{x, x, cx}, new int[]{y, y + PIECE_SIZE, cy}, 3);
-
-        // Outline
-        g2d.setColor(new Color(0, 0, 0, 100));
-        g2d.drawRect(x, y, PIECE_SIZE, PIECE_SIZE);
     }
 }
