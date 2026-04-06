@@ -58,6 +58,10 @@ public class Main {
         SwingUtilities.invokeLater(() -> {
             JFrame frame = new JFrame("Eternity II Solver");
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+
+            // <--- NEW: Force the window to open maximized! --->
+            frame.setExtendedState(JFrame.MAXIMIZED_BOTH);
+
             BoardVisualizer viz = new BoardVisualizer(currentDisplayBoard);
             frame.add(viz);
             frame.pack();
