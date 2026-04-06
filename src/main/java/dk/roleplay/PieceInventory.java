@@ -80,18 +80,4 @@ public class PieceInventory {
         // Internal tabs and blanks MUST sum to 23
         return (req + pieceColor == 23);
     }
-//    public List<Integer> getPoolFor(int mIdx, int pIdx) {
-//        int mRow = mIdx / 4, mCol = mIdx % 4;
-//        int r = pIdx / 4, c = pIdx % 4;
-//        int globalRow = mRow * 4 + r;
-//        int globalCol = mCol * 4 + c;
-//
-//        boolean n = (globalRow == 0), s = (globalRow == 15), w = (globalCol == 0), e = (globalCol == 15);
-//        int b = 0;
-//        if (n) b++; if (s) b++; if (w) b++; if (e) b++;
-//
-//        if (b == 2) return corners;
-//        if (b == 1) return edges;
-//        return interior;
-//    }
 }

@@ -4,14 +4,88 @@ __device__ inline int getEast(int p)  { return (p >> 16) & 0xFF; }
 __device__ inline int getSouth(int p) { return (p >> 8)  & 0xFF; }
 __device__ inline int getWest(int p)  { return (p)       & 0xFF; }
 
-__device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req) {
-    if (n_req != 255 && getNorth(p) != n_req) return false;
-    if (e_req != 255 && getEast(p)  != e_req) return false;
-    if (s_req != 255 && getSouth(p) != s_req) return false;
-    if (w_req != 255 && getWest(p)  != w_req) return false;
+// <--- NEW: Passed row and col into the matches function --->
+// __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req, int row, int col) {
+//     int n = getNorth(p);
+//     int e = getEast(p);
+//     int s = getSouth(p);
+//     int w = getWest(p);
+//
+//     // 1. Check if the piece physically fits the adjacent placed pieces
+//     if (n_req != 255 && n != n_req) return false;
+//     if (e_req != 255 && e != e_req) return false;
+//     if (s_req != 255 && s != s_req) return false;
+//     if (w_req != 255 && w != w_req) return false;
+//
+//     // 2. THE ABSOLUTE DOMAIN RULES (Derived from the official palette)
+//
+//     // NORTH Edge
+//     if (row == 0) {
+//         if (n != 0) return false; // Top edge MUST be grey
+//     } else {
+//         if (col == 0 || col == 15) {
+//             if (n < 1 || n > 5) return false; // Vertical border track MUST be 1-5
+//         } else {
+//             if (n < 6) return false; // True interior MUST be 6 or higher
+//         }
+//     }
+//
+//     // SOUTH Edge
+//     if (row == 15) {
+//         if (s != 0) return false; // Bottom edge MUST be grey
+//     } else {
+//         if (col == 0 || col == 15) {
+//             if (s < 1 || s > 5) return false; // Vertical border track
+//         } else {
+//             if (s < 6) return false; // True interior
+//         }
+//     }
+//
+//     // WEST Edge
+//     if (col == 0) {
+//         if (w != 0) return false; // Left edge MUST be grey
+//     } else {
+//         if (row == 0 || row == 15) {
+//             if (w < 1 || w > 5) return false; // Horizontal border track
+//         } else {
+//             if (w < 6) return false; // True interior
+//         }
+//     }
+//
+//     // EAST Edge
+//     if (col == 15) {
+//         if (e != 0) return false; // Right edge MUST be grey
+//     } else {
+//         if (row == 0 || row == 15) {
+//             if (e < 1 || e > 5) return false; // Horizontal border track
+//         } else {
+//             if (e < 6) return false; // True interior
+//         }
+//     }
+//
+//     return true;
+// }
+__device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req, int row, int col) {
+    int n = getNorth(p);
+    int e = getEast(p);
+    int s = getSouth(p);
+    int w = getWest(p);
+
+    // 1. Check if the piece physically fits the adjacent placed pieces
+    if (n_req != 255 && n != n_req) return false;
+    if (e_req != 255 && e != e_req) return false;
+    if (s_req != 255 && s != s_req) return false;
+    if (w_req != 255 && w != w_req) return false;
+
+    // 2. THE BORDER PATROL (Grey edges ONLY)
+    // We removed the 1-5 / 6-22 rule so we don't accidentally reject valid CSV pieces!
+    if (row != 0 && n == 0) return false;
+    if (col != 15 && e == 0) return false;
+    if (row != 15 && s == 0) return false;
+    if (col != 0 && w == 0) return false;
+
     return true;
 }
-
 // --- MAIN PIECE-BY-PIECE KERNEL ---
 extern "C" __global__ void solvePBP(
     int* d_partialBoards,
@@ -31,8 +105,6 @@ extern "C" __global__ void solvePBP(
     int pieceStack[256];
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
 
-    // --- NEW: PRE-CALCULATE PIECE COLORS FOR FAST AUDITING ---
-    // This allows the thread to instantly know what colors are left in the inventory
     int physColors[256][4];
     for (int i = 0; i < 1024; i++) {
         int phys = d_physicalMapping[i];
@@ -64,14 +136,13 @@ extern "C" __global__ void solvePBP(
     int bestLocalBoard[256];
     unsigned int stepCounter = 0;
 
-    // 3. THE ITERATIVE BACKTRACKING LOOP
     while (pos >= startingPos && pos < 256) {
 
         stepCounter++;
-        if (stepCounter > 5000000) break; // Timebox Kill Switch
+        if (stepCounter > 5000000) break;
         if (*d_solvedFlag == 1) return;
 
-        if (pos == 119) {
+        if (pos == 135) {
             pos++;
             continue;
         }
@@ -94,26 +165,22 @@ extern "C" __global__ void solvePBP(
 
                 int p = d_allOrientations[idx];
 
-                if (matches(p, n_req, e_req, s_req, w_req)) {
+                // <--- NEW: Passed row and col here! --->
+                if (matches(p, n_req, e_req, s_req, w_req, row, col)) {
 
-                    // Temporarily place the piece to run the audit
                     board[pos] = p;
                     inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
 
-                    // --- THE LOOK-AHEAD HEURISTIC (Color Starvation) ---
                     bool doomed = false;
 
-                    // Only run this heavy audit if we just finished a full row!
                     if ((pos + 1) % 16 == 0 && (pos + 1) < 240) {
                         int exposed[32] = {0};
                         int available[32] = {0};
 
-                        // 1. Count exposed South colors of the row we just finished
                         for (int i = (pos + 1) - 16; i <= pos; i++) {
                             exposed[getSouth(board[i])]++;
                         }
 
-                        // 2. Count the colors of all remaining unused pieces
                         for (int pId = 0; pId < 256; pId++) {
                             if (inventoryMask[pId / 64] & (1ULL << (pId % 64))) {
                                 available[physColors[pId][0]]++;
@@ -123,7 +190,6 @@ extern "C" __global__ void solvePBP(
                             }
                         }
 
-                        // 3. The Kill Switch! (Ignore Color 0, which is the border)
                         for (int c = 1; c < 32; c++) {
                             if (exposed[c] > available[c]) {
                                 doomed = true;
@@ -133,19 +199,15 @@ extern "C" __global__ void solvePBP(
                     }
 
                     if (doomed) {
-                        // Starvation detected! Undo this piece and try the next one in the inventory.
                         board[pos] = -1;
                         inventoryMask[physId / 64] |= (1ULL << (physId % 64));
                         continue;
                     }
-                    // --- END HEURISTIC ---
 
-                    // The piece passed the audit! Lock it in.
                     pieceStack[pos] = idx + 1;
                     foundPiece = true;
                     pos++;
 
-                    // Snapshot the new record!
                     if (pos > localMax) {
                         localMax = pos;
                         for (int i = 0; i < pos; i++) bestLocalBoard[i] = board[i];
@@ -160,7 +222,7 @@ extern "C" __global__ void solvePBP(
             pieceStack[pos] = 0;
             pos--;
 
-            if (pos == 119) pos--;
+            if (pos == 135) pos--;
 
             if (pos >= startingPos) {
                 int pToUndo = board[pos];
@@ -177,14 +239,12 @@ extern "C" __global__ void solvePBP(
         }
     }
 
-    // 4. WIN CONDITION
     if (pos == 256) {
         if (atomicExch(d_solvedFlag, 1) == 0) {
             for (int i = 0; i < 256; i++) d_solution[i] = board[i];
         }
     }
 
-    // 5. COMPARE-AND-SWAP GATE
     int currentMax = *d_gpuHighScore;
     while (localMax > currentMax) {
         if (atomicCAS(d_gpuHighScore, currentMax, localMax) == currentMax) {

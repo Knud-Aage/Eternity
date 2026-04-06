@@ -7,16 +7,24 @@ import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Main {
+    // =====================================================================
+    // --- ETERNITY II CONFIGURATION ZONE ---
+    // The exact array index of your center piece (139th piece = Index 138)
+    private static final int CENTER_PIECE_INDEX = 138;
+
+    // The official center piece must be oriented correctly.
+    // Change this to spin the piece: 0 = As is, 1 = 90° Clockwise, 2 = 180°, 3 = 270°
+    private static final int CENTER_PIECE_ROTATION = 1;
+    // =====================================================================
+
     private static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
 
     public static void main(String[] args) {
         // --- 1. SHOW THE STARTUP GUI ---
-        // (If you already have a JFrame for your visualizer, you can pass it here instead of null)
         StartupDialog dialog = new StartupDialog(null);
-        dialog.setVisible(true); // This pauses the program until the user clicks Start
+        dialog.setVisible(true);
 
-        // If the user closed the window without clicking start, exit safely
         if (!dialog.isStartClicked()) {
             System.out.println("Setup cancelled. Exiting...");
             System.exit(0);
@@ -24,27 +32,36 @@ public class Main {
 
         System.out.println("Loading Eternity II Engine...");
 
-
         // --- 2. INITIALIZE INVENTORY ---
         int[] basePieces = loadPieces();
         PieceInventory inventory = new PieceInventory(basePieces);
-        // (Make sure you load your pieces.csv here just like you always do)
 
         // --- 3. HARDWARE SELECTION ---
         CandidateValidator validator;
         if (dialog.isUseGpu()) {
             System.out.println("Hardware: GPU Validator selected.");
-            validator = new GpuValidator(); // Your CUDA inspector
+            validator = new GpuValidator();
         } else {
             System.out.println("Hardware: CPU Validator selected.");
-            validator = new CpuValidator(); // Your instant Pass-Through CPU
+            validator = new CpuValidator();
         }
 
         // --- 4. STRATEGY SELECTION & LAUNCH ---
         Runnable solverTask;
         if (dialog.isUsePbp()) {
             System.out.println("Strategy: Piece-by-Piece (Linear).");
-            solverTask = new MasterSolverPBP(inventory);
+
+            // Extract the true center piece and apply any necessary rotations!
+            int targetPiece = basePieces[CENTER_PIECE_INDEX];
+            for (int r = 0; r < CENTER_PIECE_ROTATION; r++) {
+                int n = PieceUtils.getNorth(targetPiece);
+                int e = PieceUtils.getEast(targetPiece);
+                int s = PieceUtils.getSouth(targetPiece);
+                int w = PieceUtils.getWest(targetPiece);
+                targetPiece = PieceUtils.pack(w, n, e, s); // Rotate Clockwise
+            }
+
+            solverTask = new MasterSolverPBP(inventory, targetPiece);
 
             if (dialog.isUseGpu()) {
                 System.out.println("Hardware: GPU CUDA Handoff Enabled!");
@@ -101,13 +118,13 @@ public class Main {
                     continue;
                 }
 
-                // CRITICAL FIX: The CSV is Top, Bottom, Left, Right
-                int n = Integer.parseInt(pts[0].trim()); // Top (North)
-                int s = Integer.parseInt(pts[1].trim()); // Bottom (South)
-                int w = Integer.parseInt(pts[2].trim()); // Left (West)
-                int e = Integer.parseInt(pts[3].trim()); // Right (East)
+                // --- CRITICAL FIX: NEW CSV FORMAT (East, South, West, North) ---
+                int e = Integer.parseInt(pts[0].trim()); // Column 1: East
+                int s = Integer.parseInt(pts[1].trim()); // Column 2: South
+                int w = Integer.parseInt(pts[2].trim()); // Column 3: West
+                int n = Integer.parseInt(pts[3].trim()); // Column 4: North
 
-                // Pack them into our 32-bit integer in the correct Clockwise order
+                // Pack them into our 32-bit integer in the engine's standard (N, E, S, W) order
                 pieces[i++] = PieceUtils.pack(n, e, s, w);
             }
             if (i == 256) {
