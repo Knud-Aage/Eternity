@@ -60,7 +60,6 @@ public class PieceInventory {
         System.out.println(" - " + interior.size() + " oriented interior pieces");
     }
 
-    // --- UPDATED MATCHING RULE ---
     private boolean matches(int p, int n_req, int e_req, int s_req, int w_req) {
         if (!colorMatches(n_req, PieceUtils.getNorth(p))) return false;
         if (!colorMatches(e_req, PieceUtils.getEast(p))) return false;

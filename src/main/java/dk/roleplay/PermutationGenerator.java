@@ -15,7 +15,6 @@ public class PermutationGenerator {
     public PermutationGenerator(PieceInventory inventory, boolean[] used) {
         this.inventory = inventory;
         this.physicalUsed = used;
-// --- ADD THIS SEARCH BLOCK ---
         // Find the physical ID of the centerpiece so we can protect it
         int targetPiece = PieceUtils.pack(18, 12, 18, 3);
         for (int i = 0; i < 1024; i++) {

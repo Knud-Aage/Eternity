@@ -7,9 +7,6 @@ public class CpuValidator implements CandidateValidator {
 
     @Override
     public List<int[]> validate(int[] candidateBatch, int numPermutations) {
-        // Because our PermutationGenerator is now hyper-optimized and checks all
-        // 360-degree internal seams dynamically, every candidate it produces
-        // is ALREADY mathematically perfect!
         // We bypass redundant checks and just unpack the 1D flat array.
 
         List<int[]> validCandidates = new ArrayList<>(numPermutations);

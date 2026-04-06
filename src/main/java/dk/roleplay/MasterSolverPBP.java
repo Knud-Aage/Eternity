@@ -142,15 +142,6 @@ public class MasterSolverPBP implements Runnable {
         int row = pos / 16;
         int col = pos % 16;
 
-        // --- CONSTRAINT LOGIC FIX ---
-        // In a top-to-bottom, left-to-right fill, only the NORTH and WEST neighbors
-        // are already placed. South and East are not placed yet, so they are wildcards
-        // UNLESS we are on the border (where we need color=0).
-        //
-        // The original code checked flatBoard[pos+16] and flatBoard[pos+1] for s_req/e_req,
-        // which are unplaced (-1) most of the time — making constraints appear as wildcards
-        // and allowing mismatched edges that cause the solver to get stuck later.
-
         int n_req, w_req, s_req, e_req;
 
         // North: piece above is always placed (or board border)

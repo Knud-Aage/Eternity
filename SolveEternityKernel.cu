@@ -4,67 +4,6 @@ __device__ inline int getEast(int p)  { return (p >> 16) & 0xFF; }
 __device__ inline int getSouth(int p) { return (p >> 8)  & 0xFF; }
 __device__ inline int getWest(int p)  { return (p)       & 0xFF; }
 
-// <--- NEW: Passed row and col into the matches function --->
-// __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req, int row, int col) {
-//     int n = getNorth(p);
-//     int e = getEast(p);
-//     int s = getSouth(p);
-//     int w = getWest(p);
-//
-//     // 1. Check if the piece physically fits the adjacent placed pieces
-//     if (n_req != 255 && n != n_req) return false;
-//     if (e_req != 255 && e != e_req) return false;
-//     if (s_req != 255 && s != s_req) return false;
-//     if (w_req != 255 && w != w_req) return false;
-//
-//     // 2. THE ABSOLUTE DOMAIN RULES (Derived from the official palette)
-//
-//     // NORTH Edge
-//     if (row == 0) {
-//         if (n != 0) return false; // Top edge MUST be grey
-//     } else {
-//         if (col == 0 || col == 15) {
-//             if (n < 1 || n > 5) return false; // Vertical border track MUST be 1-5
-//         } else {
-//             if (n < 6) return false; // True interior MUST be 6 or higher
-//         }
-//     }
-//
-//     // SOUTH Edge
-//     if (row == 15) {
-//         if (s != 0) return false; // Bottom edge MUST be grey
-//     } else {
-//         if (col == 0 || col == 15) {
-//             if (s < 1 || s > 5) return false; // Vertical border track
-//         } else {
-//             if (s < 6) return false; // True interior
-//         }
-//     }
-//
-//     // WEST Edge
-//     if (col == 0) {
-//         if (w != 0) return false; // Left edge MUST be grey
-//     } else {
-//         if (row == 0 || row == 15) {
-//             if (w < 1 || w > 5) return false; // Horizontal border track
-//         } else {
-//             if (w < 6) return false; // True interior
-//         }
-//     }
-//
-//     // EAST Edge
-//     if (col == 15) {
-//         if (e != 0) return false; // Right edge MUST be grey
-//     } else {
-//         if (row == 0 || row == 15) {
-//             if (e < 1 || e > 5) return false; // Horizontal border track
-//         } else {
-//             if (e < 6) return false; // True interior
-//         }
-//     }
-//
-//     return true;
-// }
 __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req, int row, int col) {
     int n = getNorth(p);
     int e = getEast(p);

@@ -27,7 +27,8 @@ public class ConstraintBuilder {
             if (globalCol == 0)  applyWest(constraints, i, PieceUtils.BORDER_COLOR);
             if (globalCol == 15) applyEast(constraints, i, PieceUtils.BORDER_COLOR);
         }
-// 2. Adjacent Macro-Tile Borders (Dynamic Omnidirectional Constraints)
+
+        // 2. Adjacent Macro-Tile Borders (Dynamic Omnidirectional Constraints)
 
         // Match ABOVE neighbor
         if (mRow > 0 && mainBoard[macroIdx - 4] != null) {
