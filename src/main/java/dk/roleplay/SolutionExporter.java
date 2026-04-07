@@ -8,7 +8,18 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
 
+/**
+ * Provides functionality to export the puzzle board state to external files.
+ * This class generates a formatted text map showing the bit-packed representation
+ * of pieces and a PNG image that visualizes the board using the {@link BoardVisualizer}.
+ */
 public class SolutionExporter {
+    /**
+     * Saves the current board state to both a text file (.txt) and an image file (.png).
+     *
+     * @param board    The 16x16 board state represented as a 2D array of macro-tiles.
+     * @param baseName The base filename (without extension) to use for the exported files.
+     */
     public static void save(int[][] board, String baseName) {
         saveTextMap(board, baseName + ".txt");
         saveImage(board, baseName + ".png");

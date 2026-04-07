@@ -5,11 +5,21 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+/**
+ * CPU-based implementation of the CandidateValidator.
+ * Uses parallel streams to perform edge-match validation on batches of candidates.
+ */
 public class CpuValidator implements CandidateValidator {
 
+    /**
+     * Validates a batch of candidates using CPU parallel processing.
+     * 
+     * @param candidates Flattened array of 16-piece sets
+     * @param numPermutations Number of 4x4 sets in the candidates array
+     * @return List of internally valid 4x4 macro-tiles
+     */
     @Override
     public List<int[]> validate(int[] candidates, int numPermutations) {
-        // Parallel stream for maximum CPU performance
         return IntStream.range(0, numPermutations)
             .parallel()
             .filter(i -> isInternallyValid(candidates, i * 16))
@@ -22,7 +32,6 @@ public class CpuValidator implements CandidateValidator {
     }
 
     private boolean isInternallyValid(int[] candidates, int base) {
-        // Internal Horizontal Checks
         for (int r = 0; r < 4; r++) {
             for (int c = 0; c < 3; c++) {
                 int leftIdx = base + (r * 4) + c;
@@ -31,7 +40,6 @@ public class CpuValidator implements CandidateValidator {
             }
         }
 
-        // Internal Vertical Checks
         for (int c = 0; c < 4; c++) {
             for (int r = 0; r < 3; r++) {
                 int topIdx = base + (r * 4) + c;

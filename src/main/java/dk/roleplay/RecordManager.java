@@ -12,6 +12,11 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
 
+/**
+ * Manages the persistence of puzzle solver records.
+ * Provides functionality to save the current board state both as a visual PNG image
+ * and a structured CSV data file for later analysis or verification.
+ */
 public class RecordManager {
     private static final int PIECE_SIZE = 50;
     private static final Map<Integer, Color> COLORS = new HashMap<>();
@@ -27,6 +32,13 @@ public class RecordManager {
         new File("records").mkdirs(); // Ensure the save folder exists
     }
 
+    /**
+     * Saves a complete record of the current board state, including an image representation
+     * and a CSV data file.
+     *
+     * @param mainBoard    The 16x16 grid of pieces, organized as macro-tiles.
+     * @param macrosPlaced The number of macro-tiles successfully placed on the board.
+     */
     public static synchronized void saveRecord(int[][] mainBoard, int macrosPlaced) {
         int piecesCount = macrosPlaced * 16;
         String baseName = "records/Record_" + piecesCount/16 + "Pieces";

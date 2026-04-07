@@ -7,11 +7,26 @@ import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.io.File;
 
+/**
+ * A graphical component responsible for rendering the Eternity II puzzle board.
+ * This panel manages a 16x16 grid of puzzle pieces, handling the rendering of
+ * piece patterns through loaded image assets or fallback geometric shapes.
+ * It supports dynamic updates to the board state and provides a visual
+ * representation of the solver's progress.
+ */
 public class BoardVisualizer extends JPanel {
     private final int[][] board;
     // Pre-rotated images: [patternId 1-22][rotation 0=N, 1=E, 2=S, 3=W]
     private final BufferedImage[][] rotatedImages = new BufferedImage[23][4];
 
+    /**
+     * Constructs a new BoardVisualizer with a reference to the puzzle board.
+     * This constructor sets up the initial UI environment, including the background
+     * color, and triggers the loading and rotation of pattern images from disk.
+     *
+     * @param board A 16x16 integer array representing the shared state of the puzzle board.
+     *              Each integer represents a bit-packed puzzle piece.
+     */
     public BoardVisualizer(int[][] board) {
         this.board = board;
         setBackground(new Color(30, 30, 30));

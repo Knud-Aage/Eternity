@@ -6,16 +6,22 @@ import java.io.FileReader;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Main entry point for the Eternity II Solver application.
+ * Orchestrates piece loading, hardware initialization, and solver execution.
+ */
 public class Main {
-    // =====================================================================
-    // --- ETERNITY II CONFIGURATION ZONE ---
     private static final int CENTER_PIECE_INDEX = 138;
-    private static final int CENTER_PIECE_ROTATION = 2; // Set to your best match!
-    // =====================================================================
+    private static final int CENTER_PIECE_ROTATION = 2;
 
     private static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
 
+    /**
+     * Application main method.
+     * 
+     * @param args Command line arguments
+     */
     public static void main(String[] args) {
         StartupDialog dialog = new StartupDialog(null);
         dialog.setVisible(true);
@@ -32,7 +38,6 @@ public class Main {
 
         Runnable solverTask;
 
-        // We will now default to the superior PBP solver for BOTH CPU and GPU
         System.out.println("Strategy: Piece-by-Piece (Linear).");
 
         int targetPiece = basePieces[CENTER_PIECE_INDEX];
@@ -58,8 +63,6 @@ public class Main {
         SwingUtilities.invokeLater(() -> {
             JFrame frame = new JFrame("Eternity II Solver");
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-
-            // <--- NEW: Force the window to open maximized! --->
             frame.setExtendedState(JFrame.MAXIMIZED_BOTH);
 
             BoardVisualizer viz = new BoardVisualizer(currentDisplayBoard);
@@ -77,6 +80,12 @@ public class Main {
         });
     }
 
+    /**
+     * Updates the current display board and score.
+     * 
+     * @param score The new best score (number of pieces placed)
+     * @param board The current state of the board
+     */
     public static synchronized void updateDisplay(int score, int[][] board) {
         currentScore.set(score);
         for (int i = 0; i < 16; i++) {

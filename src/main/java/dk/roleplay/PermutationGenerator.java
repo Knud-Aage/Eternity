@@ -3,7 +3,9 @@ package dk.roleplay;
 import java.util.*;
 
 /**
- * Optimized Generator for 4x4 Macro-Tiles.
+ * Optimized generator for 4x4 macro-tiles in the Eternity II puzzle.
+ * This class uses a backtracking algorithm to find combinations of 16 pieces
+ * that satisfy a given set of outer boundary constraints and internal adjacency rules.
  */
 public class PermutationGenerator {
     private final PieceInventory inventory;
@@ -12,6 +14,12 @@ public class PermutationGenerator {
     private int deepestPos = 0;
     private int centerPhysicalIdx = -1;
 
+    /**
+     * Constructs a new PermutationGenerator.
+     *
+     * @param inventory    The inventory of puzzle pieces and their orientations.
+     * @param used         A shared boolean array tracking which physical pieces are currently in use.
+     */
     public PermutationGenerator(PieceInventory inventory, boolean[] used) {
         this.inventory = inventory;
         this.physicalUsed = used;
@@ -25,6 +33,14 @@ public class PermutationGenerator {
         }
     }
 
+    /**
+     * Generates a list of internally valid 4x4 macro-tiles that satisfy the specified constraints.
+     *
+     * @param mIdx              The index of the macro-tile being generated.
+     * @param macroConstraints  A 16-element array representing the boundary constraints for each slot.
+     * @param limit             The maximum number of valid macro-tiles to generate.
+     * @return                  A list of integer arrays, each representing a valid 4x4 macro-tile.
+     */
     public List<int[]> generate(int mIdx, int[] macroConstraints, int limit) {
         List<int[]> results = new ArrayList<>();
         deepestPos = 0;

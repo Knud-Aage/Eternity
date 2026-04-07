@@ -1,3 +1,29 @@
+/**
+ * SolveEternityKernel.cu
+ *
+ * This CUDA kernel is the high-performance heart of the Eternity II solver. 
+ * It utilizes an iterative backtracking approach to search for the puzzle solution, 
+ * offloading millions of calculations to the GPU's parallel cores.
+ *
+ * Key Operations:
+ * 1. Bit-Packed Color Extraction: Uses inline helper functions to extract four 8-bit 
+ *    color IDs from a 32-bit integer, maximizing memory bandwidth.
+ * 
+ * 2. Adjacency and Border Logic: The 'matches' function enforces connectivity rules 
+ *    and absolute border constraints (ensuring Grey/ID 0 edges are correctly placed).
+ * 
+ * 3. Core Solver Engine (solvePBP): Every GPU thread operates on a unique partial 
+ *    board "seed." It manages search state via a pieceStack and bit-masked inventory 
+ *    tracking instead of expensive recursion.
+ * 
+ * 4. Pruning and Optimization: Implements a "Doomed" look-ahead check. When a row is 
+ *    completed, it compares exposed colors against available inventory to prune 
+ *    impossible branches early.
+ * 
+ * 5. Global State and Output: Employs Atomic Operations to communicate solutions 
+ *    or high-score progress back to the Java host across thousands of threads.
+ */
+
 // --- DEVICE HELPER FUNCTIONS ---
 __device__ inline int getNorth(int p) { return (p >> 24) & 0xFF; }
 __device__ inline int getEast(int p)  { return (p >> 16) & 0xFF; }

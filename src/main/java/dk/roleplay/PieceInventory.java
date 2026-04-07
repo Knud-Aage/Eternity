@@ -2,6 +2,11 @@ package dk.roleplay;
 
 import java.util.*;
 
+/**
+ * Manages the collection of Eternity II puzzle pieces.
+ * Pre-calculates rotations, categorizes pieces by type (Corner, Edge, Interior),
+ * and maintains compatibility tables for fast lookup.
+ */
 public class PieceInventory {
     public final int[] allOrientations = new int[1024];
     public final int[] physicalMapping = new int[1024];
@@ -13,6 +18,11 @@ public class PieceInventory {
     public List<Integer>[][] compatibility;
     public int[] colorFrequency;
 
+    /**
+     * Initializes the inventory from base physical pieces.
+     * 
+     * @param basePieces Array of 256 physical pieces (North, East, South, West).
+     */
     @SuppressWarnings("unchecked")
     public PieceInventory(int[] basePieces) {
         int maxColor = 0;
@@ -45,7 +55,6 @@ public class PieceInventory {
                 colorFrequency[PieceUtils.getSouth(oriented)]++;
                 colorFrequency[PieceUtils.getWest(oriented)]++;
 
-                // Categorize based on the border count of THIS orientation
                 int borders = PieceUtils.getBorderCount(oriented);
                 if (borders == 2) corners.add(orientationIdx);
                 else if (borders == 1) edges.add(orientationIdx);
@@ -60,23 +69,40 @@ public class PieceInventory {
         System.out.println(" - " + interior.size() + " oriented interior pieces");
     }
 
-    private boolean matches(int p, int n_req, int e_req, int s_req, int w_req) {
-        if (!colorMatches(n_req, PieceUtils.getNorth(p))) return false;
-        if (!colorMatches(e_req, PieceUtils.getEast(p))) return false;
-        if (!colorMatches(s_req, PieceUtils.getSouth(p))) return false;
-        if (!colorMatches(w_req, PieceUtils.getWest(p))) return false;
-        return true;
+    /**
+     * Determines the appropriate piece pool (Corner, Edge, or Interior) for a given board position.
+     * 
+     * @param mIdx Macro-tile index (0-15).
+     * @param pIdx Piece index within the macro-tile (0-15).
+     * @return A List of orientation indices corresponding to the correct piece type for that position.
+     */
+    public List<Integer> getPoolFor(int mIdx, int pIdx) {
+        int mRow = mIdx / 4, mCol = mIdx % 4;
+        int r = pIdx / 4, c = pIdx % 4;
+        int globalRow = mRow * 4 + r;
+        int globalCol = mCol * 4 + c;
+
+        boolean n = (globalRow == 0), s = (globalRow == 15), w = (globalCol == 0), e = (globalCol == 15);
+        int b = 0;
+        if (n) b++; if (s) b++; if (w) b++; if (e) b++;
+
+        if (b == 2) return corners;
+        if (b == 1) return edges;
+        return interior;
     }
 
-    private boolean colorMatches(int req, int pieceColor) {
-        if (req == PieceUtils.WILDCARD) return true; // We don't care about this edge yet
-
-        // Borders must strictly match borders (0 == 0)
+    /**
+     * Implements the color matching logic, including the Sum-to-23 rule.
+     * 
+     * @param req The required color from a neighboring edge.
+     * @param pieceColor The color of the edge on the current piece.
+     * @return true if they match legally.
+     */
+    public boolean colorMatches(int req, int pieceColor) {
+        if (req == PieceUtils.WILDCARD) return true;
         if (req == PieceUtils.BORDER_COLOR || pieceColor == PieceUtils.BORDER_COLOR) {
             return req == pieceColor;
         }
-
-        // Internal tabs and blanks MUST sum to 23
         return (req + pieceColor == 23);
     }
 }

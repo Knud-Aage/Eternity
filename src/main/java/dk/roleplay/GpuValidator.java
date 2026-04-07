@@ -7,18 +7,28 @@ import jcuda.driver.CUdevice;
 import jcuda.driver.CUdeviceptr;
 import jcuda.driver.CUfunction;
 import jcuda.driver.CUmodule;
-import jcuda.driver.JCudaDriver;
 import jcuda.driver.CUresult;
+import jcuda.driver.JCudaDriver;
 
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * GPU-accelerated implementation of CandidateValidator.
+ * Utilizes JCuda to launch a CUDA kernel for high-throughput batch validation
+ * of macro-tile candidates.
+ */
 public class GpuValidator implements CandidateValidator {
     private static final int MAX_RESULTS = 10000;
     private final CUfunction function;
     private final CUcontext context;
 
+    /**
+     * Initializes the CUDA driver, creates a device context, and loads the PTX module.
+     *
+     * @throws RuntimeException if CUDA initialization or module loading fails
+     */
     public GpuValidator() {
         JCudaDriver.setExceptionsEnabled(false);
         int result = JCudaDriver.cuInit(0);
@@ -36,15 +46,16 @@ public class GpuValidator implements CandidateValidator {
             ptxPath = "src/main/resources/EternityKernel.ptx";
         }
         if (!new File(ptxPath).exists()) {
-             ptxPath = "../EternityKernel.ptx";
+            ptxPath = "../EternityKernel.ptx";
         }
 
         CUmodule module = new CUmodule();
         result = JCudaDriver.cuModuleLoad(module, ptxPath);
         if (result != CUresult.CUDA_SUCCESS) {
-             throw new RuntimeException("cuModuleLoad failed with error code: " + CUresult.stringFor(result) + 
-                 " (" + result + "). Path: " + new File(ptxPath).getAbsolutePath() +
-                 ". Make sure your GPU supports sm_75 and your driver is up to date (CUDA 13.2 requires Driver 550+).");
+            throw new RuntimeException("cuModuleLoad failed with error code: " + CUresult.stringFor(result) +
+                    " (" + result + "). Path: " + new File(ptxPath).getAbsolutePath() +
+                    ". Make sure your GPU supports sm_75 and your driver is up to date (CUDA 13.2 requires Driver " +
+                    "550+).");
         }
 
         function = new CUfunction();
@@ -52,19 +63,27 @@ public class GpuValidator implements CandidateValidator {
         JCudaDriver.setExceptionsEnabled(true);
     }
 
+    /**
+     * Transfers a candidate batch to the GPU, executes the validation kernel,
+     * and retrieves the results.
+     *
+     * @param candidateBatch  Flattened 1D array of 32-bit packed integers
+     * @param numPermutations Total number of 16-piece candidates in the batch
+     * @return A list of validated 16-piece arrays that are internally consistent
+     */
     @Override
     public List<int[]> validate(int[] candidateBatch, int numPermutations) {
         if (numPermutations == 0) {
             return new ArrayList<>();
         }
 
-        // Push the context to the current thread
         JCudaDriver.cuCtxPushCurrent(context);
 
         try {
             CUdeviceptr d_candidates = new CUdeviceptr();
             JCudaDriver.cuMemAlloc(d_candidates, (long) candidateBatch.length * Sizeof.INT);
-            JCudaDriver.cuMemcpyHtoD(d_candidates, Pointer.to(candidateBatch), (long) candidateBatch.length * Sizeof.INT);
+            JCudaDriver.cuMemcpyHtoD(d_candidates, Pointer.to(candidateBatch),
+                    (long) candidateBatch.length * Sizeof.INT);
 
             CUdeviceptr d_results = new CUdeviceptr();
             JCudaDriver.cuMemAlloc(d_results, (long) MAX_RESULTS * 16 * Sizeof.INT);

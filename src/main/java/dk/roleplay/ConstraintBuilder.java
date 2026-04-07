@@ -2,33 +2,49 @@ package dk.roleplay;
 
 import java.util.Arrays;
 
+/**
+ * Constructs constraint arrays for 4x4 macro-tiles.
+ * Aggregates information from board boundaries, adjacent placed tiles,
+ * and fixed hint pieces to build a requirement mask for candidate generation.
+ */
 public class ConstraintBuilder {
 
+    /**
+     * Builds a 16-piece constraint array for a specific macro-tile position.
+     *
+     * @param macroIdx  The index of the macro-tile being solved (0-15)
+     * @param mainBoard The current state of the 16x16 puzzle board
+     * @return An array of 16 packed integers representing the edge requirements for each slot
+     */
     public static int[] build(int macroIdx, int[][] mainBoard) {
         int[] constraints = new int[16];
 
-        // Initialize all edges to WILDCARD (255) instead of Java's default 0 (Border)
-        int wildcardPacked = PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD);
+        int wildcardPacked = PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD,
+                PieceUtils.WILDCARD);
         Arrays.fill(constraints, wildcardPacked);
 
         int mRow = macroIdx / 4;
         int mCol = macroIdx % 4;
 
-        // 1. Absolute Board Borders
         for (int i = 0; i < 16; i++) {
             int r = i / 4;
             int c = i % 4;
             int globalRow = mRow * 4 + r;
             int globalCol = mCol * 4 + c;
 
-            // Apply absolute border colors to the outer edges of the 16x16 board
-            if (globalRow == 0)  applyNorth(constraints, i, PieceUtils.BORDER_COLOR);
-            if (globalRow == 15) applySouth(constraints, i, PieceUtils.BORDER_COLOR);
-            if (globalCol == 0)  applyWest(constraints, i, PieceUtils.BORDER_COLOR);
-            if (globalCol == 15) applyEast(constraints, i, PieceUtils.BORDER_COLOR);
+            if (globalRow == 0) {
+                applyNorth(constraints, i, PieceUtils.BORDER_COLOR);
+            }
+            if (globalRow == 15) {
+                applySouth(constraints, i, PieceUtils.BORDER_COLOR);
+            }
+            if (globalCol == 0) {
+                applyWest(constraints, i, PieceUtils.BORDER_COLOR);
+            }
+            if (globalCol == 15) {
+                applyEast(constraints, i, PieceUtils.BORDER_COLOR);
+            }
         }
-
-        // 2. Adjacent Macro-Tile Borders (Dynamic Omnidirectional Constraints)
 
         // Match ABOVE neighbor
         if (mRow > 0 && mainBoard[macroIdx - 4] != null) {
@@ -70,9 +86,6 @@ public class ConstraintBuilder {
             }
         }
 
-        // 3. Official Fixed Piece Match (#139)
-        // Clockwise Colors: N=18, E=12, S=18, W=3
-
         if (macroIdx == 5) {
             // Force Position 15 to perfectly match the centerpiece in memory
             applyNorth(constraints, 15, 18);
@@ -80,8 +93,6 @@ public class ConstraintBuilder {
             applySouth(constraints, 15, 18);
             applyWest(constraints, 15, 3);
 
-            // INTERNAL CAGE: Give advanced warning to the immediate neighbors
-            // The piece to the LEFT (14) must connect to the centerpiece's West (3)
             applyEast(constraints, 14, 3);
             // The piece ABOVE (11) must connect to the centerpiece's North (18)
             applySouth(constraints, 11, 18);

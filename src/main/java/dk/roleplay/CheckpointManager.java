@@ -3,11 +3,19 @@ package dk.roleplay;
 import java.io.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
 
+/**
+ * Handles saving and loading solver progress to a persistent file.
+ * This allows the search to resume after a program restart.
+ */
 public class CheckpointManager {
     private static final String FILE_NAME = "checkpoint.dat";
 
+    /**
+     * Saves the current board state to a checkpoint file.
+     * 
+     * @param mainBoard The 16x16 board state represented as 4x4 macro-tiles
+     */
     public static synchronized void save(int[][] mainBoard) {
         try (PrintWriter out = new PrintWriter(new FileWriter(FILE_NAME))) {
             for (int i = 0; i < 16; i++) {
@@ -23,6 +31,11 @@ public class CheckpointManager {
         }
     }
 
+    /**
+     * Loads the last saved board state from the checkpoint file.
+     * 
+     * @return The reconstructed board state, or null if no valid checkpoint exists
+     */
     public static int[][] load() {
         File file = new File(FILE_NAME);
         if (!file.exists() || file.length() == 0) return null;
@@ -55,6 +68,9 @@ public class CheckpointManager {
         }
     }
 
+    /**
+     * Deletes the checkpoint file from disk.
+     */
     public static void clear() {
         File file = new File(FILE_NAME);
         if (file.exists()) {

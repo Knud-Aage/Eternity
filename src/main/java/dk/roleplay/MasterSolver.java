@@ -3,6 +3,13 @@ package dk.roleplay;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Orchestrates the solving process for the Eternity II puzzle using a macro-tile approach.
+ * This solver organizes the board into 4x4 sub-grids (macro-tiles) and attempts to 
+ * solve them in a spiral order starting from the centerpiece. It integrates with 
+ * {@link CandidateValidator} for parallel validation and supports persistence 
+ * via {@link CheckpointManager}.
+ */
 public class MasterSolver implements Runnable {
     private final PieceInventory inventory;
     private final int[][] mainBoard = new int[16][];
@@ -20,6 +27,14 @@ public class MasterSolver implements Runnable {
     private int maxMacroReached = 0;
     private long lastSaveTime = 0;
 
+    /**
+     * Initializes a new instance of the MasterSolver with the necessary dependencies.
+     *
+     * @param inventory The inventory containing all puzzle pieces and their orientations.
+     * @param validator The component responsible for validating macro-tile consistency.
+     * @param scoreRef  A shared atomic integer used to track the current search progress.
+     * @param seed      A seed for randomization to ensure diverse search paths.
+     */
     public MasterSolver(PieceInventory inventory, CandidateValidator validator, AtomicInteger scoreRef, long seed) {
         this.inventory = inventory;
         this.validator = validator;
@@ -40,6 +55,11 @@ public class MasterSolver implements Runnable {
         }
     }
 
+    /**
+     * Execution entry point for the solver thread. It handles the high-level logic
+     * of seeding the initial state and managing the main backtracking loop until 
+     * a solution is discovered or the search space is exhausted.
+     */
     @Override
     public void run() {
         System.out.println("Solver thread started.");
