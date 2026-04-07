@@ -1,6 +1,9 @@
 package dk.roleplay;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Random;
 
 /**
  * Optimized generator for 4x4 macro-tiles in the Eternity II puzzle.
@@ -17,8 +20,8 @@ public class PermutationGenerator {
     /**
      * Constructs a new PermutationGenerator.
      *
-     * @param inventory    The inventory of puzzle pieces and their orientations.
-     * @param used         A shared boolean array tracking which physical pieces are currently in use.
+     * @param inventory The inventory of puzzle pieces and their orientations.
+     * @param used      A shared boolean array tracking which physical pieces are currently in use.
      */
     public PermutationGenerator(PieceInventory inventory, boolean[] used) {
         this.inventory = inventory;
@@ -36,10 +39,10 @@ public class PermutationGenerator {
     /**
      * Generates a list of internally valid 4x4 macro-tiles that satisfy the specified constraints.
      *
-     * @param mIdx              The index of the macro-tile being generated.
-     * @param macroConstraints  A 16-element array representing the boundary constraints for each slot.
-     * @param limit             The maximum number of valid macro-tiles to generate.
-     * @return                  A list of integer arrays, each representing a valid 4x4 macro-tile.
+     * @param mIdx             The index of the macro-tile being generated.
+     * @param macroConstraints A 16-element array representing the boundary constraints for each slot.
+     * @param limit            The maximum number of valid macro-tiles to generate.
+     * @return A list of integer arrays, each representing a valid 4x4 macro-tile.
      */
     public List<int[]> generate(int mIdx, int[] macroConstraints, int limit) {
         List<int[]> results = new ArrayList<>();
@@ -62,9 +65,14 @@ public class PermutationGenerator {
         return results;
     }
 
-    private void backtrack(int step, int mIdx, int[] current, int[] constraints, List<int[]> results, int limit, int[] order) {
-        if (results.size() >= limit) return;
-        if (step > deepestPos) deepestPos = step;
+    private void backtrack(int step, int mIdx, int[] current, int[] constraints, List<int[]> results, int limit,
+                           int[] order) {
+        if (results.size() >= limit) {
+            return;
+        }
+        if (step > deepestPos) {
+            deepestPos = step;
+        }
 
         if (step == 16) {
             results.add(current.clone());
@@ -83,23 +91,41 @@ public class PermutationGenerator {
 
         // --- DYNAMIC ORDER-INDEPENDENT CONSTRAINTS ---
         // Look at neighboring spaces. If a piece is already there (!= -1), we MUST connect to it!
-        if (r > 0 && current[pos - 4] != -1) n_req = PieceUtils.getSouth(current[pos - 4]);
-        if (c < 3 && current[pos + 1] != -1) e_req = PieceUtils.getWest(current[pos + 1]);
-        if (r < 3 && current[pos + 4] != -1) s_req = PieceUtils.getNorth(current[pos + 4]);
-        if (c > 0 && current[pos - 1] != -1) w_req = PieceUtils.getEast(current[pos - 1]);
+        if (r > 0 && current[pos - 4] != -1) {
+            n_req = PieceUtils.getSouth(current[pos - 4]);
+        }
+        if (c < 3 && current[pos + 1] != -1) {
+            e_req = PieceUtils.getWest(current[pos + 1]);
+        }
+        if (r < 3 && current[pos + 4] != -1) {
+            s_req = PieceUtils.getNorth(current[pos + 4]);
+        }
+        if (c > 0 && current[pos - 1] != -1) {
+            w_req = PieceUtils.getEast(current[pos - 1]);
+        }
 
         int mRow = mIdx / 4, mCol = mIdx % 4;
         int gR = mRow * 4 + r, gC = mCol * 4 + c;
         int b_req = 0;
-        if (gR == 0 || gR == 15) b_req++;
-        if (gC == 0 || gC == 15) b_req++;
+        if (gR == 0 || gR == 15) {
+            b_req++;
+        }
+        if (gC == 0 || gC == 15) {
+            b_req++;
+        }
 
         List<Integer> pool;
-        if (b_req == 2) pool = inventory.corners;
-        else if (b_req == 1) pool = inventory.edges;
-        else pool = inventory.interior;
+        if (b_req == 2) {
+            pool = inventory.corners;
+        } else if (b_req == 1) {
+            pool = inventory.edges;
+        } else {
+            pool = inventory.interior;
+        }
 
-        if (pool.isEmpty()) return;
+        if (pool.isEmpty()) {
+            return;
+        }
 
         int size = pool.size();
         int offset = rnd.nextInt(size);
@@ -115,7 +141,9 @@ public class PermutationGenerator {
                 continue;
             }
 
-            if (physicalUsed[physicalIdx]) continue;
+            if (physicalUsed[physicalIdx]) {
+                continue;
+            }
 
             if (matches(p, n_req, e_req, s_req, w_req)) {
                 current[pos] = p;
@@ -127,16 +155,23 @@ public class PermutationGenerator {
                 physicalUsed[physicalIdx] = false;
                 current[pos] = -1; // Reset to empty for backtracking
 
-                if (results.size() >= limit) return;
+                if (results.size() >= limit) {
+                    return;
+                }
             }
         }
     }
 
     private boolean matches(int p, int n, int e, int s, int w) {
-        if (n != PieceUtils.WILDCARD && PieceUtils.getNorth(p) != n) return false;
-        if (e != PieceUtils.WILDCARD && PieceUtils.getEast(p) != e) return false;
-        if (s != PieceUtils.WILDCARD && PieceUtils.getSouth(p) != s) return false;
-        if (w != PieceUtils.WILDCARD && PieceUtils.getWest(p) != w) return false;
-        return true;
+        if (n != PieceUtils.WILDCARD && PieceUtils.getNorth(p) != n) {
+            return false;
+        }
+        if (e != PieceUtils.WILDCARD && PieceUtils.getEast(p) != e) {
+            return false;
+        }
+        if (s != PieceUtils.WILDCARD && PieceUtils.getSouth(p) != s) {
+            return false;
+        }
+        return w == PieceUtils.WILDCARD || PieceUtils.getWest(p) == w;
     }
 }

@@ -1,6 +1,7 @@
 package dk.roleplay;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Manages the collection of Eternity II puzzle pieces.
@@ -20,7 +21,7 @@ public class PieceInventory {
 
     /**
      * Initializes the inventory from base physical pieces.
-     * 
+     *
      * @param basePieces Array of 256 physical pieces (North, East, South, West).
      */
     @SuppressWarnings("unchecked")
@@ -56,9 +57,13 @@ public class PieceInventory {
                 colorFrequency[PieceUtils.getWest(oriented)]++;
 
                 int borders = PieceUtils.getBorderCount(oriented);
-                if (borders == 2) corners.add(orientationIdx);
-                else if (borders == 1) edges.add(orientationIdx);
-                else interior.add(orientationIdx);
+                if (borders == 2) {
+                    corners.add(orientationIdx);
+                } else if (borders == 1) {
+                    edges.add(orientationIdx);
+                } else {
+                    interior.add(orientationIdx);
+                }
 
                 oriented = PieceUtils.rotate(oriented);
             }
@@ -71,7 +76,7 @@ public class PieceInventory {
 
     /**
      * Determines the appropriate piece pool (Corner, Edge, or Interior) for a given board position.
-     * 
+     *
      * @param mIdx Macro-tile index (0-15).
      * @param pIdx Piece index within the macro-tile (0-15).
      * @return A List of orientation indices corresponding to the correct piece type for that position.
@@ -84,22 +89,39 @@ public class PieceInventory {
 
         boolean n = (globalRow == 0), s = (globalRow == 15), w = (globalCol == 0), e = (globalCol == 15);
         int b = 0;
-        if (n) b++; if (s) b++; if (w) b++; if (e) b++;
+        if (n) {
+            b++;
+        }
+        if (s) {
+            b++;
+        }
+        if (w) {
+            b++;
+        }
+        if (e) {
+            b++;
+        }
 
-        if (b == 2) return corners;
-        if (b == 1) return edges;
+        if (b == 2) {
+            return corners;
+        }
+        if (b == 1) {
+            return edges;
+        }
         return interior;
     }
 
     /**
      * Implements the color matching logic, including the Sum-to-23 rule.
-     * 
-     * @param req The required color from a neighboring edge.
+     *
+     * @param req        The required color from a neighboring edge.
      * @param pieceColor The color of the edge on the current piece.
      * @return true if they match legally.
      */
     public boolean colorMatches(int req, int pieceColor) {
-        if (req == PieceUtils.WILDCARD) return true;
+        if (req == PieceUtils.WILDCARD) {
+            return true;
+        }
         if (req == PieceUtils.BORDER_COLOR || pieceColor == PieceUtils.BORDER_COLOR) {
             return req == pieceColor;
         }

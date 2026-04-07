@@ -5,7 +5,6 @@ import java.awt.*;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.PrintWriter;
-import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.HashMap;
@@ -41,13 +40,13 @@ public class RecordManager {
      */
     public static synchronized void saveRecord(int[][] mainBoard, int macrosPlaced) {
         int piecesCount = macrosPlaced * 16;
-        String baseName = "records/Record_" + piecesCount/16 + "Pieces";
+        String baseName = "records/Record_" + piecesCount / 16 + "Pieces";
 
         saveImage(mainBoard, baseName + ".png");
         saveText(mainBoard, baseName + ".csv");
         String now = LocalDateTime.now()
                 .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-        System.out.println(now + " >>> NEW RECORD! Saved Image and Data for " + piecesCount/16 + " pieces.");
+        System.out.println(now + " >>> NEW RECORD! Saved Image and Data for " + piecesCount / 16 + " pieces.");
     }
 
     private static void saveImage(int[][] mainBoard, String filename) {
@@ -58,7 +57,9 @@ public class RecordManager {
         g2d.fillRect(0, 0, img.getWidth(), img.getHeight());
 
         for (int m = 0; m < 16; m++) {
-            if (mainBoard[m] == null) continue;
+            if (mainBoard[m] == null) {
+                continue;
+            }
             int xOffset = (m % 4) * 4 * PIECE_SIZE;
             int yOffset = (m / 4) * 4 * PIECE_SIZE;
 
@@ -69,7 +70,11 @@ public class RecordManager {
             }
         }
         g2d.dispose();
-        try { ImageIO.write(img, "PNG", new File(filename)); } catch (Exception e) { e.printStackTrace(); }
+        try {
+            ImageIO.write(img, "PNG", new File(filename));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private static void drawPiece(Graphics2D g2d, int x, int y, int piece) {
@@ -93,7 +98,9 @@ public class RecordManager {
         try (PrintWriter out = new PrintWriter(filename)) {
             out.println("MacroIndex,InternalPos,North,East,South,West");
             for (int m = 0; m < 16; m++) {
-                if (mainBoard[m] == null) continue;
+                if (mainBoard[m] == null) {
+                    continue;
+                }
                 for (int p = 0; p < 16; p++) {
                     int piece = mainBoard[m][p];
                     out.printf("%d,%d,%d,%d,%d,%d\n", m, p,
@@ -101,6 +108,8 @@ public class RecordManager {
                             PieceUtils.getSouth(piece), PieceUtils.getWest(piece));
                 }
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }

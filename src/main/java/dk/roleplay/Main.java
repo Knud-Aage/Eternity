@@ -19,7 +19,7 @@ public class Main {
 
     /**
      * Application main method.
-     * 
+     *
      * @param args Command line arguments
      */
     public static void main(String[] args) {
@@ -82,7 +82,7 @@ public class Main {
 
     /**
      * Updates the current display board and score.
-     * 
+     *
      * @param score The new best score (number of pieces placed)
      * @param board The current state of the board
      */

@@ -66,7 +66,7 @@ public class PieceUtils {
 
     /**
      * Rotates the given packed piece 90 degrees clockwise.
-     * The mapping follows: New North = Old West, New East = Old North, 
+     * The mapping follows: New North = Old West, New East = Old North,
      * New South = Old East, New West = Old South.
      *
      * @param p the 32-bit packed integer to rotate

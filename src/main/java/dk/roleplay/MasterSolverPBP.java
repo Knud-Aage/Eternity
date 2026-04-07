@@ -27,7 +27,7 @@ import java.util.Random;
 
 /**
  * MasterSolverPBP implements a Piece-By-Piece (PBP) backtracking algorithm to solve the Eternity II puzzle.
- * It fills the 16x16 grid linearly and supports optional GPU acceleration by handing off partial 
+ * It fills the 16x16 grid linearly and supports optional GPU acceleration by handing off partial
  * board configurations to a CUDA kernel once a specific search depth is reached.
  */
 public class MasterSolverPBP implements Runnable {
@@ -48,7 +48,7 @@ public class MasterSolverPBP implements Runnable {
 
     /**
      * Constructs a new Piece-By-Piece solver instance.
-     * 
+     *
      * @param inventory       The inventory containing all pieces and their pre-calculated orientations.
      * @param trueCenterPiece The packed integer representing the specific piece to be placed at the board center.
      * @param useGpu          True if the solver should utilize JCuda for parallel search acceleration.
@@ -212,8 +212,8 @@ public class MasterSolverPBP implements Runnable {
     }
 
     /**
-     * Executes the solving logic. This method sets the required centerpiece, 
-     * attempts to restore state from a checkpoint if available, and initiates 
+     * Executes the solving logic. This method sets the required centerpiece,
+     * attempts to restore state from a checkpoint if available, and initiates
      * the recursive backtracking search.
      */
     @Override

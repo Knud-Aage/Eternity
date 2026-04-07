@@ -1,23 +1,25 @@
 package dk.roleplay;
 
-import java.util.*;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Orchestrates the solving process for the Eternity II puzzle using a macro-tile approach.
- * This solver organizes the board into 4x4 sub-grids (macro-tiles) and attempts to 
- * solve them in a spiral order starting from the centerpiece. It integrates with 
- * {@link CandidateValidator} for parallel validation and supports persistence 
+ * This solver organizes the board into 4x4 sub-grids (macro-tiles) and attempts to
+ * solve them in a spiral order starting from the centerpiece. It integrates with
+ * {@link CandidateValidator} for parallel validation and supports persistence
  * via {@link CheckpointManager}.
  */
 public class MasterSolver implements Runnable {
+    private static volatile boolean solved = false;
     private final PieceInventory inventory;
     private final int[][] mainBoard = new int[16][];
     private final boolean[] usedPhysicalPieces = new boolean[256];
     private final CandidateValidator validator;
     private final AtomicInteger scoreRef;
     private final Random rnd;
-    private static volatile boolean solved = false;
     // Instead of 0, 1, 2, 3... we spiral outward from the centerpiece!
     // Macro 5 contains the center. Then we surround it: 6, 9, 10, etc.
     private final int[] solveOrder = {5, 6, 9, 10, 4, 8, 1, 2, 0, 3, 7, 11, 13, 14, 15, 12};
@@ -45,7 +47,9 @@ public class MasterSolver implements Runnable {
         if (this.resumeBoard != null) {
             int recoveredSteps = 0;
             for (int i = 0; i < 16; i++) {
-                if (this.resumeBoard[i] != null) recoveredSteps++;
+                if (this.resumeBoard[i] != null) {
+                    recoveredSteps++;
+                }
             }
             if (recoveredSteps > 0) {
                 // If we recovered 5 pieces, we successfully reached step 4!
@@ -57,7 +61,7 @@ public class MasterSolver implements Runnable {
 
     /**
      * Execution entry point for the solver thread. It handles the high-level logic
-     * of seeding the initial state and managing the main backtracking loop until 
+     * of seeding the initial state and managing the main backtracking loop until
      * a solution is discovered or the search space is exhausted.
      */
     @Override
@@ -73,7 +77,8 @@ public class MasterSolver implements Runnable {
             if (mainBoard[firstMacro] != null) {
                 System.out.println("Macro " + firstMacro + " seeded successfully. Starting outward spiral...");
                 // Pass "1" because we are moving to step 1 of the solveOrder array
-                if (solve(1)) {                    solved = true;
+                if (solve(1)) {
+                    solved = true;
                     Main.updateDisplay(256, mainBoard);
                     System.out.println("SOLVED!");
                     break;
@@ -84,7 +89,11 @@ public class MasterSolver implements Runnable {
             } else {
                 // FIX: Tell the truth about which macro failed!
                 System.out.println("Failed to seed Macro " + firstMacro + ". Resetting...");
-                try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
             }
         }
     }
@@ -124,8 +133,12 @@ public class MasterSolver implements Runnable {
     }
 
     private boolean solve(int step) {
-        if (step == 16) return true; // All 16 macros placed!
-        if (solved) return false;
+        if (step == 16) {
+            return true; // All 16 macros placed!
+        }
+        if (solved) {
+            return false;
+        }
 
         // Fetch the actual Macro ID we should be working on right now
         int macroIdx = solveOrder[step];
@@ -142,10 +155,14 @@ public class MasterSolver implements Runnable {
         PermutationGenerator gen = new PermutationGenerator(inventory, usedPhysicalPieces);
 
         List<int[]> candidates = gen.generate(macroIdx, constraints, 100);
-        if (candidates.isEmpty()) return false;
+        if (candidates.isEmpty()) {
+            return false;
+        }
 
         List<int[]> valid = validator.validate(flatten(candidates), candidates.size());
-        if (valid.isEmpty()) return false;
+        if (valid.isEmpty()) {
+            return false;
+        }
 
         HeuristicSorter.sort(valid, inventory.colorFrequency);
 
@@ -177,7 +194,9 @@ public class MasterSolver implements Runnable {
             }
 
             // FIX 2: We must move to the next chronological step in the array, not the next physical macro ID!
-            if (solve(step + 1)) return true;
+            if (solve(step + 1)) {
+                return true;
+            }
 
             unmarkUsed(tile);
             mainBoard[macroIdx] = null;
@@ -185,7 +204,9 @@ public class MasterSolver implements Runnable {
             // FIX 3: Update display during backtracking (using step)
             Main.updateDisplay(step * 16, mainBoard);
 
-            if (solved) return false;
+            if (solved) {
+                return false;
+            }
         }
         return false;
     }
