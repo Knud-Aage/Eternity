@@ -125,17 +125,17 @@ public class Main {
     }
 
     private static int[] generateMock() {
-        int DIM = 16;
-        int[][] hEdges = new int[DIM][DIM + 1];
-        int[][] vEdges = new int[DIM + 1][DIM];
+        int dim = 16;
+        int[][] hEdges = new int[dim][dim + 1];
+        int[][] vEdges = new int[dim + 1][dim];
         Random rnd = new Random(99);
-        int INTERIOR_COLORS = 4;
-        for (int r = 0; r < DIM; r++) for (int c = 1; c < DIM; c++) hEdges[r][c] = rnd.nextInt(INTERIOR_COLORS) + 1;
-        for (int r = 1; r < DIM; r++) for (int c = 0; c < DIM; c++) vEdges[r][c] = rnd.nextInt(INTERIOR_COLORS) + 1;
+        int interiorColors = 4;
+        for (int r = 0; r < dim; r++) for (int c = 1; c < dim; c++) hEdges[r][c] = rnd.nextInt(interiorColors) + 1;
+        for (int r = 1; r < dim; r++) for (int c = 0; c < dim; c++) vEdges[r][c] = rnd.nextInt(interiorColors) + 1;
         int[] pieces = new int[256];
         int idx = 0;
-        for (int r = 0; r < DIM; r++) {
-            for (int c = 0; c < DIM; c++) {
+        for (int r = 0; r < dim; r++) {
+            for (int c = 0; c < dim; c++) {
                 pieces[idx++] = PieceUtils.pack(vEdges[r][c], hEdges[r][c + 1], vEdges[r + 1][c], hEdges[r][c]);
             }
         }

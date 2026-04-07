@@ -31,10 +31,6 @@ The solver supports two distinct algorithmic approaches:
 *   Java 17 or higher.
 *   (Optional) NVIDIA GPU with latest drivers and CUDA Toolkit for GPU acceleration.
 
-### Configuration
-*   **pieces.csv**: Place your 256 piece definitions here (Format: North, East, South, West colors).
-*   **checkpoint.txt**: The solver automatically saves progress every 15 minutes and resumes upon restart.
-
 ### Running
 1.  Ensure `pieces.csv` is in the root directory.
 2.  Compile the project using Maven: `mvn clean install`.
