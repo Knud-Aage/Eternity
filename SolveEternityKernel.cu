@@ -1,27 +1,5 @@
 /**
  * SolveEternityKernel.cu
- *
- * This CUDA kernel is the high-performance heart of the Eternity II solver. 
- * It utilizes an iterative backtracking approach to search for the puzzle solution, 
- * offloading millions of calculations to the GPU's parallel cores.
- *
- * Key Operations:
- * 1. Bit-Packed Color Extraction: Uses inline helper functions to extract four 8-bit 
- *    color IDs from a 32-bit integer, maximizing memory bandwidth.
- * 
- * 2. Adjacency and Border Logic: The 'matches' function enforces connectivity rules 
- *    and absolute border constraints (ensuring Grey/ID 0 edges are correctly placed).
- * 
- * 3. Core Solver Engine (solvePBP): Every GPU thread operates on a unique partial 
- *    board "seed." It manages search state via a pieceStack and bit-masked inventory 
- *    tracking instead of expensive recursion.
- * 
- * 4. Pruning and Optimization: Implements a "Doomed" look-ahead check. When a row is 
- *    completed, it compares exposed colors against available inventory to prune 
- *    impossible branches early.
- * 
- * 5. Global State and Output: Employs Atomic Operations to communicate solutions 
- *    or high-score progress back to the Java host across thousands of threads.
  */
 
 // --- DEVICE HELPER FUNCTIONS ---
@@ -36,13 +14,11 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
     int s = getSouth(p);
     int w = getWest(p);
 
-    // 1. Check if the piece physically fits the adjacent placed pieces
     if (n_req != 255 && n != n_req) return false;
     if (e_req != 255 && e != e_req) return false;
     if (s_req != 255 && s != s_req) return false;
     if (w_req != 255 && w != w_req) return false;
 
-    // 2. THE BORDER PATROL (Grey edges ONLY)
     if (row != 0 && n == 0) return false;
     if (col != 15 && e == 0) return false;
     if (row != 15 && s == 0) return false;
@@ -50,6 +26,7 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
 
     return true;
 }
+
 // --- MAIN PIECE-BY-PIECE KERNEL ---
 extern "C" __global__ void solvePBP(
     int* d_partialBoards,
@@ -60,7 +37,8 @@ extern "C" __global__ void solvePBP(
     int* d_solution,
     int* d_solvedFlag,
     int* d_gpuHighScore,
-    int* d_bestBoardOut
+    int* d_bestBoardOut,
+    unsigned long long* d_totalSteps // <--- NY PARAMETER TIL AT TÆLLE BRIKKER
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numPartialBoards) return;
@@ -98,13 +76,16 @@ extern "C" __global__ void solvePBP(
     int pos = startingPos;
     int localMax = startingPos;
     int bestLocalBoard[256];
-    unsigned int stepCounter = 0;
+    unsigned long long stepCounter = 0;
 
     while (pos >= startingPos && pos < 256) {
 
         stepCounter++;
         if (stepCounter > 5000000) break;
-        if (*d_solvedFlag == 1) return;
+
+        // Ændret fra 'return' til 'break' så vi kan nå at gemme vores stepCounter,
+        // selvom en anden tråd har løst puslespillet
+        if (*d_solvedFlag == 1) break;
 
         if (pos == 135) {
             pos++;
@@ -115,9 +96,9 @@ extern "C" __global__ void solvePBP(
         int col = pos % 16;
 
         int n_req = (row == 0) ? 0 : (board[pos - 16] != -1 ? getSouth(board[pos - 16]) : 255);
-        int s_req = (row == 15) ? 0 : 255;
+        int s_req = (row == 15) ? 0 : (board[pos + 16] != -1 ? getNorth(board[pos + 16]) : 255);
         int w_req = (col == 0) ? 0 : (board[pos - 1] != -1 ? getEast(board[pos - 1]) : 255);
-        int e_req = (col == 15) ? 0 : 255;
+        int e_req = (col == 15) ? 0 : (board[pos + 1] != -1 ? getWest(board[pos + 1]) : 255);
 
         bool foundPiece = false;
         int startIdx = pieceStack[pos];
@@ -217,4 +198,8 @@ extern "C" __global__ void solvePBP(
         }
         currentMax = *d_gpuHighScore;
     }
+
+    // <--- HER AFLEVERER TRÅDEN SIT REGNSKAB --->
+    // Når tråden er helt færdig, lægger den alle sine forsøg oveni den globale tæller.
+    atomicAdd(d_totalSteps, stepCounter);
 }

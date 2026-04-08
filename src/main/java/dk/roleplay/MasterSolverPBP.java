@@ -153,6 +153,12 @@ public class MasterSolverPBP implements Runnable {
         CUdeviceptr d_bestBoardOut = new CUdeviceptr();
         cuMemAlloc(d_bestBoardOut, 256L * Sizeof.INT);
 
+        // <--- NYT: Variabel og Hukommelse til Total Steps --->
+        long[] totalSteps = { 0L };
+        CUdeviceptr d_totalSteps = new CUdeviceptr();
+        cuMemAlloc(d_totalSteps, 8L); // 8 bytes for en 'unsigned long long'
+        cuMemcpyHtoD(d_totalSteps, Pointer.to(totalSteps), 8L);
+
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards),
                 Pointer.to(new int[]{numBoards}),
@@ -162,22 +168,24 @@ public class MasterSolverPBP implements Runnable {
                 Pointer.to(d_solution),
                 Pointer.to(d_solvedFlag),
                 Pointer.to(d_gpuHighScore),
-                Pointer.to(d_bestBoardOut)
+                Pointer.to(d_bestBoardOut),
+                Pointer.to(d_totalSteps) // <--- Tilføjet til kernel parameters
         );
 
         int threadsPerBlock = 256;
         int blocksPerGrid = (int) Math.ceil((double) numBoards / threadsPerBlock);
 
         long startTime = System.currentTimeMillis();
-
-        cuLaunchKernel(function,
-                blocksPerGrid, 1, 1,
-                threadsPerBlock, 1, 1,
-                0, null,
-                kernelParameters, null);
+        cuLaunchKernel(function, blocksPerGrid, 1, 1, threadsPerBlock, 1, 1, 0, null, kernelParameters, null);
         cuCtxSynchronize();
-
         long timeTaken = System.currentTimeMillis() - startTime;
+
+        cuMemcpyDtoH(Pointer.to(totalSteps), d_totalSteps, 8L);
+        double timeSeconds = timeTaken / 1000.0;
+        long speed = (long) (totalSteps[0] / timeSeconds);
+
+        System.out.printf("GPU Batch Finished in %d ms! Speed: %,d pieces/sec (Total: %,d)%n",
+                timeTaken, speed, totalSteps[0]);
 
         cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
         if (solvedFlag[0] == 1) {
@@ -209,6 +217,7 @@ public class MasterSolverPBP implements Runnable {
         cuMemFree(d_solvedFlag);
         cuMemFree(d_gpuHighScore);
         cuMemFree(d_bestBoardOut);
+        cuMemFree(d_totalSteps);
     }
 
     /**

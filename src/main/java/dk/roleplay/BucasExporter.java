@@ -7,7 +7,7 @@ public class BucasExporter {
 
     public static void main(String[] args) {
         // Skift navnet her, hvis din fil hedder noget andet!
-        String filename = "records/Record_214Pieces.csv";
+        String filename = "records/Record_213Pieces.csv";
         
         StringBuilder bucasString = new StringBuilder();
         
