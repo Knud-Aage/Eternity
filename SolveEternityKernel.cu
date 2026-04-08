@@ -43,7 +43,6 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
     if (w_req != 255 && w != w_req) return false;
 
     // 2. THE BORDER PATROL (Grey edges ONLY)
-    // We removed the 1-5 / 6-22 rule so we don't accidentally reject valid CSV pieces!
     if (row != 0 && n == 0) return false;
     if (col != 15 && e == 0) return false;
     if (row != 15 && s == 0) return false;
@@ -85,7 +84,7 @@ extern "C" __global__ void solvePBP(
         board[i] = d_partialBoards[offset + i];
         pieceStack[i] = 0;
 
-        if (i < startingPos && board[i] != -1) {
+        if (board[i] != -1) {
             for(int o = 0; o < 1024; o++) {
                 if(d_allOrientations[o] == board[i]) {
                     int physId = d_physicalMapping[o];
@@ -130,7 +129,6 @@ extern "C" __global__ void solvePBP(
 
                 int p = d_allOrientations[idx];
 
-                // <--- NEW: Passed row and col here! --->
                 if (matches(p, n_req, e_req, s_req, w_req, row, col)) {
 
                     board[pos] = p;
