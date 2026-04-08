@@ -35,8 +35,6 @@ public class BoardVisualizer extends JPanel {
 
     private void loadImages() {
         File assetsDir = new File("Assets");
-        System.out.println("Looking for assets in: " + assetsDir.getAbsolutePath());
-        System.out.println("Assets folder exists: " + assetsDir.exists());
 
         for (int i = 1; i <= 22; i++) {
             try {

@@ -68,10 +68,6 @@ public class PieceInventory {
                 oriented = PieceUtils.rotate(oriented);
             }
         }
-        System.out.println("Inventory Initialized:");
-        System.out.println(" - " + corners.size() + " oriented corners");
-        System.out.println(" - " + edges.size() + " oriented edges");
-        System.out.println(" - " + interior.size() + " oriented interior pieces");
     }
 
     /**
