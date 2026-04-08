@@ -7,42 +7,62 @@ public class BucasExporter {
 
     public static void main(String[] args) {
         // Skift navnet her, hvis din fil hedder noget andet!
-        String filename = "records/Record_213Pieces.csv";
+        String filename = "records/Record_199Pieces.csv";
         
-        StringBuilder bucasString = new StringBuilder();
+        // Vi bygger et "virtuelt bræt" med 256 faste pladser.
+        // Vi fylder det med "0000" (tomme brikker) fra start.
+        String[] board = new String[256];
+        for (int i = 0; i < 256; i++) {
+            board[i] = "0000";
+        }
         
         try (BufferedReader br = new BufferedReader(new FileReader(filename))) {
-            String line;
-            boolean isHeader = true;
-            int count = 0;
+            String line = br.readLine(); // Læs første linje (headeren)
+            if (line == null) return;
+
+            // Vi tjekker automatisk om din CSV bruger "MacroIndex" eller "Row/Col"
+            boolean isMacroFormat = line.toLowerCase().contains("macro");
             
             while ((line = br.readLine()) != null) {
-                // Spring den første linje (kolonne-navnene) over
-                if (isHeader) { 
-                    isHeader = false; 
-                    continue; 
-                }
-                
                 String[] parts = line.split(",");
                 if (parts.length >= 6) {
+                    int pos1 = Integer.parseInt(parts[0].trim());
+                    int pos2 = Integer.parseInt(parts[1].trim());
+
+                    // Udregn den præcise plads (0-255) ud fra koordinaterne
+                    int absoluteIndex = 0;
+                    if (isMacroFormat) {
+                        int row = (pos1 / 4) * 4 + (pos2 / 4);
+                        int col = (pos1 % 4) * 4 + (pos2 % 4);
+                        absoluteIndex = row * 16 + col;
+                    } else {
+                        absoluteIndex = pos1 * 16 + pos2;
+                    }
+
                     int n = Integer.parseInt(parts[2].trim());
-                    int e = Integer.parseInt(parts[3].trim());
-                    int s = Integer.parseInt(parts[4].trim());
-                    int w = Integer.parseInt(parts[5].trim());
-                    
-                    // Oversæt farvekoderne (0-22) til bogstaver (a-w)
-                    bucasString.append((char)('a' + n));
-                    bucasString.append((char)('a' + e));
-                    bucasString.append((char)('a' + s));
-                    bucasString.append((char)('a' + w));
-                    count++;
+
+                    // Vi sikrer, at brikken er gyldig. Tomme brikker (ofte -1 eller 255 i data) springes over.
+                    if (n >= 0 && n <= 22) {
+                        int e = Integer.parseInt(parts[3].trim());
+                        int s = Integer.parseInt(parts[4].trim());
+                        int w = Integer.parseInt(parts[5].trim());
+
+                        // Oversæt farvekoderne til bogstaver og lås dem fast på den rigtige plads
+                        String pieceStr = "" +
+                                (char)('a' + n) +
+                                (char)('a' + e) +
+                                (char)('a' + s) +
+                                (char)('a' + w);
+
+                        board[absoluteIndex] = pieceStr;
+                    }
                 }
             }
             
-            // Udfyld resten af de 256 felter med "0000" (tomme brikker)
-            while (count < 256) {
-                bucasString.append("0000");
-                count++;
+            // Saml det færdige puslespil fra venstre mod højre
+            StringBuilder bucasString = new StringBuilder();
+            for (int i = 0; i < 256; i++) {
+                bucasString.append(board[i]);
             }
             
             // Byg den fulde URL

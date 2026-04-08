@@ -1,5 +1,6 @@
 /**
  * SolveEternityKernel.cu
+ * Opgraderet til SPIRAL-BUILD metoden!
  */
 
 // --- DEVICE HELPER FUNCTIONS ---
@@ -31,14 +32,15 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
 extern "C" __global__ void solvePBP(
     int* d_partialBoards,
     int numPartialBoards,
-    int startingPos,
+    int startingStep,
+    int* d_buildOrder, // <--- DET NYE SPIRALKORT
     int* d_allOrientations,
     int* d_physicalMapping,
     int* d_solution,
     int* d_solvedFlag,
     int* d_gpuHighScore,
     int* d_bestBoardOut,
-    unsigned long long* d_totalSteps // <--- NY PARAMETER TIL AT TÆLLE BRIKKER
+    unsigned long long* d_totalSteps
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numPartialBoards) return;
@@ -46,16 +48,6 @@ extern "C" __global__ void solvePBP(
     int board[256];
     int pieceStack[256];
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
-
-    int physColors[256][4];
-    for (int i = 0; i < 1024; i++) {
-        int phys = d_physicalMapping[i];
-        int val = d_allOrientations[i];
-        physColors[phys][0] = getNorth(val);
-        physColors[phys][1] = getEast(val);
-        physColors[phys][2] = getSouth(val);
-        physColors[phys][3] = getWest(val);
-    }
 
     int offset = tid * 256;
     for (int i = 0; i < 256; i++) {
@@ -73,88 +65,55 @@ extern "C" __global__ void solvePBP(
         }
     }
 
-    int pos = startingPos;
-    int localMax = startingPos;
+    int step = startingStep;
+    int maxStepReached = startingStep;
     int bestLocalBoard[256];
     unsigned long long stepCounter = 0;
 
-    while (pos >= startingPos && pos < 256) {
+    while (step >= startingStep && step < 256) {
 
         stepCounter++;
         if (stepCounter > 5000000) break;
-
-        // Ændret fra 'return' til 'break' så vi kan nå at gemme vores stepCounter,
-        // selvom en anden tråd har løst puslespillet
         if (*d_solvedFlag == 1) break;
 
-        if (pos == 135) {
-            pos++;
+        int boardIdx = d_buildOrder[step];
+
+        // Hvis vi lander på centerbrikken i spiralen, gå til næste skridt
+        if (boardIdx == 135) {
+            step++;
             continue;
         }
 
-        int row = pos / 16;
-        int col = pos % 16;
+        int row = boardIdx / 16;
+        int col = boardIdx % 16;
 
-        int n_req = (row == 0) ? 0 : (board[pos - 16] != -1 ? getSouth(board[pos - 16]) : 255);
-        int s_req = (row == 15) ? 0 : (board[pos + 16] != -1 ? getNorth(board[pos + 16]) : 255);
-        int w_req = (col == 0) ? 0 : (board[pos - 1] != -1 ? getEast(board[pos - 1]) : 255);
-        int e_req = (col == 15) ? 0 : (board[pos + 1] != -1 ? getWest(board[pos + 1]) : 255);
+        int n_req = (row == 0) ? 0 : (board[boardIdx - 16] != -1 ? getSouth(board[boardIdx - 16]) : 255);
+        int s_req = (row == 15) ? 0 : (board[boardIdx + 16] != -1 ? getNorth(board[boardIdx + 16]) : 255);
+        int w_req = (col == 0) ? 0 : (board[boardIdx - 1] != -1 ? getEast(board[boardIdx - 1]) : 255);
+        int e_req = (col == 15) ? 0 : (board[boardIdx + 1] != -1 ? getWest(board[boardIdx + 1]) : 255);
 
         bool foundPiece = false;
-        int startIdx = pieceStack[pos];
+        int startIdx = pieceStack[step];
 
         for (int idx = startIdx; idx < 1024; idx++) {
             int physId = d_physicalMapping[idx];
 
             if (inventoryMask[physId / 64] & (1ULL << (physId % 64))) {
-
                 int p = d_allOrientations[idx];
 
                 if (matches(p, n_req, e_req, s_req, w_req, row, col)) {
 
-                    board[pos] = p;
+                    board[boardIdx] = p;
                     inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
 
-                    bool doomed = false;
-
-                    if ((pos + 1) % 16 == 0 && (pos + 1) < 240) {
-                        int exposed[32] = {0};
-                        int available[32] = {0};
-
-                        for (int i = (pos + 1) - 16; i <= pos; i++) {
-                            exposed[getSouth(board[i])]++;
-                        }
-
-                        for (int pId = 0; pId < 256; pId++) {
-                            if (inventoryMask[pId / 64] & (1ULL << (pId % 64))) {
-                                available[physColors[pId][0]]++;
-                                available[physColors[pId][1]]++;
-                                available[physColors[pId][2]]++;
-                                available[physColors[pId][3]]++;
-                            }
-                        }
-
-                        for (int c = 1; c < 32; c++) {
-                            if (exposed[c] > available[c]) {
-                                doomed = true;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (doomed) {
-                        board[pos] = -1;
-                        inventoryMask[physId / 64] |= (1ULL << (physId % 64));
-                        continue;
-                    }
-
-                    pieceStack[pos] = idx + 1;
+                    pieceStack[step] = idx + 1;
                     foundPiece = true;
-                    pos++;
+                    step++;
 
-                    if (pos > localMax) {
-                        localMax = pos;
-                        for (int i = 0; i < pos; i++) bestLocalBoard[i] = board[i];
+                    if (step > maxStepReached) {
+                        maxStepReached = step;
+                        // Vi gemmer det fysiske bræt, så vi nemt kan overlevere det
+                        for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
                     }
 
                     break;
@@ -163,14 +122,14 @@ extern "C" __global__ void solvePBP(
         }
 
         if (!foundPiece) {
-            pieceStack[pos] = 0;
-            pos--;
+            pieceStack[step] = 0;
+            step--;
 
-            if (pos == 135) pos--;
+            if (step >= 0 && d_buildOrder[step] == 135) step--;
 
-            if (pos >= startingPos) {
-                int pToUndo = board[pos];
-                board[pos] = -1;
+            if (step >= startingStep) {
+                int pToUndo = board[d_buildOrder[step]];
+                board[d_buildOrder[step]] = -1;
 
                 for(int o = 0; o < 1024; o++) {
                     if(d_allOrientations[o] == pToUndo) {
@@ -183,23 +142,20 @@ extern "C" __global__ void solvePBP(
         }
     }
 
-    if (pos == 256) {
+    if (step == 256) {
         if (atomicExch(d_solvedFlag, 1) == 0) {
             for (int i = 0; i < 256; i++) d_solution[i] = board[i];
         }
     }
 
     int currentMax = *d_gpuHighScore;
-    while (localMax > currentMax) {
-        if (atomicCAS(d_gpuHighScore, currentMax, localMax) == currentMax) {
-            for (int i = 0; i < localMax; i++) d_bestBoardOut[i] = bestLocalBoard[i];
-            for (int i = localMax; i < 256; i++) d_bestBoardOut[i] = -1;
+    while (maxStepReached > currentMax) {
+        if (atomicCAS(d_gpuHighScore, currentMax, maxStepReached) == currentMax) {
+            for (int i = 0; i < 256; i++) d_bestBoardOut[i] = bestLocalBoard[i];
             break;
         }
         currentMax = *d_gpuHighScore;
     }
 
-    // <--- HER AFLEVERER TRÅDEN SIT REGNSKAB --->
-    // Når tråden er helt færdig, lægger den alle sine forsøg oveni den globale tæller.
     atomicAdd(d_totalSteps, stepCounter);
 }
