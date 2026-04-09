@@ -5,16 +5,20 @@ import jcuda.Sizeof;
 import jcuda.driver.*;
 import static jcuda.driver.JCudaDriver.*;
 
-import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
 public class MasterSolverPBP implements Runnable {
-    private final PieceInventory inventory;
 
+    // --- NEW: Strategy Enum ---
+    public enum BuildStrategy {
+        TYPEWRITER,
+        SPIRAL
+    }
+
+    private final PieceInventory inventory;
     private final int[] flatBoard = new int[256];
     private final int[] bestBoard = new int[256];
     private final int[] flatResumeBoard = new int[256];
@@ -25,18 +29,23 @@ public class MasterSolverPBP implements Runnable {
     private final int targetPiece;
 
     private final boolean useGpu;
+    private final BuildStrategy currentStrategy; // Stores the chosen strategy
 
     private final List<int[]> gpuSeedBoards = new ArrayList<>();
-    private final int HANDOFF_DEPTH = 112;
+
+    // Dynamic settings based on strategy
+    private final int HANDOFF_DEPTH;
     private int forceBacktrackTarget = -1;
 
-    // <--- NYT: VORES SPIRAL-KORT --->
-    private static final int[] BUILD_ORDER = generateSpiralOrder();
+    // The active build map
+    private final int[] BUILD_ORDER;
 
-    public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu) {
+    // Constructor updated to accept the strategy
+    public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy) {
         this.inventory = inventory;
         this.targetPiece = trueCenterPiece;
         this.useGpu = useGpu;
+        this.currentStrategy = strategy;
 
         Arrays.fill(flatBoard, -1);
         Arrays.fill(bestBoard, -1);
@@ -49,7 +58,18 @@ public class MasterSolverPBP implements Runnable {
             }
         }
 
-        int[][] loaded = CheckpointManager.load();
+        // Apply strategy-specific settings
+        if (strategy == BuildStrategy.SPIRAL) {
+            System.out.println(">>> Mode: SPIRAL BUILD initialized.");
+            BUILD_ORDER = generateSpiralOrder();
+            HANDOFF_DEPTH = 70; // Requires full frame + inner ring start
+        } else {
+            System.out.println(">>> Mode: TYPEWRITER BUILD initialized.");
+            BUILD_ORDER = generateTypewriterOrder();
+            HANDOFF_DEPTH = 50; // Standard 3-row block
+        }
+
+        int[][] loaded = CheckpointManager.load(currentStrategy.name());
         if (loaded != null) {
             int validPieceCount = 0;
             int highestStepLoaded = -1;
@@ -77,12 +97,20 @@ public class MasterSolverPBP implements Runnable {
         }
     }
 
-    // Genererer et kort over brættet, der spiralerer ind mod midten
+    // --- MAP GENERATORS ---
+    private static int[] generateTypewriterOrder() {
+        int[] order = new int[256];
+        for (int i = 0; i < 256; i++) {
+            order[i] = i; // Just left to right, top to bottom
+        }
+        return order;
+    }
+
     private static int[] generateSpiralOrder() {
         int[] order = new int[256];
         boolean[][] visited = new boolean[16][16];
         int r = 0, c = 0;
-        int[] dr = {0, 1, 0, -1}; // Højre, Ned, Venstre, Op
+        int[] dr = {0, 1, 0, -1};
         int[] dc = {1, 0, -1, 0};
         int dir = 0;
         for (int i = 0; i < 256; i++) {
@@ -109,7 +137,6 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private void runGpuHandoff(List<int[]> partialBoardsList, int startingStep) {
-        System.out.println(">>> INITIATING GPU HANDOFF...");
         JCudaDriver.setExceptionsEnabled(true);
         cuInit(0);
         CUdevice device = new CUdevice();
@@ -130,7 +157,7 @@ public class MasterSolverPBP implements Runnable {
         cuMemAlloc(d_partialBoards, (long) numBoards * 256 * Sizeof.INT);
         cuMemcpyHtoD(d_partialBoards, Pointer.to(flatBoards), (long) numBoards * 256 * Sizeof.INT);
 
-        // Sender spiral-kortet til GPU'en
+        // Send the active map to the GPU
         CUdeviceptr d_buildOrder = new CUdeviceptr();
         cuMemAlloc(d_buildOrder, 256L * Sizeof.INT);
         cuMemcpyHtoD(d_buildOrder, Pointer.to(BUILD_ORDER), 256L * Sizeof.INT);
@@ -190,9 +217,7 @@ public class MasterSolverPBP implements Runnable {
         double timeSeconds = Math.max(timeTaken / 1000.0, 0.001);
         long speed = (long) (totalSteps[0] / timeSeconds);
 
-        String now = LocalDateTime.now()
-                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-        System.out.printf(now + " GPU Batch Finished in %d ms! Speed: %,d pieces/sec (Total: %,d)%n",
+        System.out.printf("GPU Batch Finished in %d ms! Speed: %,d pieces/sec (Total: %,d)%n",
                 timeTaken, speed, totalSteps[0]);
 
         cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
@@ -201,7 +226,7 @@ public class MasterSolverPBP implements Runnable {
             int[] winningBoard = new int[256];
             cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
             updateDisplay(buildDisplayBoard(winningBoard));
-            RecordManager.saveRecord(buildDisplayBoard(winningBoard), 256);
+            RecordManager.saveRecord(buildDisplayBoard(winningBoard), 256, currentStrategy.name());
             System.exit(0);
         }
 
@@ -215,8 +240,8 @@ public class MasterSolverPBP implements Runnable {
 
             int[][] displayBoard = buildDisplayBoard(bestBoard);
             updateDisplay(displayBoard);
-            RecordManager.saveRecord(displayBoard, deepestStep);
-            CheckpointManager.save(displayBoard);
+            RecordManager.saveRecord(displayBoard, deepestStep, currentStrategy.name());
+            CheckpointManager.save(displayBoard, currentStrategy.name());
         }
 
         cuMemFree(d_partialBoards);
@@ -232,7 +257,7 @@ public class MasterSolverPBP implements Runnable {
 
     @Override
     public void run() {
-        System.out.println("Starting Spiral Piece-By-Piece Solver...");
+        System.out.println("Starting Engine...");
 
         flatBoard[135] = targetPiece;
         if (centerPhysicalIdx != -1) usedPhysicalPieces[centerPhysicalIdx] = true;
@@ -248,7 +273,7 @@ public class MasterSolverPBP implements Runnable {
 
         int boardIdx = BUILD_ORDER[step];
 
-        // Hvis vi lander på centerbrikken i spiralen, hopper vi bare over den
+        // Skip the center piece whenever the map lands on it
         if (boardIdx == 135) return solve(step + 1);
 
         if (useGpu && step == HANDOFF_DEPTH) {
@@ -259,7 +284,13 @@ public class MasterSolverPBP implements Runnable {
             if (gpuSeedBoards.size() >= 10000) {
                 runGpuHandoff(gpuSeedBoards, HANDOFF_DEPTH);
                 gpuSeedBoards.clear();
-                forceBacktrackTarget = 60 + rnd.nextInt(52);
+
+                // Strategy-specific backtracking logic
+                if (currentStrategy == BuildStrategy.SPIRAL) {
+                    forceBacktrackTarget = 60 + rnd.nextInt(5); // Keep the frame
+                } else {
+                    forceBacktrackTarget = 10 + rnd.nextInt(11); // Standard backtrack
+                }
             }
             return false;
         }
@@ -269,8 +300,8 @@ public class MasterSolverPBP implements Runnable {
             System.arraycopy(flatBoard, 0, bestBoard, 0, 256);
             int[][] displayBoard = buildDisplayBoard(bestBoard);
             updateDisplay(displayBoard);
-            RecordManager.saveRecord(displayBoard, deepestStep);
-            CheckpointManager.save(displayBoard);
+            RecordManager.saveRecord(displayBoard, deepestStep, currentStrategy.name());
+            CheckpointManager.save(displayBoard, currentStrategy.name());
         }
 
         int row = boardIdx / 16;

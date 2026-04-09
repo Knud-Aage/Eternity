@@ -42,7 +42,7 @@ public class MasterSolver implements Runnable {
         this.validator = validator;
         this.scoreRef = scoreRef;
         this.rnd = new Random(seed);
-        this.resumeBoard = CheckpointManager.load(); // Load state on startup
+//        this.resumeBoard = CheckpointManager.load(); // Load state on startup
 
         if (this.resumeBoard != null) {
             int recoveredSteps = 0;
@@ -189,7 +189,7 @@ public class MasterSolver implements Runnable {
             // --- CHECKPOINT SAVE LOGIC (Every 60 Seconds) ---
             long now = System.currentTimeMillis();
             if (now - lastSaveTime > 60000) {
-                CheckpointManager.save(mainBoard);
+//                CheckpointManager.save(mainBoard);
                 lastSaveTime = now;
             }
 

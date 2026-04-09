@@ -23,23 +23,24 @@ public class Main {
      * @param args Command line arguments
      */
     public static void main(String[] args) {
+        // --- 1. SHOW THE STARTUP GUI ---
         StartupDialog dialog = new StartupDialog(null);
         dialog.setVisible(true);
 
+        // If the user closed the window without clicking start, exit gracefully.
         if (!dialog.isStartClicked()) {
-            System.out.println("Setup cancelled. Exiting...");
+            System.out.println("Startup cancelled. Exiting...");
             System.exit(0);
         }
 
         System.out.println("Loading Eternity II Engine...");
 
+        // --- 2. INITIALIZE INVENTORY ---
+        // We MUST load the pieces before we can start the solver!
         int[] basePieces = loadPieces();
         PieceInventory inventory = new PieceInventory(basePieces);
 
-        Runnable solverTask;
-
-        System.out.println("Strategy: Piece-by-Piece (Linear).");
-
+        // --- 3. PREPARE CENTER PIECE (for PBP) ---
         int targetPiece = basePieces[CENTER_PIECE_INDEX];
         for (int r = 0; r < CENTER_PIECE_ROTATION; r++) {
             int n = PieceUtils.getNorth(targetPiece);
@@ -49,17 +50,53 @@ public class Main {
             targetPiece = PieceUtils.pack(w, n, e, s);
         }
 
-        solverTask = new MasterSolverPBP(inventory, targetPiece, dialog.isUseGpu());
+        // --- 4. HARDWARE AND STRATEGY SELECTION ---
+        boolean useGpu = dialog.isUseGpu();
+        boolean usePbp = dialog.isUsePbp();
+        boolean useSpiral = dialog.isUseSpiral();
 
-        if (dialog.isUseGpu()) {
-            System.out.println("Hardware: GPU CUDA Handoff Enabled!");
+        Runnable solverTask = null;
+
+        if (usePbp) {
+            // Map the boolean from the dialog to the Enum in MasterSolverPBP
+            MasterSolverPBP.BuildStrategy strategy = useSpiral ?
+                    MasterSolverPBP.BuildStrategy.SPIRAL :
+                    MasterSolverPBP.BuildStrategy.TYPEWRITER;
+
+            System.out.println("Hardware: " + (useGpu ? "GPU CUDA Handoff Enabled!" : "Running natively on CPU."));
+
+            // Initialize the PBP solver with the correct strategy
+            solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy);
+
         } else {
-            System.out.println("Hardware: Running purely natively on CPU.");
+            // --- MACRO SOLVER PATH ---
+            System.out.println("Strategy: Macro Solver (Divide & Conquer) Selected.");
+            CandidateValidator validator;
+            if (useGpu) {
+                System.out.println("Hardware: GPU Validator selected.");
+                try {
+                    validator = new GpuValidator();
+                } catch (Throwable e) {
+                    System.out.println("GPU unavailable. Falling back to CPU. Error: " + e.getMessage());
+                    validator = new CpuValidator();
+                }
+            } else {
+                System.out.println("Hardware: CPU Validator selected.");
+                validator = new CpuValidator();
+            }
+
+            // NOTE: Add your MasterSolver initialization for the Macro method here if you still use it!
+            // solverTask = new MasterSolver(inventory, validator, targetPiece);
+            System.out.println("Please ensure Macro solver is linked if you intend to use it.");
         }
 
-        Thread solverThread = new Thread(solverTask, "SolverThread");
-        solverThread.start();
+        // --- 5. START THE SOLVER THREAD ---
+        if (solverTask != null) {
+            Thread solverThread = new Thread(solverTask, "SolverThread");
+            solverThread.start();
+        }
 
+        // --- 6. START THE VISUALIZER GUI ---
         SwingUtilities.invokeLater(() -> {
             JFrame frame = new JFrame("Eternity II Solver");
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);

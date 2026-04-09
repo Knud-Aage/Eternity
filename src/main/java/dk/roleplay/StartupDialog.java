@@ -6,15 +6,18 @@ import java.awt.event.ActionEvent;
 
 /**
  * A modal configuration dialog presented at application startup.
- * This dialog allows the user to configure the solving strategy (e.g., Piece-by-Piece or Macro-tiles)
- * and select the hardware validator (e.g., GPU-accelerated CUDA or CPU-only).
+ * This dialog allows the user to configure the solving strategy (e.g., Piece-by-Piece or Macro-tiles),
+ * the specific build order, and select the hardware validator (e.g., GPU-accelerated CUDA or CPU-only).
  */
 public class StartupDialog extends JDialog {
     private final JComboBox<String> strategyBox;
+    private final JComboBox<String> buildOrderBox; // <--- NEW: For Layered vs Spiral
     private final JComboBox<String> hardwareBox;
+
     private boolean startClicked = false;
     private boolean usePbp = false;
     private boolean useGpu = false;
+    private boolean useSpiral = false; // <--- NEW: Stores the build order choice
 
     /**
      * Constructs a new StartupDialog.
@@ -24,20 +27,31 @@ public class StartupDialog extends JDialog {
     public StartupDialog(JFrame parent) {
         super(parent, "Eternity II Engine Setup", true);
         setLayout(new BorderLayout(10, 10));
-        setSize(350, 200);
+        setSize(400, 230); // Made slightly taller to fit the 3rd row
         setLocationRelativeTo(parent);
 
         // --- Create UI Elements ---
-        JPanel panel = new JPanel(new GridLayout(2, 2, 10, 10));
+        // Changed to 3 rows to accommodate the new dropdown
+        JPanel panel = new JPanel(new GridLayout(3, 2, 10, 10));
         panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
+        // 1. Solving Strategy
         panel.add(new JLabel("Solving Strategy:"));
         strategyBox = new JComboBox<>(new String[]{
-                "Piece-by-Piece (Linear)",
+                "Piece-by-Piece",
                 "Divide & Conquer (4x4 Macros)"
         });
         panel.add(strategyBox);
 
+        // 2. Build Order (NEW)
+        panel.add(new JLabel("PBP Build Order:"));
+        buildOrderBox = new JComboBox<>(new String[]{
+                "Layered (Typewriter)",
+                "Spiral (Advanced)"
+        });
+        panel.add(buildOrderBox);
+
+        // 3. Hardware Validator
         panel.add(new JLabel("Hardware Validator:"));
         hardwareBox = new JComboBox<>(new String[]{
                 "GPU Accelerated (CUDA)",
@@ -52,6 +66,7 @@ public class StartupDialog extends JDialog {
         startBtn.setFont(new Font("Arial", Font.BOLD, 14));
         startBtn.addActionListener((ActionEvent e) -> {
             usePbp = strategyBox.getSelectedIndex() == 0;
+            useSpiral = buildOrderBox.getSelectedIndex() == 1; // Capture the spiral choice
             useGpu = hardwareBox.getSelectedIndex() == 0;
             startClicked = true;
             setVisible(false); // Close the dialog
@@ -64,8 +79,6 @@ public class StartupDialog extends JDialog {
 
     /**
      * Checks if the user confirmed the settings by clicking the "Start Engine" button.
-     *
-     * @return true if the start button was clicked; false otherwise.
      */
     public boolean isStartClicked() {
         return startClicked;
@@ -73,19 +86,23 @@ public class StartupDialog extends JDialog {
 
     /**
      * Determines whether the Piece-by-Piece strategy was selected.
-     *
-     * @return true if Piece-by-Piece (Linear) is selected; false if Divide & Conquer (Macros) is selected.
      */
     public boolean isUsePbp() {
         return usePbp;
     }
 
     /**
-     * Determines whether GPU acceleration (CUDA) was selected for validation.
-     *
-     * @return true if GPU acceleration is enabled; false for CPU-only validation.
+     * Determines whether GPU acceleration (CUDA) was selected.
      */
     public boolean isUseGpu() {
         return useGpu;
+    }
+
+    /**
+     * Determines whether the Spiral build order was selected.
+     * * @return true if Spiral is selected; false if Layered (Typewriter) is selected.
+     */
+    public boolean isUseSpiral() {
+        return useSpiral;
     }
 }
