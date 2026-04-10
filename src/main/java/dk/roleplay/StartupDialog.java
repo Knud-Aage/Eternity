@@ -13,7 +13,9 @@ public class StartupDialog extends JDialog {
     private final JComboBox<String> strategyBox;
     private final JComboBox<String> buildOrderBox; // <--- NEW: For Layered vs Spiral
     private final JComboBox<String> hardwareBox;
+    private final JCheckBox lockCenterBox;
 
+    private boolean lockCenter = true;
     private boolean startClicked = false;
     private boolean usePbp = false;
     private boolean useGpu = false;
@@ -32,7 +34,7 @@ public class StartupDialog extends JDialog {
 
         // --- Create UI Elements ---
         // Changed to 3 rows to accommodate the new dropdown
-        JPanel panel = new JPanel(new GridLayout(3, 2, 10, 10));
+        JPanel panel = new JPanel(new GridLayout(4, 2, 10, 10));
         panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
         // 1. Solving Strategy
@@ -58,6 +60,9 @@ public class StartupDialog extends JDialog {
                 "CPU Only"
         });
         panel.add(hardwareBox);
+        panel.add(new JLabel("Game Rules:"));
+        lockCenterBox = new JCheckBox("Lock Official Center Piece (Hard)", true);
+        panel.add(lockCenterBox);
 
         add(panel, BorderLayout.CENTER);
 
@@ -67,6 +72,7 @@ public class StartupDialog extends JDialog {
         startBtn.addActionListener((ActionEvent e) -> {
             usePbp = strategyBox.getSelectedIndex() == 0;
             useSpiral = buildOrderBox.getSelectedIndex() == 1; // Capture the spiral choice
+            lockCenter = lockCenterBox.isSelected();
             useGpu = hardwareBox.getSelectedIndex() == 0;
             startClicked = true;
             setVisible(false); // Close the dialog
@@ -104,5 +110,9 @@ public class StartupDialog extends JDialog {
      */
     public boolean isUseSpiral() {
         return useSpiral;
+    }
+
+    public boolean isLockCenter() {
+        return lockCenter;
     }
 }

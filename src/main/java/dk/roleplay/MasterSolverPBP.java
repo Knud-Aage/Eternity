@@ -2,8 +2,23 @@ package dk.roleplay;
 
 import jcuda.Pointer;
 import jcuda.Sizeof;
-import jcuda.driver.*;
-import static jcuda.driver.JCudaDriver.*;
+import jcuda.driver.CUcontext;
+import jcuda.driver.CUdevice;
+import jcuda.driver.CUdeviceptr;
+import jcuda.driver.CUfunction;
+import jcuda.driver.CUmodule;
+import jcuda.driver.JCudaDriver;
+import static jcuda.driver.JCudaDriver.cuCtxCreate;
+import static jcuda.driver.JCudaDriver.cuCtxSynchronize;
+import static jcuda.driver.JCudaDriver.cuDeviceGet;
+import static jcuda.driver.JCudaDriver.cuInit;
+import static jcuda.driver.JCudaDriver.cuLaunchKernel;
+import static jcuda.driver.JCudaDriver.cuMemAlloc;
+import static jcuda.driver.JCudaDriver.cuMemFree;
+import static jcuda.driver.JCudaDriver.cuMemcpyDtoH;
+import static jcuda.driver.JCudaDriver.cuMemcpyHtoD;
+import static jcuda.driver.JCudaDriver.cuModuleGetFunction;
+import static jcuda.driver.JCudaDriver.cuModuleLoad;
 
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -14,40 +29,33 @@ import java.util.Random;
 
 public class MasterSolverPBP implements Runnable {
 
-    // --- NEW: Strategy Enum ---
-    public enum BuildStrategy {
-        TYPEWRITER,
-        SPIRAL
-    }
-
     private final PieceInventory inventory;
     private final int[] flatBoard = new int[256];
     private final int[] bestBoard = new int[256];
     private final int[] flatResumeBoard = new int[256];
     private final boolean[] usedPhysicalPieces = new boolean[256];
     private final Random rnd = new Random();
-    private int centerPhysicalIdx = -1;
-    private int deepestStep = 0;
     private final int targetPiece;
-
+    private final boolean lockCenter;
     private final boolean useGpu;
     private final BuildStrategy currentStrategy; // Stores the chosen strategy
-
     private final List<int[]> gpuSeedBoards = new ArrayList<>();
-
     // Dynamic settings based on strategy
     private final int HANDOFF_DEPTH;
-    private int forceBacktrackTarget = -1;
-
     // The active build map
     private final int[] BUILD_ORDER;
+    private int centerPhysicalIdx = -1;
+    private int deepestStep = 0;
+    private int forceBacktrackTarget = -1;
 
     // Constructor updated to accept the strategy
-    public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy) {
+    public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
+                           boolean lockCenter) {
         this.inventory = inventory;
         this.targetPiece = trueCenterPiece;
         this.useGpu = useGpu;
         this.currentStrategy = strategy;
+        this.lockCenter = lockCenter;
 
         Arrays.fill(flatBoard, -1);
         Arrays.fill(bestBoard, -1);
@@ -78,6 +86,10 @@ public class MasterSolverPBP implements Runnable {
 
             for (int step = 0; step < 256; step++) {
                 int boardIdx = BUILD_ORDER[step];
+                // Skip the center piece whenever the map lands on it, IF locked
+                if (lockCenter && boardIdx == 135) {
+                    return solve(step + 1);
+                }
                 int r = boardIdx / 16;
                 int c = boardIdx % 16;
 
@@ -94,7 +106,8 @@ public class MasterSolverPBP implements Runnable {
             if (validPieceCount > 0) {
                 this.deepestStep = highestStepLoaded;
                 bestBoard[135] = targetPiece;
-                System.out.println(">>> PBP Checkpoint Loaded! Fast-forwarding up to step " + highestStepLoaded + "...");
+                System.out.println(">>> PBP Checkpoint Loaded! Fast-forwarding up to step " + highestStepLoaded + ".." +
+                        ".");
             }
         }
     }
@@ -132,8 +145,10 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private boolean isValidPiece(int p) {
-        for(int i = 0; i < 1024; i++) {
-            if(inventory.allOrientations[i] == p) return true;
+        for (int i = 0; i < 1024; i++) {
+            if (inventory.allOrientations[i] == p) {
+                return true;
+            }
         }
         return false;
     }
@@ -175,12 +190,12 @@ public class MasterSolverPBP implements Runnable {
         CUdeviceptr d_solution = new CUdeviceptr();
         cuMemAlloc(d_solution, 256L * Sizeof.INT);
 
-        int[] solvedFlag = { 0 };
+        int[] solvedFlag = {0};
         CUdeviceptr d_solvedFlag = new CUdeviceptr();
         cuMemAlloc(d_solvedFlag, Sizeof.INT);
         cuMemcpyHtoD(d_solvedFlag, Pointer.to(solvedFlag), Sizeof.INT);
 
-        int[] gpuScore = { 0 };
+        int[] gpuScore = {0};
         CUdeviceptr d_gpuHighScore = new CUdeviceptr();
         cuMemAlloc(d_gpuHighScore, Sizeof.INT);
         cuMemcpyHtoD(d_gpuHighScore, Pointer.to(gpuScore), Sizeof.INT);
@@ -188,7 +203,7 @@ public class MasterSolverPBP implements Runnable {
         CUdeviceptr d_bestBoardOut = new CUdeviceptr();
         cuMemAlloc(d_bestBoardOut, 256L * Sizeof.INT);
 
-        long[] totalSteps = { 0L };
+        long[] totalSteps = {0L};
         CUdeviceptr d_totalSteps = new CUdeviceptr();
         cuMemAlloc(d_totalSteps, 8L);
         cuMemcpyHtoD(d_totalSteps, Pointer.to(totalSteps), 8L);
@@ -204,7 +219,8 @@ public class MasterSolverPBP implements Runnable {
                 Pointer.to(d_solvedFlag),
                 Pointer.to(d_gpuHighScore),
                 Pointer.to(d_bestBoardOut),
-                Pointer.to(d_totalSteps)
+                Pointer.to(d_totalSteps),
+                Pointer.to(new int[]{lockCenter ? 1 : 0})
         );
 
         int threadsPerBlock = 256;
@@ -220,7 +236,8 @@ public class MasterSolverPBP implements Runnable {
         long speed = (long) (totalSteps[0] / timeSeconds);
 
         System.out.printf("%s: GPU Batch Finished in %d ms! Speed: %,d pieces/sec (Total: %,d)%n",
-                LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")), timeTaken, speed, totalSteps[0]);
+                LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")), timeTaken, speed,
+                totalSteps[0]);
 
         cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
         if (solvedFlag[0] == 1) {
@@ -261,22 +278,40 @@ public class MasterSolverPBP implements Runnable {
     public void run() {
         System.out.println("Starting Engine...");
 
+        if (lockCenter) {
+            flatBoard[135] = targetPiece;
+            if (centerPhysicalIdx != -1) {
+                usedPhysicalPieces[centerPhysicalIdx] = true;
+            }
+        }
+
         flatBoard[135] = targetPiece;
-        if (centerPhysicalIdx != -1) usedPhysicalPieces[centerPhysicalIdx] = true;
+        if (centerPhysicalIdx != -1) {
+            usedPhysicalPieces[centerPhysicalIdx] = true;
+        }
 
-        if (deepestStep > 0) updateDisplay(buildDisplayBoard(bestBoard));
+        if (deepestStep > 0) {
+            updateDisplay(buildDisplayBoard(bestBoard));
+        }
 
-        if (solve(0)) System.out.println("SOLVED!");
-        else System.out.println("Exhausted search space. No solution found.");
+        if (solve(0)) {
+            System.out.println("SOLVED!");
+        } else {
+            System.out.println("Exhausted search space. No solution found.");
+        }
     }
 
     private boolean solve(int step) {
-        if (step == 256) return true;
+        if (step == 256) {
+            return true;
+        }
 
         int boardIdx = BUILD_ORDER[step];
 
         // Skip the center piece whenever the map lands on it
-        if (boardIdx == 135) return solve(step + 1);
+        if (boardIdx == 135) {
+            return solve(step + 1);
+        }
 
         if (useGpu && step == HANDOFF_DEPTH) {
             int[] clonedBoard = new int[256];
@@ -309,21 +344,35 @@ public class MasterSolverPBP implements Runnable {
         int row = boardIdx / 16;
         int col = boardIdx % 16;
 
-        int n_req = (row == 0) ? 0 : (flatBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(flatBoard[boardIdx - 16]) : PieceUtils.WILDCARD);
-        int s_req = (row == 15) ? 0 : (flatBoard[boardIdx + 16] != -1 ? PieceUtils.getNorth(flatBoard[boardIdx + 16]) : PieceUtils.WILDCARD);
-        int w_req = (col == 0) ? 0 : (flatBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(flatBoard[boardIdx - 1]) : PieceUtils.WILDCARD);
-        int e_req = (col == 15) ? 0 : (flatBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(flatBoard[boardIdx + 1]) : PieceUtils.WILDCARD);
+        int n_req = (row == 0) ? 0 : (flatBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(flatBoard[boardIdx - 16])
+                                      : PieceUtils.WILDCARD);
+        int s_req = (row == 15) ? 0 : (flatBoard[boardIdx + 16] != -1 ?
+                PieceUtils.getNorth(flatBoard[boardIdx + 16]) : PieceUtils.WILDCARD);
+        int w_req = (col == 0) ? 0 : (flatBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(flatBoard[boardIdx - 1]) :
+                                      PieceUtils.WILDCARD);
+        int e_req = (col == 15) ? 0 : (flatBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(flatBoard[boardIdx + 1]) :
+                                       PieceUtils.WILDCARD);
 
         int b_req = 0;
-        if (row == 0 || row == 15) b_req++;
-        if (col == 0 || col == 15) b_req++;
+        if (row == 0 || row == 15) {
+            b_req++;
+        }
+        if (col == 0 || col == 15) {
+            b_req++;
+        }
 
         List<Integer> pool;
-        if (b_req == 2) pool = inventory.corners;
-        else if (b_req == 1) pool = inventory.edges;
-        else pool = inventory.interior;
+        if (b_req == 2) {
+            pool = inventory.corners;
+        } else if (b_req == 1) {
+            pool = inventory.edges;
+        } else {
+            pool = inventory.interior;
+        }
 
-        if (pool.isEmpty()) return false;
+        if (pool.isEmpty()) {
+            return false;
+        }
 
         int size = pool.size();
         int offset = rnd.nextInt(size);
@@ -334,10 +383,14 @@ public class MasterSolverPBP implements Runnable {
             int physicalIdx = inventory.physicalMapping[orientationIdx];
 
             if (flatResumeBoard[boardIdx] != -1) {
-                if (p != flatResumeBoard[boardIdx]) continue;
+                if (p != flatResumeBoard[boardIdx]) {
+                    continue;
+                }
             }
 
-            if (usedPhysicalPieces[physicalIdx]) continue;
+            if (usedPhysicalPieces[physicalIdx]) {
+                continue;
+            }
 
             if (matches(p, n_req, e_req, s_req, w_req)) {
 
@@ -347,7 +400,9 @@ public class MasterSolverPBP implements Runnable {
                 int ghostPiece = flatResumeBoard[boardIdx];
                 flatResumeBoard[boardIdx] = -1;
 
-                if (solve(step + 1)) return true;
+                if (solve(step + 1)) {
+                    return true;
+                }
 
                 flatBoard[boardIdx] = -1;
                 usedPhysicalPieces[physicalIdx] = false;
@@ -365,9 +420,15 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private boolean matches(int p, int n, int e, int s, int w) {
-        if (n != PieceUtils.WILDCARD && PieceUtils.getNorth(p) != n) return false;
-        if (e != PieceUtils.WILDCARD && PieceUtils.getEast(p) != e) return false;
-        if (s != PieceUtils.WILDCARD && PieceUtils.getSouth(p) != s) return false;
+        if (n != PieceUtils.WILDCARD && PieceUtils.getNorth(p) != n) {
+            return false;
+        }
+        if (e != PieceUtils.WILDCARD && PieceUtils.getEast(p) != e) {
+            return false;
+        }
+        if (s != PieceUtils.WILDCARD && PieceUtils.getSouth(p) != s) {
+            return false;
+        }
         return w == PieceUtils.WILDCARD || PieceUtils.getWest(p) == w;
     }
 
@@ -375,7 +436,9 @@ public class MasterSolverPBP implements Runnable {
         int[][] displayBoard = new int[16][16];
         for (int i = 0; i < 16; i++) Arrays.fill(displayBoard[i], -1);
         for (int i = 0; i < 256; i++) {
-            if (sourceArray[i] == -1) continue;
+            if (sourceArray[i] == -1) {
+                continue;
+            }
             int r = i / 16;
             int c = i % 16;
             displayBoard[r][c] = sourceArray[i];
@@ -385,5 +448,11 @@ public class MasterSolverPBP implements Runnable {
 
     private void updateDisplay(int[][] displayBoard) {
         Main.updateDisplay(deepestStep, displayBoard);
+    }
+
+    // --- NEW: Strategy Enum ---
+    public enum BuildStrategy {
+        TYPEWRITER,
+        SPIRAL
     }
 }

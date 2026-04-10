@@ -54,19 +54,21 @@ public class Main {
         boolean useGpu = dialog.isUseGpu();
         boolean usePbp = dialog.isUsePbp();
         boolean useSpiral = dialog.isUseSpiral();
+        boolean lockCenter = dialog.isLockCenter(); // <--- Get the setting
 
         Runnable solverTask = null;
 
         if (usePbp) {
-            // Map the boolean from the dialog to the Enum in MasterSolverPBP
             MasterSolverPBP.BuildStrategy strategy = useSpiral ?
                     MasterSolverPBP.BuildStrategy.SPIRAL :
                     MasterSolverPBP.BuildStrategy.TYPEWRITER;
 
+            // Pass the new boolean into the engine
+            solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy, lockCenter);
             System.out.println("Hardware: " + (useGpu ? "GPU CUDA Handoff Enabled!" : "Running natively on CPU."));
 
             // Initialize the PBP solver with the correct strategy
-            solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy);
+            solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy, lockCenter);
 
         } else {
             // --- MACRO SOLVER PATH ---

@@ -33,14 +33,15 @@ extern "C" __global__ void solvePBP(
     int* d_partialBoards,
     int numPartialBoards,
     int startingStep,
-    int* d_buildOrder, // <--- DET NYE SPIRALKORT
+    int* d_buildOrder,
     int* d_allOrientations,
     int* d_physicalMapping,
     int* d_solution,
     int* d_solvedFlag,
     int* d_gpuHighScore,
     int* d_bestBoardOut,
-    unsigned long long* d_totalSteps
+    unsigned long long* d_totalSteps,
+    int lockCenterFlag
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numPartialBoards) return;
@@ -78,8 +79,8 @@ extern "C" __global__ void solvePBP(
 
         int boardIdx = d_buildOrder[step];
 
-        // Hvis vi lander på centerbrikken i spiralen, gå til næste skridt
-        if (boardIdx == 135) {
+        // ONLY skip the center piece if the rule is locked!
+        if (lockCenterFlag == 1 && boardIdx == 135) {
             step++;
             continue;
         }
@@ -125,7 +126,9 @@ extern "C" __global__ void solvePBP(
             pieceStack[step] = 0;
             step--;
 
-            if (step >= 0 && d_buildOrder[step] == 135) step--;
+
+            // ONLY skip backwards over the center piece if the rule is locked!
+            if (lockCenterFlag == 1 && step >= 0 && d_buildOrder[step] == 135) step--;
 
             if (step >= startingStep) {
                 int pToUndo = board[d_buildOrder[step]];
