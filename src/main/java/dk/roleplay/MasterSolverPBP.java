@@ -5,6 +5,8 @@ import jcuda.Sizeof;
 import jcuda.driver.*;
 import static jcuda.driver.JCudaDriver.*;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -217,8 +219,8 @@ public class MasterSolverPBP implements Runnable {
         double timeSeconds = Math.max(timeTaken / 1000.0, 0.001);
         long speed = (long) (totalSteps[0] / timeSeconds);
 
-        System.out.printf("GPU Batch Finished in %d ms! Speed: %,d pieces/sec (Total: %,d)%n",
-                timeTaken, speed, totalSteps[0]);
+        System.out.printf("%s: GPU Batch Finished in %d ms! Speed: %,d pieces/sec (Total: %,d)%n",
+                LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")), timeTaken, speed, totalSteps[0]);
 
         cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
         if (solvedFlag[0] == 1) {
