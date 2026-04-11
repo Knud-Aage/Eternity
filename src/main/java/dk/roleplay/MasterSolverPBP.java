@@ -34,6 +34,7 @@ public class MasterSolverPBP implements Runnable {
     private int centerPhysicalIdx = -1;
     private int deepestStep = 0;
     private final int targetPiece;
+    public static int absoluteHighScore = 0;
 
     private final boolean useGpu;
     private final BuildStrategy currentStrategy;
@@ -87,6 +88,7 @@ public class MasterSolverPBP implements Runnable {
             }
             if (highestStepLoaded > 0) {
                 this.deepestStep = highestStepLoaded;
+                this.absoluteHighScore = highestStepLoaded; // <--- NY LINJE
                 if (lockCenter) bestBoard[135] = targetPiece;
             }
         }
@@ -152,7 +154,8 @@ public class MasterSolverPBP implements Runnable {
         if (numBoards == 0) return;
 
         int[] flatBoards = new int[numBoards * 256];
-        for (int i = 0; i < numBoards; i++) System.arraycopy(partialBoardsList.get(i), 0, flatBoards, i * 256, 256);
+        for (int i = 0; i < numBoards; i++)
+            System.arraycopy(partialBoardsList.get(i), 0, flatBoards, i * 256, 256);
 
         CUdeviceptr d_partialBoards = new CUdeviceptr();
         cuMemAlloc(d_partialBoards, (long) numBoards * 256 * Sizeof.INT);
@@ -244,12 +247,13 @@ public class MasterSolverPBP implements Runnable {
             throw new PoisonedBaseCampException();
         }
 
+        int[] winningBoard = new int[256];
+        updateDisplay(buildDisplayBoard(winningBoard));
+
         cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
         if (solvedFlag[0] == 1) {
             System.out.println(">>> GPU FOUND THE SOLUTION! <<<");
-            int[] winningBoard = new int[256];
             cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
-            updateDisplay(buildDisplayBoard(winningBoard));
             RecordManager.saveRecord(buildDisplayBoard(winningBoard), 256, currentStrategy.name());
             System.exit(0);
         }
@@ -264,8 +268,12 @@ public class MasterSolverPBP implements Runnable {
 
             int[][] displayBoard = buildDisplayBoard(bestBoard);
             updateDisplay(displayBoard);
-            RecordManager.saveRecord(displayBoard, deepestStep, currentStrategy.name());
-            CheckpointManager.save(displayBoard, currentStrategy.name());
+
+            if (deepestStep > absoluteHighScore) {
+                absoluteHighScore = deepestStep;
+                RecordManager.saveRecord(displayBoard, absoluteHighScore, currentStrategy.name());
+                CheckpointManager.save(displayBoard, currentStrategy.name());
+            }
 
             if (currentStrategy == BuildStrategy.SPIRAL && deepestStep > HANDOFF_DEPTH + 30) {
                 cuFreeResources(d_partialBoards, d_buildOrder, d_allOrientations, d_physicalMapping, d_solution, d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths);
@@ -401,12 +409,11 @@ public class MasterSolverPBP implements Runnable {
             return false;
         }
 
-        if (step > deepestStep) {
-            deepestStep = step;
-            System.arraycopy(flatBoard, 0, bestBoard, 0, 256);
+        if (deepestStep > absoluteHighScore) {
+            absoluteHighScore = deepestStep;
             int[][] displayBoard = buildDisplayBoard(bestBoard);
             updateDisplay(displayBoard);
-            RecordManager.saveRecord(displayBoard, deepestStep, currentStrategy.name());
+            RecordManager.saveRecord(displayBoard, absoluteHighScore, currentStrategy.name());
             CheckpointManager.save(displayBoard, currentStrategy.name());
         }
 
@@ -488,6 +495,6 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private void updateDisplay(int[][] displayBoard) {
-        Main.updateDisplay(deepestStep, displayBoard);
+        Main.updateDisplay(absoluteHighScore, displayBoard);
     }
 }

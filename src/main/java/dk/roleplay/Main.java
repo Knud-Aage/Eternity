@@ -110,13 +110,13 @@ public class Main {
             frame.pack();
             frame.setLocationRelativeTo(null);
             frame.setVisible(true);
-            Main.maxScore = Math.max(maxScore, currentScore.get());
+            Main.maxScore = Math.max(Main.maxScore, currentScore.get());
 
             new javax.swing.Timer(100, e -> {
                 viz.repaint();
                 int score = currentScore.get();
                 String status = score == 0 ? " [SEARCHING...]" : (score == 256 ? " [SOLVED!]" : " [SOLVING...]");
-                frame.setTitle("Eternity II - " + maxScore + "/256 Pieces" + status);
+                frame.setTitle("Eternity II - " + score + "/256 Pieces" + status);
             }).start();
         });
     }
