@@ -16,6 +16,7 @@ public class Main {
 
     private static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
+    public static int maxScore = 0;
 
     /**
      * Application main method.
@@ -109,12 +110,13 @@ public class Main {
             frame.pack();
             frame.setLocationRelativeTo(null);
             frame.setVisible(true);
+            Main.maxScore = Math.max(maxScore, currentScore.get());
 
             new javax.swing.Timer(100, e -> {
                 viz.repaint();
                 int score = currentScore.get();
                 String status = score == 0 ? " [SEARCHING...]" : (score == 256 ? " [SOLVED!]" : " [SOLVING...]");
-                frame.setTitle("Eternity II - " + score + "/256 Pieces" + status);
+                frame.setTitle("Eternity II - " + maxScore + "/256 Pieces" + status);
             }).start();
         });
     }

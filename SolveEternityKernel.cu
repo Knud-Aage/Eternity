@@ -41,7 +41,8 @@ extern "C" __global__ void solvePBP(
     int* d_gpuHighScore,
     int* d_bestBoardOut,
     unsigned long long* d_totalSteps,
-    int lockCenterFlag
+    int lockCenterFlag,
+    int* d_threadDepths
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numPartialBoards) return;
@@ -161,4 +162,6 @@ extern "C" __global__ void solvePBP(
     }
 
     atomicAdd(d_totalSteps, stepCounter);
+    // Every thread saves how deep its specific seed survived
+    d_threadDepths[tid] = maxStepReached;
 }
