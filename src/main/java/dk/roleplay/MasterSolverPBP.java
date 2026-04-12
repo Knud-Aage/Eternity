@@ -5,7 +5,7 @@ import jcuda.Sizeof;
 import jcuda.driver.*;
 import static jcuda.driver.JCudaDriver.*;
 
-import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -20,7 +20,7 @@ public class MasterSolverPBP implements Runnable {
 
     private static class EvolutionLeapException extends RuntimeException {}
     private static class PoisonedBaseCampException extends RuntimeException {}
-    private static class ManualOverrideException extends RuntimeException {} // <--- NYT
+    private static class ManualOverrideException extends RuntimeException {}
 
     // GLOBALE CUDA VARIABLER
     private CUcontext cuContext;
@@ -42,7 +42,7 @@ public class MasterSolverPBP implements Runnable {
     private final boolean useGpu;
     private final BuildStrategy currentStrategy;
     private final boolean lockCenter;
-    private final String saveProfile; // <--- NYT: Holder styr på de 4 profiler
+    private final String saveProfile;
 
     private final List<int[]> gpuSeedBoards = new ArrayList<>();
 
@@ -50,12 +50,18 @@ public class MasterSolverPBP implements Runnable {
     private int forceBacktrackTarget = -1;
     private int targetBatchSize = 10000;
 
-    // <--- NYT: GUI KONTROL VARIABLER --->
+    // GUI KONTROL VARIABLER
     private volatile double extinctionThreshold = 0.98;
     private volatile boolean manualOverrideRequested = false;
     private volatile int manualBaseCampTarget = 0;
+    private volatile int userBatchSizeOverride = -1;
 
     private final int[] BUILD_ORDER;
+
+    // <--- NYT: TIMESTAMP HJÆLPEFUNKTION --->
+    private String timestamp() {
+        return "[" + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "] ";
+    }
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
         Arrays.fill(flatBoard, -1);
@@ -68,7 +74,6 @@ public class MasterSolverPBP implements Runnable {
         this.currentStrategy = strategy;
         this.lockCenter = lockCenter;
 
-        // Sørger for at Cheat og Non-Cheat filer ikke overskriver hinanden
         this.saveProfile = strategy.name() + (lockCenter ? "_LOCKED" : "_UNLOCKED");
 
         for (int i = 0; i < 1024; i++) {
@@ -110,7 +115,6 @@ public class MasterSolverPBP implements Runnable {
         }
     }
 
-    // <--- NYT: METODER SOM GUI'EN KAN KALDE --->
     public void setExtinctionThreshold(double threshold) {
         this.extinctionThreshold = threshold;
     }
@@ -118,6 +122,10 @@ public class MasterSolverPBP implements Runnable {
     public void triggerManualOverride(int targetBaseCamp) {
         this.manualBaseCampTarget = targetBaseCamp;
         this.manualOverrideRequested = true;
+    }
+
+    public void setBatchSizeOverride(int size) {
+        this.userBatchSizeOverride = size;
     }
 
     private void initCUDA() {
@@ -134,7 +142,7 @@ public class MasterSolverPBP implements Runnable {
 
         cuFunction = new CUfunction();
         cuModuleGetFunction(cuFunction, cuModule, "solvePBP");
-        System.out.printf("%s: CUDA>>> CUDA Context & Kernel indlæst succesfuldt! %n", LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")));
+        System.out.println(timestamp() + ">>> CUDA Context & Kernel indlæst succesfuldt!");
     }
 
     private static int[] generateTypewriterOrder() {
@@ -260,8 +268,9 @@ public class MasterSolverPBP implements Runnable {
             if (d <= startingStep + 5) deadOnArrival++;
         }
 
-        System.out.printf("%s: GPU Batch | %d ms | %,.0f pcs/s | Avg Depth: %.1f | Max: %d | Dead < 5: %d/%d\n",
-                LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")), timeTaken, speed, (double)sumDepth/numBoards, maxInBatch, deadOnArrival, numBoards);
+        // <--- NYT: Tidsstempel på GPU udskriften --->
+        System.out.printf("%sGPU Batch | %d ms | %,.0f pcs/s | Avg Depth: %.1f | Max: %d | Dead < 5: %d/%d\n",
+                timestamp(), timeTaken, speed, (double)sumDepth/numBoards, maxInBatch, deadOnArrival, numBoards);
 
         if (numBoards > 0 && (double) deadOnArrival / numBoards >= extinctionThreshold) {
             cuFreeResources(d_partialBoards, d_buildOrder, d_allOrientations, d_physicalMapping, d_solution, d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths);
@@ -270,7 +279,7 @@ public class MasterSolverPBP implements Runnable {
 
         cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
         if (solvedFlag[0] == 1) {
-            System.out.println(">>> GPU FOUND THE SOLUTION! <<<");
+            System.out.println(timestamp() + ">>> GPU FOUND THE SOLUTION! <<<");
             int[] winningBoard = new int[256];
             cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
             updateDisplay(buildDisplayBoard(winningBoard));
@@ -293,6 +302,7 @@ public class MasterSolverPBP implements Runnable {
                 absoluteHighScore = deepestStep;
                 RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
                 CheckpointManager.save(displayBoard, saveProfile);
+                System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " BRIKKER! <<<");
             }
 
             if (currentStrategy == BuildStrategy.SPIRAL && deepestStep > HANDOFF_DEPTH + 30) {
@@ -312,7 +322,7 @@ public class MasterSolverPBP implements Runnable {
 
     @Override
     public void run() {
-        System.out.println("Starting Engine (Profile: " + saveProfile + ")...");
+        System.out.println(timestamp() + "Starting Engine (Profile: " + saveProfile + ")...");
 
         if (useGpu) {
             initCUDA();
@@ -337,23 +347,24 @@ public class MasterSolverPBP implements Runnable {
 
                 int gap;
                 if (lockedPieces > 180) {
-                    gap = 2;
-                    targetBatchSize = 50;
+                    gap = 8;
+                    targetBatchSize = 5000;
                 } else if (lockedPieces > 150) {
-                    gap = 4;
-                    targetBatchSize = 250;
+                    gap = 10;
+                    targetBatchSize = 10000;
                 } else {
                     gap = 15;
                     targetBatchSize = 10000;
                 }
 
                 HANDOFF_DEPTH = lockedPieces + gap;
+                int activeBatch = (userBatchSizeOverride > 0) ? userBatchSizeOverride : targetBatchSize;
 
-                System.out.println("\n=======================================================");
-                System.out.println(">>> EVOLUTION! Base Camp locked to step " + lockedPieces);
-                System.out.println(">>> CPU building freely to Handoff at step " + HANDOFF_DEPTH);
-                System.out.println(">>> Target seeds before GPU trigger: " + targetBatchSize);
-                System.out.println("=======================================================\n");
+//                System.out.println("\n" + timestamp() + "=======================================================");
+//                System.out.println(timestamp() + ">>> EVOLUTION! Base Camp locked to step " + lockedPieces);
+//                System.out.println(timestamp() + ">>> CPU building freely to Handoff at step " + HANDOFF_DEPTH);
+//                System.out.println(timestamp() + ">>> Target seeds before GPU trigger: " + activeBatch + (userBatchSizeOverride > 0 ? " (MANUAL)" : " (AUTO)"));
+//                System.out.println(timestamp() + "=======================================================\n");
 
                 Arrays.fill(flatResumeBoard, -1);
                 for (int step = 0; step < lockedPieces; step++) {
@@ -366,7 +377,7 @@ public class MasterSolverPBP implements Runnable {
             boolean spaceExhausted = true;
             try {
                 if (solve(0)) {
-                    System.out.println("SOLVED!");
+                    System.out.println(timestamp() + "SOLVED!");
                     return;
                 }
             } catch (EvolutionLeapException e) {
@@ -375,28 +386,27 @@ public class MasterSolverPBP implements Runnable {
                 spaceExhausted = false;
                 if (lockedPieces > 70) {
                     deepestStep = Math.max(70, lockedPieces - 8);
-                    System.out.println("\n[!] EXTINCTION EVENT! " + (extinctionThreshold*100) + "%+ seeds died instantly.");
-                    System.out.println("[!] Poisoned Base Camp detected. Retreating to step " + deepestStep + "...\n");
+                    System.out.println("\n" + timestamp() + "[!] EXTINCTION EVENT! " + (int)(extinctionThreshold*100) + "%+ seeds died instantly.");
+                    System.out.println(timestamp() + "[!] Poisoned Base Camp detected. Retreating to step " + deepestStep + "...\n");
                 }
             } catch (ManualOverrideException e) {
-                // <--- GUI OVERRIDE HÅNDTERING --->
                 spaceExhausted = false;
-                deepestStep = manualBaseCampTarget + 30; // Tvinger næste loop til at bruge dit tal!
-                System.out.println("\n[!] MANUAL OVERRIDE! User forced base camp jump to step " + manualBaseCampTarget + ".\n");
+                deepestStep = manualBaseCampTarget + 30;
+                System.out.println("\n" + timestamp() + "[!] MANUAL OVERRIDE! User forced base camp jump to step " + manualBaseCampTarget + ".\n");
             }
 
             if (spaceExhausted) {
                 if (!gpuSeedBoards.isEmpty()) {
-                    System.out.println(">>> Space exhausted early! Flushing remaining " + gpuSeedBoards.size() + " seeds to GPU...");
+                    System.out.println(timestamp() + ">>> Space exhausted early! Flushing remaining " + gpuSeedBoards.size() + " seeds to GPU...");
                     runGpuHandoff(gpuSeedBoards, HANDOFF_DEPTH);
                     gpuSeedBoards.clear();
                 }
 
                 if (currentStrategy == BuildStrategy.SPIRAL && lockedPieces > 0) {
                     deepestStep = Math.max(0, lockedPieces - 10);
-                    System.out.println(">>> Base camp exhausted. Falling back to search new path...");
+                    System.out.println(timestamp() + ">>> Base camp exhausted. Falling back to search new path...");
                 } else {
-                    System.out.println("Total search space exhausted. No solution found.");
+                    System.out.println(timestamp() + "Total search space exhausted. No solution found.");
                     return;
                 }
             }
@@ -404,7 +414,6 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private boolean solve(int step) {
-        // <--- GUI OVERRIDE TJEK --->
         if (manualOverrideRequested) {
             manualOverrideRequested = false;
             throw new ManualOverrideException();
@@ -421,12 +430,14 @@ public class MasterSolverPBP implements Runnable {
             System.arraycopy(flatBoard, 0, clonedBoard, 0, 256);
             gpuSeedBoards.add(clonedBoard);
 
-            int printInterval = (targetBatchSize <= 250) ? 10 : 250;
-//            if (gpuSeedBoards.size() % printInterval == 0) {
-//                System.out.println("   [CPU Status] Fandt " + gpuSeedBoards.size() + " / " + targetBatchSize + " seeds...");
+            int activeBatch = (userBatchSizeOverride > 0) ? userBatchSizeOverride : targetBatchSize;
+            int printInterval = (activeBatch <= 250) ? 10 : (activeBatch <= 1000 ? 100 : 1000);
+
+//            if (gpuSeedBoards.size() % printInterval == 0 && !gpuSeedBoards.isEmpty()) {
+//                System.out.println(timestamp() + "   [CPU Status] Fandt " + gpuSeedBoards.size() + " / " + activeBatch + " seeds...");
 //            }
 
-            if (gpuSeedBoards.size() >= targetBatchSize) {
+            if (gpuSeedBoards.size() >= activeBatch) {
                 runGpuHandoff(gpuSeedBoards, HANDOFF_DEPTH);
                 gpuSeedBoards.clear();
 
@@ -449,6 +460,7 @@ public class MasterSolverPBP implements Runnable {
                 absoluteHighScore = deepestStep;
                 RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
                 CheckpointManager.save(displayBoard, saveProfile);
+                System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " BRIKKER! <<<");
             }
         }
 

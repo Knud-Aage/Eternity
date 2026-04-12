@@ -7,9 +7,6 @@ import java.io.FileReader;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * Main entry point for the Eternity II Solver application.
- */
 public class Main {
     private static final int CENTER_PIECE_INDEX = 138;
     private static final int CENTER_PIECE_ROTATION = 2;
@@ -61,7 +58,6 @@ public class Main {
             solverThread.start();
         }
 
-        // Final reference so we can use it inside the GUI Thread
         final Runnable finalSolverTask = solverTask;
 
         SwingUtilities.invokeLater(() -> {
@@ -73,18 +69,20 @@ public class Main {
             BoardVisualizer viz = new BoardVisualizer(currentDisplayBoard);
             frame.add(viz, BorderLayout.CENTER);
 
-            // <--- NYT: GUI KONTROL PANEL --->
+            // <--- KONTROL PANEL --->
             if (finalSolverTask instanceof MasterSolverPBP) {
                 MasterSolverPBP pbpSolver = (MasterSolverPBP) finalSolverTask;
 
                 JPanel controlPanel = new JPanel();
                 controlPanel.setLayout(new BoxLayout(controlPanel, BoxLayout.Y_AXIS));
-                controlPanel.setBorder(BorderFactory.createTitledBorder("Director Controls"));
+                controlPanel.setBorder(BorderFactory.createTitledBorder(
+                        BorderFactory.createLineBorder(Color.GRAY),
+                        "Director Controls",
+                        0, 0, new Font("Arial", Font.BOLD, 14), Color.LIGHT_GRAY));
                 controlPanel.setPreferredSize(new Dimension(300, 0));
                 controlPanel.setBackground(new Color(40, 42, 45));
 
-                // Styling
-                Font labelFont = new Font("Arial", Font.BOLD, 14);
+                Font labelFont = new Font("Arial", Font.BOLD, 13);
                 Color textColor = Color.WHITE;
 
                 // 1. Extinction Threshold Slider
@@ -100,7 +98,28 @@ public class Main {
                     pbpSolver.setExtinctionThreshold(extSlider.getValue() / 100.0);
                 });
 
-                // 2. Base Camp Override Slider
+                // 2. Batch Size Dropdown (NYT)
+                JLabel batchLabel = new JLabel("Target Seeds: AUTO (Dynamic)");
+                batchLabel.setFont(labelFont);
+                batchLabel.setForeground(textColor);
+                batchLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                String[] batchOptions = {"AUTO (Dynamic)", "50", "100", "250", "500", "1000", "2500", "5000", "10000"};
+                JComboBox<String> batchBox = new JComboBox<>(batchOptions);
+                batchBox.setMaximumSize(new Dimension(150, 30));
+                batchBox.setAlignmentX(Component.CENTER_ALIGNMENT);
+                batchBox.addActionListener(e -> {
+                    String selected = (String) batchBox.getSelectedItem();
+                    if (selected.startsWith("AUTO")) {
+                        batchLabel.setText("Target Seeds: AUTO (Dynamic)");
+                        pbpSolver.setBatchSizeOverride(-1); // -1 = Slå auto til igen
+                    } else {
+                        batchLabel.setText("Target Seeds: " + selected + " (LOCKED)");
+                        pbpSolver.setBatchSizeOverride(Integer.parseInt(selected));
+                    }
+                });
+
+                // 3. Base Camp Override Slider
                 JLabel campLabel = new JLabel("Force Next Base Camp: 70");
                 campLabel.setFont(labelFont);
                 campLabel.setForeground(textColor);
@@ -113,7 +132,7 @@ public class Main {
                 campSlider.setPaintTicks(true);
                 campSlider.addChangeListener(e -> campLabel.setText("Force Next Base Camp: " + campSlider.getValue()));
 
-                // 3. Override Button
+                // 4. Override Button
                 JButton forceBtn = new JButton("FORCE JUMP!");
                 forceBtn.setFont(new Font("Arial", Font.BOLD, 16));
                 forceBtn.setBackground(new Color(200, 50, 50));
@@ -121,11 +140,17 @@ public class Main {
                 forceBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
                 forceBtn.addActionListener(e -> pbpSolver.triggerManualOverride(campSlider.getValue()));
 
-                // Tilføj det hele til panelet med lidt luft imellem
+                // Tilføj det hele til panelet med pæne mellemrum
                 controlPanel.add(Box.createVerticalStrut(30));
                 controlPanel.add(extLabel);
                 controlPanel.add(Box.createVerticalStrut(10));
                 controlPanel.add(extSlider);
+
+                controlPanel.add(Box.createVerticalStrut(30));
+
+                controlPanel.add(batchLabel);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(batchBox);
 
                 controlPanel.add(Box.createVerticalStrut(50));
 
