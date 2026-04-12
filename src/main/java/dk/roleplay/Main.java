@@ -1,6 +1,7 @@
 package dk.roleplay;
 
 import javax.swing.*;
+import java.awt.*;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.util.Random;
@@ -8,7 +9,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Main entry point for the Eternity II Solver application.
- * Orchestrates piece loading, hardware initialization, and solver execution.
  */
 public class Main {
     private static final int CENTER_PIECE_INDEX = 138;
@@ -16,32 +16,20 @@ public class Main {
 
     private static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
-    public static int maxScore = 0;
 
-    /**
-     * Application main method.
-     *
-     * @param args Command line arguments
-     */
     public static void main(String[] args) {
-        // --- 1. SHOW THE STARTUP GUI ---
         StartupDialog dialog = new StartupDialog(null);
         dialog.setVisible(true);
 
-        // If the user closed the window without clicking start, exit gracefully.
         if (!dialog.isStartClicked()) {
-            System.out.println("Startup cancelled. Exiting...");
             System.exit(0);
         }
 
         System.out.println("Loading Eternity II Engine...");
 
-        // --- 2. INITIALIZE INVENTORY ---
-        // We MUST load the pieces before we can start the solver!
         int[] basePieces = loadPieces();
         PieceInventory inventory = new PieceInventory(basePieces);
 
-        // --- 3. PREPARE CENTER PIECE (for PBP) ---
         int targetPiece = basePieces[CENTER_PIECE_INDEX];
         for (int r = 0; r < CENTER_PIECE_ROTATION; r++) {
             int n = PieceUtils.getNorth(targetPiece);
@@ -51,11 +39,10 @@ public class Main {
             targetPiece = PieceUtils.pack(w, n, e, s);
         }
 
-        // --- 4. HARDWARE AND STRATEGY SELECTION ---
         boolean useGpu = dialog.isUseGpu();
         boolean usePbp = dialog.isUsePbp();
         boolean useSpiral = dialog.isUseSpiral();
-        boolean lockCenter = dialog.isLockCenter(); // <--- Get the setting
+        boolean lockCenter = dialog.isLockCenter();
 
         Runnable solverTask = null;
 
@@ -64,53 +51,96 @@ public class Main {
                     MasterSolverPBP.BuildStrategy.SPIRAL :
                     MasterSolverPBP.BuildStrategy.TYPEWRITER;
 
-            // Pass the new boolean into the engine
             solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy, lockCenter);
-            System.out.println("Hardware: " + (useGpu ? "GPU CUDA Handoff Enabled!" : "Running natively on CPU."));
-
-            // Initialize the PBP solver with the correct strategy
-            solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy, lockCenter);
-
         } else {
-            // --- MACRO SOLVER PATH ---
-            System.out.println("Strategy: Macro Solver (Divide & Conquer) Selected.");
-            CandidateValidator validator;
-            if (useGpu) {
-                System.out.println("Hardware: GPU Validator selected.");
-                try {
-                    validator = new GpuValidator();
-                } catch (Throwable e) {
-                    System.out.println("GPU unavailable. Falling back to CPU. Error: " + e.getMessage());
-                    validator = new CpuValidator();
-                }
-            } else {
-                System.out.println("Hardware: CPU Validator selected.");
-                validator = new CpuValidator();
-            }
-
-            // NOTE: Add your MasterSolver initialization for the Macro method here if you still use it!
-            // solverTask = new MasterSolver(inventory, validator, targetPiece);
-            System.out.println("Please ensure Macro solver is linked if you intend to use it.");
+            System.out.println("Macro solver ikke implementeret i denne main.");
         }
 
-        // --- 5. START THE SOLVER THREAD ---
         if (solverTask != null) {
             Thread solverThread = new Thread(solverTask, "SolverThread");
             solverThread.start();
         }
 
-        // --- 6. START THE VISUALIZER GUI ---
+        // Final reference so we can use it inside the GUI Thread
+        final Runnable finalSolverTask = solverTask;
+
         SwingUtilities.invokeLater(() -> {
             JFrame frame = new JFrame("Eternity II Solver");
             frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
             frame.setExtendedState(JFrame.MAXIMIZED_BOTH);
+            frame.setLayout(new BorderLayout());
 
             BoardVisualizer viz = new BoardVisualizer(currentDisplayBoard);
-            frame.add(viz);
+            frame.add(viz, BorderLayout.CENTER);
+
+            // <--- NYT: GUI KONTROL PANEL --->
+            if (finalSolverTask instanceof MasterSolverPBP) {
+                MasterSolverPBP pbpSolver = (MasterSolverPBP) finalSolverTask;
+
+                JPanel controlPanel = new JPanel();
+                controlPanel.setLayout(new BoxLayout(controlPanel, BoxLayout.Y_AXIS));
+                controlPanel.setBorder(BorderFactory.createTitledBorder("Director Controls"));
+                controlPanel.setPreferredSize(new Dimension(300, 0));
+                controlPanel.setBackground(new Color(40, 42, 45));
+
+                // Styling
+                Font labelFont = new Font("Arial", Font.BOLD, 14);
+                Color textColor = Color.WHITE;
+
+                // 1. Extinction Threshold Slider
+                JLabel extLabel = new JLabel("Extinction Trigger: 98%");
+                extLabel.setFont(labelFont);
+                extLabel.setForeground(textColor);
+                extLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                JSlider extSlider = new JSlider(50, 100, 98);
+                extSlider.setBackground(new Color(40, 42, 45));
+                extSlider.addChangeListener(e -> {
+                    extLabel.setText("Extinction Trigger: " + extSlider.getValue() + "%");
+                    pbpSolver.setExtinctionThreshold(extSlider.getValue() / 100.0);
+                });
+
+                // 2. Base Camp Override Slider
+                JLabel campLabel = new JLabel("Force Next Base Camp: 70");
+                campLabel.setFont(labelFont);
+                campLabel.setForeground(textColor);
+                campLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                JSlider campSlider = new JSlider(0, 200, 70);
+                campSlider.setBackground(new Color(40, 42, 45));
+                campSlider.setMajorTickSpacing(50);
+                campSlider.setMinorTickSpacing(10);
+                campSlider.setPaintTicks(true);
+                campSlider.addChangeListener(e -> campLabel.setText("Force Next Base Camp: " + campSlider.getValue()));
+
+                // 3. Override Button
+                JButton forceBtn = new JButton("FORCE JUMP!");
+                forceBtn.setFont(new Font("Arial", Font.BOLD, 16));
+                forceBtn.setBackground(new Color(200, 50, 50));
+                forceBtn.setForeground(Color.WHITE);
+                forceBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
+                forceBtn.addActionListener(e -> pbpSolver.triggerManualOverride(campSlider.getValue()));
+
+                // Tilføj det hele til panelet med lidt luft imellem
+                controlPanel.add(Box.createVerticalStrut(30));
+                controlPanel.add(extLabel);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(extSlider);
+
+                controlPanel.add(Box.createVerticalStrut(50));
+
+                controlPanel.add(campLabel);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(campSlider);
+                controlPanel.add(Box.createVerticalStrut(20));
+                controlPanel.add(forceBtn);
+
+                frame.add(controlPanel, BorderLayout.EAST);
+            }
+
             frame.pack();
             frame.setLocationRelativeTo(null);
             frame.setVisible(true);
-            Main.maxScore = Math.max(Main.maxScore, currentScore.get());
 
             new javax.swing.Timer(100, e -> {
                 viz.repaint();
@@ -121,12 +151,6 @@ public class Main {
         });
     }
 
-    /**
-     * Updates the current display board and score.
-     *
-     * @param score The new best score (number of pieces placed)
-     * @param board The current state of the board
-     */
     public static synchronized void updateDisplay(int score, int[][] board) {
         currentScore.set(score);
         for (int i = 0; i < 16; i++) {
@@ -145,9 +169,7 @@ public class Main {
             String line;
             while ((line = br.readLine()) != null && i < 256) {
                 String[] pts = line.split(",");
-                if (pts.length < 4) {
-                    continue;
-                }
+                if (pts.length < 4) continue;
 
                 int e = Integer.parseInt(pts[0].trim());
                 int s = Integer.parseInt(pts[1].trim());
@@ -156,9 +178,7 @@ public class Main {
 
                 pieces[i++] = PieceUtils.pack(n, e, s, w);
             }
-            if (i == 256) {
-                return pieces;
-            }
+            if (i == 256) return pieces;
         } catch (Exception e) {
             System.out.println("pieces.csv not found or unreadable. Using mock data.");
         }

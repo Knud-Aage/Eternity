@@ -5,6 +5,8 @@ import jcuda.Sizeof;
 import jcuda.driver.*;
 import static jcuda.driver.JCudaDriver.*;
 
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -13,14 +15,14 @@ import java.util.Random;
 public class MasterSolverPBP implements Runnable {
 
     public enum BuildStrategy {
-        TYPEWRITER,
-        SPIRAL
+        TYPEWRITER, SPIRAL
     }
 
     private static class EvolutionLeapException extends RuntimeException {}
     private static class PoisonedBaseCampException extends RuntimeException {}
+    private static class ManualOverrideException extends RuntimeException {} // <--- NYT
 
-    // <--- GLOBALE CUDA VARIABLER --->
+    // GLOBALE CUDA VARIABLER
     private CUcontext cuContext;
     private CUmodule cuModule;
     private CUfunction cuFunction;
@@ -32,13 +34,15 @@ public class MasterSolverPBP implements Runnable {
     private final boolean[] usedPhysicalPieces = new boolean[256];
     private final Random rnd = new Random();
     private int centerPhysicalIdx = -1;
+
     private int deepestStep = 0;
+    private int absoluteHighScore = 0;
     private final int targetPiece;
-    public static int absoluteHighScore = 0;
 
     private final boolean useGpu;
     private final BuildStrategy currentStrategy;
     private final boolean lockCenter;
+    private final String saveProfile; // <--- NYT: Holder styr på de 4 profiler
 
     private final List<int[]> gpuSeedBoards = new ArrayList<>();
 
@@ -46,14 +50,26 @@ public class MasterSolverPBP implements Runnable {
     private int forceBacktrackTarget = -1;
     private int targetBatchSize = 10000;
 
+    // <--- NYT: GUI KONTROL VARIABLER --->
+    private volatile double extinctionThreshold = 0.98;
+    private volatile boolean manualOverrideRequested = false;
+    private volatile int manualBaseCampTarget = 0;
+
     private final int[] BUILD_ORDER;
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
+        Arrays.fill(flatBoard, -1);
+        Arrays.fill(bestBoard, -1);
+        Arrays.fill(flatResumeBoard, -1);
+
         this.inventory = inventory;
         this.targetPiece = trueCenterPiece;
         this.useGpu = useGpu;
         this.currentStrategy = strategy;
         this.lockCenter = lockCenter;
+
+        // Sørger for at Cheat og Non-Cheat filer ikke overskriver hinanden
+        this.saveProfile = strategy.name() + (lockCenter ? "_LOCKED" : "_UNLOCKED");
 
         for (int i = 0; i < 1024; i++) {
             if (inventory.allOrientations[i] == targetPiece) {
@@ -70,7 +86,7 @@ public class MasterSolverPBP implements Runnable {
             HANDOFF_DEPTH = 50;
         }
 
-        int[][] loaded = CheckpointManager.load(currentStrategy.name());
+        int[][] loaded = CheckpointManager.load(saveProfile);
         if (loaded != null) {
             int highestStepLoaded = -1;
             for (int step = 0; step < 256; step++) {
@@ -88,13 +104,22 @@ public class MasterSolverPBP implements Runnable {
             }
             if (highestStepLoaded > 0) {
                 this.deepestStep = highestStepLoaded;
-                this.absoluteHighScore = highestStepLoaded; // <--- NY LINJE
+                this.absoluteHighScore = highestStepLoaded;
                 if (lockCenter) bestBoard[135] = targetPiece;
             }
         }
     }
 
-    // <--- CUDA SETUP METODE --->
+    // <--- NYT: METODER SOM GUI'EN KAN KALDE --->
+    public void setExtinctionThreshold(double threshold) {
+        this.extinctionThreshold = threshold;
+    }
+
+    public void triggerManualOverride(int targetBaseCamp) {
+        this.manualBaseCampTarget = targetBaseCamp;
+        this.manualOverrideRequested = true;
+    }
+
     private void initCUDA() {
         JCudaDriver.setExceptionsEnabled(true);
         cuInit(0);
@@ -109,7 +134,7 @@ public class MasterSolverPBP implements Runnable {
 
         cuFunction = new CUfunction();
         cuModuleGetFunction(cuFunction, cuModule, "solvePBP");
-        System.out.println(">>> CUDA Context & Kernel indlæst succesfuldt!");
+        System.out.printf("%s: CUDA>>> CUDA Context & Kernel indlæst succesfuldt! %n", LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")));
     }
 
     private static int[] generateTypewriterOrder() {
@@ -149,13 +174,11 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private void runGpuHandoff(List<int[]> partialBoardsList, int startingStep) {
-        // Bemærk: INTET setup kode her. Kun den rå udregning!
         int numBoards = partialBoardsList.size();
         if (numBoards == 0) return;
 
         int[] flatBoards = new int[numBoards * 256];
-        for (int i = 0; i < numBoards; i++)
-            System.arraycopy(partialBoardsList.get(i), 0, flatBoards, i * 256, 256);
+        for (int i = 0; i < numBoards; i++) System.arraycopy(partialBoardsList.get(i), 0, flatBoards, i * 256, 256);
 
         CUdeviceptr d_partialBoards = new CUdeviceptr();
         cuMemAlloc(d_partialBoards, (long) numBoards * 256 * Sizeof.INT);
@@ -218,7 +241,6 @@ public class MasterSolverPBP implements Runnable {
         int blocksPerGrid = (int) Math.ceil((double) numBoards / threadsPerBlock);
 
         long startTime = System.currentTimeMillis();
-        // Bruger den globale cuFunction!
         cuLaunchKernel(cuFunction, blocksPerGrid, 1, 1, threadsPerBlock, 1, 1, 0, null, kernelParameters, null);
         cuCtxSynchronize();
         long timeTaken = System.currentTimeMillis() - startTime;
@@ -227,7 +249,7 @@ public class MasterSolverPBP implements Runnable {
         cuMemcpyDtoH(Pointer.to(threadDepths), d_threadDepths, (long) numBoards * Sizeof.INT);
 
         double timeSeconds = Math.max(timeTaken / 1000.0, 0.001);
-        long speed = (long) (totalSteps[0] / timeSeconds);
+        double speed = totalSteps[0] / timeSeconds;
 
         long sumDepth = 0;
         int maxInBatch = 0;
@@ -238,23 +260,21 @@ public class MasterSolverPBP implements Runnable {
             if (d <= startingStep + 5) deadOnArrival++;
         }
 
-//        System.out.printf("GPU Batch | %d ms | %,d pcs/s | Avg Depth: %.1f | Max: %d | Dead < 5: %d/%d\n",
-//                timeTaken, speed, (double)sumDepth/numBoards, maxInBatch, deadOnArrival, numBoards);
+        System.out.printf("%s: GPU Batch | %d ms | %,.0f pcs/s | Avg Depth: %.1f | Max: %d | Dead < 5: %d/%d\n",
+                LocalDateTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")), timeTaken, speed, (double)sumDepth/numBoards, maxInBatch, deadOnArrival, numBoards);
 
-        // Nødbremsen (Poisoned Base Camp)
-        if (numBoards > 0 && (double) deadOnArrival / numBoards >= 0.98) {
+        if (numBoards > 0 && (double) deadOnArrival / numBoards >= extinctionThreshold) {
             cuFreeResources(d_partialBoards, d_buildOrder, d_allOrientations, d_physicalMapping, d_solution, d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths);
             throw new PoisonedBaseCampException();
         }
 
-        int[] winningBoard = new int[256];
-        updateDisplay(buildDisplayBoard(winningBoard));
-
         cuMemcpyDtoH(Pointer.to(solvedFlag), d_solvedFlag, Sizeof.INT);
         if (solvedFlag[0] == 1) {
             System.out.println(">>> GPU FOUND THE SOLUTION! <<<");
+            int[] winningBoard = new int[256];
             cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
-            RecordManager.saveRecord(buildDisplayBoard(winningBoard), 256, currentStrategy.name());
+            updateDisplay(buildDisplayBoard(winningBoard));
+            RecordManager.saveRecord(buildDisplayBoard(winningBoard), 256, saveProfile);
             System.exit(0);
         }
 
@@ -271,8 +291,8 @@ public class MasterSolverPBP implements Runnable {
 
             if (deepestStep > absoluteHighScore) {
                 absoluteHighScore = deepestStep;
-                RecordManager.saveRecord(displayBoard, absoluteHighScore, currentStrategy.name());
-                CheckpointManager.save(displayBoard, currentStrategy.name());
+                RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
+                CheckpointManager.save(displayBoard, saveProfile);
             }
 
             if (currentStrategy == BuildStrategy.SPIRAL && deepestStep > HANDOFF_DEPTH + 30) {
@@ -284,7 +304,6 @@ public class MasterSolverPBP implements Runnable {
         cuFreeResources(d_partialBoards, d_buildOrder, d_allOrientations, d_physicalMapping, d_solution, d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths);
     }
 
-    // Lille hjælpefunktion for at holde koden ren, når vi smider Exceptions
     private void cuFreeResources(CUdeviceptr... pointers) {
         for (CUdeviceptr ptr : pointers) {
             cuMemFree(ptr);
@@ -293,14 +312,15 @@ public class MasterSolverPBP implements Runnable {
 
     @Override
     public void run() {
-        System.out.println("Starting Engine...");
+        System.out.println("Starting Engine (Profile: " + saveProfile + ")...");
 
         if (useGpu) {
-            initCUDA(); // Initialiserer GPU'en kun én gang
+            initCUDA();
         }
 
         while (true) {
             Arrays.fill(flatBoard, -1);
+            Arrays.fill(flatResumeBoard, -1);
             Arrays.fill(usedPhysicalPieces, false);
             gpuSeedBoards.clear();
 
@@ -313,9 +333,8 @@ public class MasterSolverPBP implements Runnable {
 
             int lockedPieces = 0;
             if (deepestStep > 0 && currentStrategy == BuildStrategy.SPIRAL) {
-                lockedPieces = Math.max(60, deepestStep - 30);
+                lockedPieces = Math.max(0, deepestStep - 30);
 
-                // End-game micro-batches
                 int gap;
                 if (lockedPieces > 180) {
                     gap = 2;
@@ -330,11 +349,11 @@ public class MasterSolverPBP implements Runnable {
 
                 HANDOFF_DEPTH = lockedPieces + gap;
 
-//                System.out.println("\n=======================================================");
-//                System.out.println(">>> EVOLUTION! Base Camp locked to step " + lockedPieces);
-//                System.out.println(">>> CPU building freely to Handoff at step " + HANDOFF_DEPTH);
-//                System.out.println(">>> Target seeds before GPU trigger: " + targetBatchSize);
-//                System.out.println("=======================================================\n");
+                System.out.println("\n=======================================================");
+                System.out.println(">>> EVOLUTION! Base Camp locked to step " + lockedPieces);
+                System.out.println(">>> CPU building freely to Handoff at step " + HANDOFF_DEPTH);
+                System.out.println(">>> Target seeds before GPU trigger: " + targetBatchSize);
+                System.out.println("=======================================================\n");
 
                 Arrays.fill(flatResumeBoard, -1);
                 for (int step = 0; step < lockedPieces; step++) {
@@ -356,9 +375,14 @@ public class MasterSolverPBP implements Runnable {
                 spaceExhausted = false;
                 if (lockedPieces > 70) {
                     deepestStep = Math.max(70, lockedPieces - 8);
-//                    System.out.println("\n[!] EXTINCTION EVENT! 98%+ seeds died instantly.");
-//                    System.out.println("[!] Poisoned Base Camp detected. Retreating to step " + deepestStep + "...\n");
+                    System.out.println("\n[!] EXTINCTION EVENT! " + (extinctionThreshold*100) + "%+ seeds died instantly.");
+                    System.out.println("[!] Poisoned Base Camp detected. Retreating to step " + deepestStep + "...\n");
                 }
+            } catch (ManualOverrideException e) {
+                // <--- GUI OVERRIDE HÅNDTERING --->
+                spaceExhausted = false;
+                deepestStep = manualBaseCampTarget + 30; // Tvinger næste loop til at bruge dit tal!
+                System.out.println("\n[!] MANUAL OVERRIDE! User forced base camp jump to step " + manualBaseCampTarget + ".\n");
             }
 
             if (spaceExhausted) {
@@ -368,8 +392,8 @@ public class MasterSolverPBP implements Runnable {
                     gpuSeedBoards.clear();
                 }
 
-                if (currentStrategy == BuildStrategy.SPIRAL && lockedPieces > 60) {
-                    deepestStep = Math.max(70, lockedPieces - 10);
+                if (currentStrategy == BuildStrategy.SPIRAL && lockedPieces > 0) {
+                    deepestStep = Math.max(0, lockedPieces - 10);
                     System.out.println(">>> Base camp exhausted. Falling back to search new path...");
                 } else {
                     System.out.println("Total search space exhausted. No solution found.");
@@ -380,6 +404,12 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private boolean solve(int step) {
+        // <--- GUI OVERRIDE TJEK --->
+        if (manualOverrideRequested) {
+            manualOverrideRequested = false;
+            throw new ManualOverrideException();
+        }
+
         if (step == 256) return true;
 
         int boardIdx = BUILD_ORDER[step];
@@ -409,12 +439,17 @@ public class MasterSolverPBP implements Runnable {
             return false;
         }
 
-        if (deepestStep > absoluteHighScore) {
-            absoluteHighScore = deepestStep;
+        if (step > deepestStep) {
+            deepestStep = step;
+            System.arraycopy(flatBoard, 0, bestBoard, 0, 256);
             int[][] displayBoard = buildDisplayBoard(bestBoard);
             updateDisplay(displayBoard);
-            RecordManager.saveRecord(displayBoard, absoluteHighScore, currentStrategy.name());
-            CheckpointManager.save(displayBoard, currentStrategy.name());
+
+            if (deepestStep > absoluteHighScore) {
+                absoluteHighScore = deepestStep;
+                RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
+                CheckpointManager.save(displayBoard, saveProfile);
+            }
         }
 
         int row = boardIdx / 16;
