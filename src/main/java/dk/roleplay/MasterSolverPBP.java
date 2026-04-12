@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class MasterSolverPBP implements Runnable {
 
@@ -32,22 +34,26 @@ public class MasterSolverPBP implements Runnable {
     private final int[] bestBoard = new int[256];
     private final int[] flatResumeBoard = new int[256];
     private final boolean[] usedPhysicalPieces = new boolean[256];
-    private final Random rnd = new Random();
     private int centerPhysicalIdx = -1;
 
-    private int deepestStep = 0;
-    private int absoluteHighScore = 0;
-    private final int targetPiece;
+    // TRÅDSIKKER GLOBAL TILSTAND
+    private volatile int deepestStep = 0;
+    private volatile int absoluteHighScore = 0;
+    private final Object displayLock = new Object(); // Forhindrer at tråde overskriver UI'en samtidigt
 
+    private final int targetPiece;
     private final boolean useGpu;
     private final BuildStrategy currentStrategy;
     private final boolean lockCenter;
     private final String saveProfile;
 
-    private final List<int[]> gpuSeedBoards = new ArrayList<>();
+    // MULTITHREADING VARIABLER
+    private final ExecutorService executor;
+    private final int numCores;
+    private final ConcurrentLinkedQueue<int[]> gpuSeedBoards = new ConcurrentLinkedQueue<>();
+    private final AtomicInteger currentBatchSize = new AtomicInteger(0);
 
     private int HANDOFF_DEPTH;
-    private int forceBacktrackTarget = -1;
     private int targetBatchSize = 10000;
 
     // GUI KONTROL VARIABLER
@@ -58,7 +64,6 @@ public class MasterSolverPBP implements Runnable {
 
     private final int[] BUILD_ORDER;
 
-    // <--- NYT: TIMESTAMP HJÆLPEFUNKTION --->
     private String timestamp() {
         return "[" + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "] ";
     }
@@ -75,6 +80,11 @@ public class MasterSolverPBP implements Runnable {
         this.lockCenter = lockCenter;
 
         this.saveProfile = strategy.name() + (lockCenter ? "_LOCKED" : "_UNLOCKED");
+
+        // Start CPU Thread Pool
+        this.numCores = Runtime.getRuntime().availableProcessors();
+        this.executor = Executors.newFixedThreadPool(numCores);
+        System.out.println(timestamp() + ">>> Multithreading aktiveret med " + numCores + " dedikerede CPU-kerner.");
 
         for (int i = 0; i < 1024; i++) {
             if (inventory.allOrientations[i] == targetPiece) {
@@ -181,6 +191,143 @@ public class MasterSolverPBP implements Runnable {
         return false;
     }
 
+    // <--- ARBEJDER-KLASSEN (Kører på sine egne kerner) --->
+    private class SearchWorker implements Callable<Boolean> {
+        private final int[] localBoard = new int[256];
+        private final int[] localResumeBoard = new int[256];
+        private final boolean[] localUsed = new boolean[256];
+        private final Random rnd = new Random();
+        private final int activeBatch;
+
+        public SearchWorker(int activeBatch) {
+            this.activeBatch = activeBatch;
+            // Kopierer den globale tilstand, så arbejderen kan arbejde uforstyrret
+            System.arraycopy(flatBoard, 0, localBoard, 0, 256);
+            System.arraycopy(flatResumeBoard, 0, localResumeBoard, 0, 256);
+            System.arraycopy(usedPhysicalPieces, 0, localUsed, 0, 256);
+
+            if (lockCenter) {
+                localBoard[135] = targetPiece;
+                if (centerPhysicalIdx != -1) localUsed[centerPhysicalIdx] = true;
+            }
+        }
+
+        @Override
+        public Boolean call() {
+            return solve(0);
+        }
+
+        private boolean solve(int step) {
+            if (manualOverrideRequested) throw new ManualOverrideException();
+
+            // Hvis spanden er fuld, stopper tråden øjeblikkeligt
+            if (currentBatchSize.get() >= activeBatch) return false;
+
+            if (step == 256) return true;
+
+            int boardIdx = BUILD_ORDER[step];
+
+            if (lockCenter && boardIdx == 135) return solve(step + 1);
+
+            // GPU Handoff punkt nået!
+            if (useGpu && step == HANDOFF_DEPTH) {
+                // Sikkerheds-tjek før vi tilføjer
+                if (currentBatchSize.get() >= activeBatch) return false;
+
+                int[] clonedBoard = new int[256];
+                System.arraycopy(localBoard, 0, clonedBoard, 0, 256);
+                gpuSeedBoards.add(clonedBoard);
+
+                int size = currentBatchSize.incrementAndGet();
+                int printInterval = (activeBatch <= 250) ? 10 : (activeBatch <= 1000 ? 100 : 1000);
+
+//                if (size % printInterval == 0) {
+//                    System.out.println(timestamp() + "   [CPU Pool] Fandt " + size + " / " + activeBatch + " seeds...");
+//                }
+                return false;
+            }
+
+            // Trådsikker opdatering af highscore
+            if (step > deepestStep) {
+                synchronized(displayLock) {
+                    if (step > deepestStep) {
+                        deepestStep = step;
+                        System.arraycopy(localBoard, 0, bestBoard, 0, 256);
+                        int[][] displayBoard = buildDisplayBoard(bestBoard);
+                        updateDisplay(displayBoard);
+
+                        if (deepestStep > absoluteHighScore) {
+                            absoluteHighScore = deepestStep;
+                            RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
+                            CheckpointManager.save(displayBoard, saveProfile);
+                            System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " BRIKKER! <<<");
+                        }
+                    }
+                }
+            }
+
+            int row = boardIdx / 16;
+            int col = boardIdx % 16;
+
+            int n_req = (row == 0) ? 0 : (localBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(localBoard[boardIdx - 16]) : PieceUtils.WILDCARD);
+            int s_req = (row == 15) ? 0 : (localBoard[boardIdx + 16] != -1 ? PieceUtils.getNorth(localBoard[boardIdx + 16]) : PieceUtils.WILDCARD);
+            int w_req = (col == 0) ? 0 : (localBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(localBoard[boardIdx - 1]) : PieceUtils.WILDCARD);
+            int e_req = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(localBoard[boardIdx + 1]) : PieceUtils.WILDCARD);
+
+            int b_req = 0;
+            if (row == 0 || row == 15) b_req++;
+            if (col == 0 || col == 15) b_req++;
+
+            List<Integer> pool;
+            if (b_req == 2) pool = inventory.corners;
+            else if (b_req == 1) pool = inventory.edges;
+            else pool = inventory.interior;
+
+            if (pool.isEmpty()) return false;
+
+            int size = pool.size();
+            int offset = rnd.nextInt(size); // Tilfældigt startpunkt spreder trådene!
+
+            for (int i = 0; i < size; i++) {
+                if (currentBatchSize.get() >= activeBatch) return false;
+
+                int orientationIdx = pool.get((i + offset) % size);
+                int p = inventory.allOrientations[orientationIdx];
+                int physicalIdx = inventory.physicalMapping[orientationIdx];
+
+                if (localResumeBoard[boardIdx] != -1) {
+                    if (p != localResumeBoard[boardIdx]) continue;
+                }
+
+                if (localUsed[physicalIdx]) continue;
+
+                if (matches(p, n_req, e_req, s_req, w_req)) {
+
+                    localBoard[boardIdx] = p;
+                    localUsed[physicalIdx] = true;
+
+                    int ghostPiece = localResumeBoard[boardIdx];
+                    localResumeBoard[boardIdx] = -1;
+
+                    if (solve(step + 1)) return true;
+
+                    localBoard[boardIdx] = -1;
+                    localUsed[physicalIdx] = false;
+                }
+            }
+            return false;
+        }
+
+        private boolean matches(int p, int n, int e, int s, int w) {
+            if (n != PieceUtils.WILDCARD && PieceUtils.getNorth(p) != n) return false;
+            if (e != PieceUtils.WILDCARD && PieceUtils.getEast(p) != e) return false;
+            if (s != PieceUtils.WILDCARD && PieceUtils.getSouth(p) != s) return false;
+            return w == PieceUtils.WILDCARD || PieceUtils.getWest(p) == w;
+        }
+    }
+    // <--- ARBEJDER-KLASSE SLUT --->
+
+
     private void runGpuHandoff(List<int[]> partialBoardsList, int startingStep) {
         int numBoards = partialBoardsList.size();
         if (numBoards == 0) return;
@@ -268,7 +415,6 @@ public class MasterSolverPBP implements Runnable {
             if (d <= startingStep + 5) deadOnArrival++;
         }
 
-        // <--- NYT: Tidsstempel på GPU udskriften --->
         System.out.printf("%sGPU Batch | %d ms | %,.0f pcs/s | Avg Depth: %.1f | Max: %d | Dead < 5: %d/%d\n",
                 timestamp(), timeTaken, speed, (double)sumDepth/numBoards, maxInBatch, deadOnArrival, numBoards);
 
@@ -290,19 +436,23 @@ public class MasterSolverPBP implements Runnable {
         cuMemcpyDtoH(Pointer.to(gpuScore), d_gpuHighScore, Sizeof.INT);
 
         if (gpuScore[0] > deepestStep) {
-            deepestStep = gpuScore[0];
-            int[] gpuWinningBoard = new int[256];
-            cuMemcpyDtoH(Pointer.to(gpuWinningBoard), d_bestBoardOut, 256L * Sizeof.INT);
-            System.arraycopy(gpuWinningBoard, 0, bestBoard, 0, 256);
+            synchronized(displayLock) {
+                if (gpuScore[0] > deepestStep) {
+                    deepestStep = gpuScore[0];
+                    int[] gpuWinningBoard = new int[256];
+                    cuMemcpyDtoH(Pointer.to(gpuWinningBoard), d_bestBoardOut, 256L * Sizeof.INT);
+                    System.arraycopy(gpuWinningBoard, 0, bestBoard, 0, 256);
 
-            int[][] displayBoard = buildDisplayBoard(bestBoard);
-            updateDisplay(displayBoard);
+                    int[][] displayBoard = buildDisplayBoard(bestBoard);
+                    updateDisplay(displayBoard);
 
-            if (deepestStep > absoluteHighScore) {
-                absoluteHighScore = deepestStep;
-                RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
-                CheckpointManager.save(displayBoard, saveProfile);
-                System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " BRIKKER! <<<");
+                    if (deepestStep > absoluteHighScore) {
+                        absoluteHighScore = deepestStep;
+                        RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
+                        CheckpointManager.save(displayBoard, saveProfile);
+                        System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE (GPU): " + absoluteHighScore + " BRIKKER! <<<");
+                    }
+                }
             }
 
             if (currentStrategy == BuildStrategy.SPIRAL && deepestStep > HANDOFF_DEPTH + 30) {
@@ -322,7 +472,7 @@ public class MasterSolverPBP implements Runnable {
 
     @Override
     public void run() {
-        System.out.println(timestamp() + "Starting Engine (Profile: " + saveProfile + ")...");
+        System.out.println(timestamp() + "Starting Multithreaded Engine (Profile: " + saveProfile + ")...");
 
         if (useGpu) {
             initCUDA();
@@ -332,14 +482,8 @@ public class MasterSolverPBP implements Runnable {
             Arrays.fill(flatBoard, -1);
             Arrays.fill(flatResumeBoard, -1);
             Arrays.fill(usedPhysicalPieces, false);
-            gpuSeedBoards.clear();
 
             if (deepestStep > 0) updateDisplay(buildDisplayBoard(bestBoard));
-
-            if (lockCenter) {
-                flatBoard[135] = targetPiece;
-                if (centerPhysicalIdx != -1) usedPhysicalPieces[centerPhysicalIdx] = true;
-            }
 
             int lockedPieces = 0;
             if (deepestStep > 0 && currentStrategy == BuildStrategy.SPIRAL) {
@@ -362,11 +506,10 @@ public class MasterSolverPBP implements Runnable {
 
 //                System.out.println("\n" + timestamp() + "=======================================================");
 //                System.out.println(timestamp() + ">>> EVOLUTION! Base Camp locked to step " + lockedPieces);
-//                System.out.println(timestamp() + ">>> CPU building freely to Handoff at step " + HANDOFF_DEPTH);
-//                System.out.println(timestamp() + ">>> Target seeds before GPU trigger: " + activeBatch + (userBatchSizeOverride > 0 ? " (MANUAL)" : " (AUTO)"));
+//                System.out.println(timestamp() + ">>> CPU bygger frem til Handoff at step " + HANDOFF_DEPTH);
+//                System.out.println(timestamp() + ">>> Mål: " + activeBatch + " seeds (" + numCores + " kerner arbejder parallelt)");
 //                System.out.println(timestamp() + "=======================================================\n");
 
-                Arrays.fill(flatResumeBoard, -1);
                 for (int step = 0; step < lockedPieces; step++) {
                     int boardIdx = BUILD_ORDER[step];
                     if (lockCenter && boardIdx == 135) continue;
@@ -374,12 +517,37 @@ public class MasterSolverPBP implements Runnable {
                 }
             }
 
+            // Klargør den trådsikre spand til arbejderne
+            gpuSeedBoards.clear();
+            currentBatchSize.set(0);
+            int activeBatch = (userBatchSizeOverride > 0) ? userBatchSizeOverride : targetBatchSize;
+
+            List<SearchWorker> workers = new ArrayList<>();
+            for (int i = 0; i < numCores; i++) {
+                workers.add(new SearchWorker(activeBatch));
+            }
+
             boolean spaceExhausted = true;
             try {
-                if (solve(0)) {
-                    System.out.println(timestamp() + "SOLVED!");
-                    return;
+                // Slip alle kernerne løs!
+                List<Future<Boolean>> results = executor.invokeAll(workers);
+                for (Future<Boolean> f : results) {
+                    if (f.get()) {
+                        System.out.println(timestamp() + "SOLVED BY CPU!");
+                        return;
+                    }
                 }
+
+                // Når vi når hertil, er arbejderne færdige. Enten blev spanden fuld, eller også udmattede de søgerummet.
+                if (currentBatchSize.get() >= activeBatch) {
+                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), HANDOFF_DEPTH);
+                    spaceExhausted = false;
+                } else if (currentBatchSize.get() > 0) {
+                    System.out.println(timestamp() + ">>> Søgerum udtømt tidligt! Sender de resterende " + currentBatchSize.get() + " seeds til GPU...");
+                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), HANDOFF_DEPTH);
+                    // Bliver på spaceExhausted = true, så vi kan trække Base Camp tilbage!
+                }
+
             } catch (EvolutionLeapException e) {
                 spaceExhausted = false;
             } catch (PoisonedBaseCampException e) {
@@ -389,19 +557,22 @@ public class MasterSolverPBP implements Runnable {
                     System.out.println("\n" + timestamp() + "[!] EXTINCTION EVENT! " + (int)(extinctionThreshold*100) + "%+ seeds died instantly.");
                     System.out.println(timestamp() + "[!] Poisoned Base Camp detected. Retreating to step " + deepestStep + "...\n");
                 }
-            } catch (ManualOverrideException e) {
-                spaceExhausted = false;
-                deepestStep = manualBaseCampTarget + 30;
-                System.out.println("\n" + timestamp() + "[!] MANUAL OVERRIDE! User forced base camp jump to step " + manualBaseCampTarget + ".\n");
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                if (cause instanceof ManualOverrideException) {
+                    spaceExhausted = false;
+                    manualOverrideRequested = false;
+                    deepestStep = manualBaseCampTarget + 30;
+                    System.out.println("\n" + timestamp() + "[!] MANUAL OVERRIDE! User forced base camp jump to step " + manualBaseCampTarget + ".\n");
+                } else {
+                    e.printStackTrace();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
             }
 
             if (spaceExhausted) {
-                if (!gpuSeedBoards.isEmpty()) {
-                    System.out.println(timestamp() + ">>> Space exhausted early! Flushing remaining " + gpuSeedBoards.size() + " seeds to GPU...");
-                    runGpuHandoff(gpuSeedBoards, HANDOFF_DEPTH);
-                    gpuSeedBoards.clear();
-                }
-
                 if (currentStrategy == BuildStrategy.SPIRAL && lockedPieces > 0) {
                     deepestStep = Math.max(0, lockedPieces - 10);
                     System.out.println(timestamp() + ">>> Base camp exhausted. Falling back to search new path...");
@@ -411,122 +582,6 @@ public class MasterSolverPBP implements Runnable {
                 }
             }
         }
-    }
-
-    private boolean solve(int step) {
-        if (manualOverrideRequested) {
-            manualOverrideRequested = false;
-            throw new ManualOverrideException();
-        }
-
-        if (step == 256) return true;
-
-        int boardIdx = BUILD_ORDER[step];
-
-        if (lockCenter && boardIdx == 135) return solve(step + 1);
-
-        if (useGpu && step == HANDOFF_DEPTH) {
-            int[] clonedBoard = new int[256];
-            System.arraycopy(flatBoard, 0, clonedBoard, 0, 256);
-            gpuSeedBoards.add(clonedBoard);
-
-            int activeBatch = (userBatchSizeOverride > 0) ? userBatchSizeOverride : targetBatchSize;
-            int printInterval = (activeBatch <= 250) ? 10 : (activeBatch <= 1000 ? 100 : 1000);
-
-//            if (gpuSeedBoards.size() % printInterval == 0 && !gpuSeedBoards.isEmpty()) {
-//                System.out.println(timestamp() + "   [CPU Status] Fandt " + gpuSeedBoards.size() + " / " + activeBatch + " seeds...");
-//            }
-
-            if (gpuSeedBoards.size() >= activeBatch) {
-                runGpuHandoff(gpuSeedBoards, HANDOFF_DEPTH);
-                gpuSeedBoards.clear();
-
-                if (currentStrategy == BuildStrategy.SPIRAL) {
-                    forceBacktrackTarget = HANDOFF_DEPTH - 4;
-                } else {
-                    forceBacktrackTarget = 10 + rnd.nextInt(11);
-                }
-            }
-            return false;
-        }
-
-        if (step > deepestStep) {
-            deepestStep = step;
-            System.arraycopy(flatBoard, 0, bestBoard, 0, 256);
-            int[][] displayBoard = buildDisplayBoard(bestBoard);
-            updateDisplay(displayBoard);
-
-            if (deepestStep > absoluteHighScore) {
-                absoluteHighScore = deepestStep;
-                RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
-                CheckpointManager.save(displayBoard, saveProfile);
-                System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " BRIKKER! <<<");
-            }
-        }
-
-        int row = boardIdx / 16;
-        int col = boardIdx % 16;
-
-        int n_req = (row == 0) ? 0 : (flatBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(flatBoard[boardIdx - 16]) : PieceUtils.WILDCARD);
-        int s_req = (row == 15) ? 0 : (flatBoard[boardIdx + 16] != -1 ? PieceUtils.getNorth(flatBoard[boardIdx + 16]) : PieceUtils.WILDCARD);
-        int w_req = (col == 0) ? 0 : (flatBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(flatBoard[boardIdx - 1]) : PieceUtils.WILDCARD);
-        int e_req = (col == 15) ? 0 : (flatBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(flatBoard[boardIdx + 1]) : PieceUtils.WILDCARD);
-
-        int b_req = 0;
-        if (row == 0 || row == 15) b_req++;
-        if (col == 0 || col == 15) b_req++;
-
-        List<Integer> pool;
-        if (b_req == 2) pool = inventory.corners;
-        else if (b_req == 1) pool = inventory.edges;
-        else pool = inventory.interior;
-
-        if (pool.isEmpty()) return false;
-
-        int size = pool.size();
-        int offset = rnd.nextInt(size);
-
-        for (int i = 0; i < size; i++) {
-            int orientationIdx = pool.get((i + offset) % size);
-            int p = inventory.allOrientations[orientationIdx];
-            int physicalIdx = inventory.physicalMapping[orientationIdx];
-
-            if (flatResumeBoard[boardIdx] != -1) {
-                if (p != flatResumeBoard[boardIdx]) continue;
-            }
-
-            if (usedPhysicalPieces[physicalIdx]) continue;
-
-            if (matches(p, n_req, e_req, s_req, w_req)) {
-
-                flatBoard[boardIdx] = p;
-                usedPhysicalPieces[physicalIdx] = true;
-
-                int ghostPiece = flatResumeBoard[boardIdx];
-                flatResumeBoard[boardIdx] = -1;
-
-                if (solve(step + 1)) return true;
-
-                flatBoard[boardIdx] = -1;
-                usedPhysicalPieces[physicalIdx] = false;
-
-                if (forceBacktrackTarget != -1) {
-                    if (step > forceBacktrackTarget) {
-                        return false;
-                    } else if (step == forceBacktrackTarget) {
-                        forceBacktrackTarget = -1;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    private boolean matches(int p, int n, int e, int s, int w) {
-        if (n != PieceUtils.WILDCARD && PieceUtils.getNorth(p) != n) return false;
-        if (e != PieceUtils.WILDCARD && PieceUtils.getEast(p) != e) return false;
-        if (s != PieceUtils.WILDCARD && PieceUtils.getSouth(p) != s) return false;
-        return w == PieceUtils.WILDCARD || PieceUtils.getWest(p) == w;
     }
 
     private int[][] buildDisplayBoard(int[] sourceArray) {
