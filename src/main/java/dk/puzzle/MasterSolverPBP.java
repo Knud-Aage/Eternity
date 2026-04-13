@@ -63,7 +63,11 @@ public class MasterSolverPBP implements Runnable {
     private volatile int manualBaseCampTarget = 0;
     private volatile int userBatchSizeOverride = -1;
     private long lastProgressTimestamp = System.currentTimeMillis();
-    private int stagnationLimitMinutes = 20;
+    private volatile int stagnationLimitMinutes = 20; // Tilføj 'volatile'
+
+    public void setStagnationLimit(int minutes) {
+        this.stagnationLimitMinutes = minutes;
+    }
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                            boolean lockCenter) {
@@ -364,20 +368,17 @@ public class MasterSolverPBP implements Runnable {
         if (useGpu) initCUDA();
 
         while (true) {
-            // <--- NY AUTOMATISK KONTROL STARTER HER --->
             long minutesSinceProgress = (System.currentTimeMillis() - lastProgressTimestamp) / 60000;
 
             if (minutesSinceProgress >= stagnationLimitMinutes) {
-                // VI ER GÅET I STÅ! Lav et drastisk retreat.
-                int deepRetreat = 40 + new Random().nextInt(41); // Vælger tal mellem 40 og 80
+                int deepRetreat = 40 + new Random().nextInt(41);
                 deepestStep = deepRetreat;
-                lastProgressTimestamp = System.currentTimeMillis(); // Nulstil, så den får 20 min til at prøve det nye
+                lastProgressTimestamp = System.currentTimeMillis();
 
                 System.out.println("\n" + timestamp() + " [!!!] AUTONOMOUS DEEP EXTINCTION [!!!]");
-                System.out.println(timestamp() + " Ingen fremskridt i " + minutesSinceProgress + " minutter.");
-                System.out.println(timestamp() + " Tvinger Base Camp helt tilbage til brik: " + deepRetreat + "\n");
+                System.out.println(timestamp() + " No progression in the last " + minutesSinceProgress + " minuttes.");
+                System.out.println(timestamp() + " Forces Base Camp all the down to tile : " + deepRetreat + "\n");
 
-                // Vi nulstiller brættet helt for at starte frisk fra den nye dybde
                 Arrays.fill(flatResumeBoard, -1);
             }
 

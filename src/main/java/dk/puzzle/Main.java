@@ -157,6 +157,27 @@ public class Main {
                 controlPanel.add(Box.createVerticalStrut(20));
                 controlPanel.add(forceBtn);
 
+                JLabel stagLabel = new JLabel("Auto-Reset Timeout: 20 min");
+                stagLabel.setFont(labelFont);
+                stagLabel.setForeground(textColor);
+                stagLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                JSlider stagSlider = new JSlider(5, 120, 20);
+                stagSlider.setBackground(new Color(40, 42, 45));
+                stagSlider.setMajorTickSpacing(30);
+                stagSlider.setMinorTickSpacing(5);
+                stagSlider.setPaintTicks(true);
+                stagSlider.addChangeListener(e -> {
+                    stagLabel.setText("Auto-Reset Timeout: " + stagSlider.getValue() + " min");
+                    pbpSolver.setStagnationLimit(stagSlider.getValue());
+                });
+
+                // Tilføj til panelet (husk Box.createVerticalStrut for luft)
+                controlPanel.add(Box.createVerticalStrut(30));
+                controlPanel.add(stagLabel);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(stagSlider);
+
                 frame.add(controlPanel, BorderLayout.EAST);
             }
 
