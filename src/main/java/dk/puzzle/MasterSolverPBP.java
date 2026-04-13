@@ -62,6 +62,8 @@ public class MasterSolverPBP implements Runnable {
     private volatile boolean manualOverrideRequested = false;
     private volatile int manualBaseCampTarget = 0;
     private volatile int userBatchSizeOverride = -1;
+    private long lastProgressTimestamp = System.currentTimeMillis();
+    private int stagnationLimitMinutes = 20;
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                            boolean lockCenter) {
@@ -324,6 +326,7 @@ public class MasterSolverPBP implements Runnable {
 
                     if (deepestStep > absoluteHighScore) {
                         absoluteHighScore = deepestStep;
+                        lastProgressTimestamp = System.currentTimeMillis();
                         RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
                         CheckpointManager.save(displayBoard, saveProfile);
                         System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE (GPU): " + absoluteHighScore +
@@ -357,13 +360,25 @@ public class MasterSolverPBP implements Runnable {
             initCUDA();
         }
 
-        while (true) {
-            Arrays.fill(flatBoard, -1);
-            Arrays.fill(flatResumeBoard, -1);
-            Arrays.fill(usedPhysicalPieces, false);
+        System.out.println(timestamp() + "Starting Autonomous Engine...");
+        if (useGpu) initCUDA();
 
-            if (deepestStep > 0) {
-                updateDisplay(buildDisplayBoard(bestBoard));
+        while (true) {
+            // <--- NY AUTOMATISK KONTROL STARTER HER --->
+            long minutesSinceProgress = (System.currentTimeMillis() - lastProgressTimestamp) / 60000;
+
+            if (minutesSinceProgress >= stagnationLimitMinutes) {
+                // VI ER GÅET I STÅ! Lav et drastisk retreat.
+                int deepRetreat = 40 + new Random().nextInt(41); // Vælger tal mellem 40 og 80
+                deepestStep = deepRetreat;
+                lastProgressTimestamp = System.currentTimeMillis(); // Nulstil, så den får 20 min til at prøve det nye
+
+                System.out.println("\n" + timestamp() + " [!!!] AUTONOMOUS DEEP EXTINCTION [!!!]");
+                System.out.println(timestamp() + " Ingen fremskridt i " + minutesSinceProgress + " minutter.");
+                System.out.println(timestamp() + " Tvinger Base Camp helt tilbage til brik: " + deepRetreat + "\n");
+
+                // Vi nulstiller brættet helt for at starte frisk fra den nye dybde
+                Arrays.fill(flatResumeBoard, -1);
             }
 
             int lockedPieces = 0;
