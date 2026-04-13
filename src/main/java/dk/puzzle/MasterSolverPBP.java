@@ -63,7 +63,7 @@ public class MasterSolverPBP implements Runnable {
     private volatile int manualBaseCampTarget = 0;
     private volatile int userBatchSizeOverride = -1;
     private long lastProgressTimestamp = System.currentTimeMillis();
-    private volatile int stagnationLimitMinutes = 20; // Tilføj 'volatile'
+    private volatile int stagnationLimitMinutes = 20;
 
     public void setStagnationLimit(int minutes) {
         this.stagnationLimitMinutes = minutes;
@@ -296,7 +296,7 @@ public class MasterSolverPBP implements Runnable {
             }
         }
 
-        System.out.printf("%sGPU Batch | %d ms | %,.0f pcs/s | Avg Depth: %.1f | Max: %d | Dead < 5: %d/%d\n",
+        System.out.printf("%sGPU | %d ms | %,.0f pcs/s | Avg Depth: %.1f | Max: %d | Dead < 5: %d/%d\n",
                 timestamp(), timeTaken, speed, (double) sumDepth / numBoards, maxInBatch, deadOnArrival, numBoards);
 
         if (numBoards > 0 && (double) deadOnArrival / numBoards >= extinctionThreshold) {
@@ -376,7 +376,7 @@ public class MasterSolverPBP implements Runnable {
                 lastProgressTimestamp = System.currentTimeMillis();
 
                 System.out.println("\n" + timestamp() + " [!!!] AUTONOMOUS DEEP EXTINCTION [!!!]");
-                System.out.println(timestamp() + " No progression in the last " + minutesSinceProgress + " minuttes.");
+                System.out.println(timestamp() + " No progression in the last " + minutesSinceProgress + " minutes.");
                 System.out.println(timestamp() + " Forces Base Camp all the down to tile : " + deepRetreat + "\n");
 
                 Arrays.fill(flatResumeBoard, -1);

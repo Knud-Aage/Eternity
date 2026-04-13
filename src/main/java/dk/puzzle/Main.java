@@ -50,7 +50,7 @@ public class Main {
 
             solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy, lockCenter);
         } else {
-            System.out.println("Macro solver ikke implementeret i denne main.");
+            System.out.println("Macro solver not implemented in this main.");
         }
 
         if (solverTask != null) {
@@ -110,7 +110,7 @@ public class Main {
                     String selected = (String) batchBox.getSelectedItem();
                     if (selected.startsWith("AUTO")) {
                         batchLabel.setText("Target Seeds: AUTO (Dynamic)");
-                        pbpSolver.setBatchSizeOverride(-1); // -1 = Slå auto til igen
+                        pbpSolver.setBatchSizeOverride(-1);
                     } else {
                         batchLabel.setText("Target Seeds: " + selected + " (LOCKED)");
                         pbpSolver.setBatchSizeOverride(Integer.parseInt(selected));
@@ -172,7 +172,6 @@ public class Main {
                     pbpSolver.setStagnationLimit(stagSlider.getValue());
                 });
 
-                // Tilføj til panelet (husk Box.createVerticalStrut for luft)
                 controlPanel.add(Box.createVerticalStrut(30));
                 controlPanel.add(stagLabel);
                 controlPanel.add(Box.createVerticalStrut(10));
