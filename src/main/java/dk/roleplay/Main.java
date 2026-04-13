@@ -69,9 +69,7 @@ public class Main {
             BoardVisualizer viz = new BoardVisualizer(currentDisplayBoard);
             frame.add(viz, BorderLayout.CENTER);
 
-            // <--- KONTROL PANEL --->
-            if (finalSolverTask instanceof MasterSolverPBP) {
-                MasterSolverPBP pbpSolver = (MasterSolverPBP) finalSolverTask;
+            if (finalSolverTask instanceof MasterSolverPBP pbpSolver) {
 
                 JPanel controlPanel = new JPanel();
                 controlPanel.setLayout(new BoxLayout(controlPanel, BoxLayout.Y_AXIS));
@@ -140,7 +138,6 @@ public class Main {
                 forceBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
                 forceBtn.addActionListener(e -> pbpSolver.triggerManualOverride(campSlider.getValue()));
 
-                // Tilføj det hele til panelet med pæne mellemrum
                 controlPanel.add(Box.createVerticalStrut(30));
                 controlPanel.add(extLabel);
                 controlPanel.add(Box.createVerticalStrut(10));
@@ -194,7 +191,9 @@ public class Main {
             String line;
             while ((line = br.readLine()) != null && i < 256) {
                 String[] pts = line.split(",");
-                if (pts.length < 4) continue;
+                if (pts.length < 4) {
+                    continue;
+                }
 
                 int e = Integer.parseInt(pts[0].trim());
                 int s = Integer.parseInt(pts[1].trim());
@@ -203,7 +202,9 @@ public class Main {
 
                 pieces[i++] = PieceUtils.pack(n, e, s, w);
             }
-            if (i == 256) return pieces;
+            if (i == 256) {
+                return pieces;
+            }
         } catch (Exception e) {
             System.out.println("pieces.csv not found or unreadable. Using mock data.");
         }
