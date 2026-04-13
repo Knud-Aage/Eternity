@@ -1,4 +1,4 @@
-package dk.roleplay;
+package dk.puzzle;
 
 import jcuda.Pointer;
 import jcuda.Sizeof;

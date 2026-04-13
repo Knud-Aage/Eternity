@@ -1,4 +1,4 @@
-package dk.roleplay;
+package dk.puzzle;
 
 import javax.imageio.ImageIO;
 import javax.swing.*;

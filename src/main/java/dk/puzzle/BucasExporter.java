@@ -1,4 +1,4 @@
-package dk.roleplay;
+package dk.puzzle;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
@@ -16,14 +16,16 @@ public class BucasExporter {
         for (int i = 0; i < 256; i++) {
             board[i] = "0000";
         }
-        
+
         try (BufferedReader br = new BufferedReader(new FileReader(filename))) {
             String line = br.readLine(); // Læs første linje (headeren)
-            if (line == null) return;
+            if (line == null) {
+                return;
+            }
 
             // Vi tjekker automatisk om din CSV bruger "MacroIndex" eller "Row/Col"
             boolean isMacroFormat = line.toLowerCase().contains("macro");
-            
+
             while ((line = br.readLine()) != null) {
                 String[] parts = line.split(",");
                 if (parts.length >= 6) {
@@ -50,32 +52,32 @@ public class BucasExporter {
 
                         // Oversæt farvekoderne til bogstaver og lås dem fast på den rigtige plads
                         String pieceStr = "" +
-                                (char)('a' + n) +
-                                (char)('a' + e) +
-                                (char)('a' + s) +
-                                (char)('a' + w);
+                                (char) ('a' + n) +
+                                (char) ('a' + e) +
+                                (char) ('a' + s) +
+                                (char) ('a' + w);
 
                         board[absoluteIndex] = pieceStr;
                     }
                 }
             }
-            
+
             // Saml det færdige puslespil fra venstre mod højre
             StringBuilder bucasString = new StringBuilder();
             for (int i = 0; i < 256; i++) {
                 bucasString.append(board[i]);
             }
-            
+
             // Byg den fulde URL
-            String finalUrl = "https://e2.bucas.name/#puzzle=Joshua_Blackwood_470&board_w=16&board_h=16&board_edges=" 
-                              + bucasString.toString() 
-                              + "&motifs_order=jblackwood";
-            
+            String finalUrl = "https://e2.bucas.name/#puzzle=Joshua_Blackwood_470&board_w=16&board_h=16&board_edges="
+                    + bucasString
+                    + "&motifs_order=jblackwood";
+
             System.out.println("Færdig! Kopiér dette link og send det til din kollega:");
             System.out.println("------------------------------------------------------");
             System.out.println(finalUrl);
             System.out.println("------------------------------------------------------");
-            
+
         } catch (Exception e) {
             System.out.println("Kunne ikke finde filen! Sørg for at den ligger i records-mappen.");
             e.printStackTrace();

@@ -1,4 +1,4 @@
-package dk.roleplay;
+package dk.puzzle;
 
 import javax.imageio.ImageIO;
 import java.awt.*;
@@ -76,17 +76,23 @@ public class RecordManager {
         g2d.fillRect(0, 0, img.getWidth(), img.getHeight());
 
         for (int r = 0; r < 16; r++) {
-            if (mainBoard[r] == null) continue;
+            if (mainBoard[r] == null) {
+                continue;
+            }
             for (int c = 0; c < 16; c++) {
                 int piece = mainBoard[r][c];
-                if (piece != -1 && piece != PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD)) {
+                if (piece != -1 && piece != PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD,
+                        PieceUtils.WILDCARD, PieceUtils.WILDCARD)) {
                     drawPiece(g2d, c * PIECE_SIZE, r * PIECE_SIZE, piece);
                 }
             }
         }
         g2d.dispose();
-        try { ImageIO.write(img, "PNG", new File(filename)); }
-        catch (Exception e) { e.printStackTrace(); }
+        try {
+            ImageIO.write(img, "PNG", new File(filename));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private static void drawPiece(Graphics2D g2d, int tileX, int tileY, int piece) {
@@ -95,14 +101,16 @@ public class RecordManager {
         int cx = tileX + PIECE_SIZE / 2, cy = tileY + PIECE_SIZE / 2;
 
         Polygon north = new Polygon(new int[]{tileX, tileX + PIECE_SIZE, cx}, new int[]{tileY, tileY, cy}, 3);
-        Polygon east  = new Polygon(new int[]{tileX + PIECE_SIZE, tileX + PIECE_SIZE, cx}, new int[]{tileY, tileY + PIECE_SIZE, cy}, 3);
-        Polygon south = new Polygon(new int[]{tileX, tileX + PIECE_SIZE, cx}, new int[]{tileY + PIECE_SIZE, tileY + PIECE_SIZE, cy}, 3);
-        Polygon west  = new Polygon(new int[]{tileX, tileX, cx}, new int[]{tileY, tileY + PIECE_SIZE, cy}, 3);
+        Polygon east = new Polygon(new int[]{tileX + PIECE_SIZE, tileX + PIECE_SIZE, cx}, new int[]{tileY,
+                tileY + PIECE_SIZE, cy}, 3);
+        Polygon south = new Polygon(new int[]{tileX, tileX + PIECE_SIZE, cx}, new int[]{tileY + PIECE_SIZE,
+                tileY + PIECE_SIZE, cy}, 3);
+        Polygon west = new Polygon(new int[]{tileX, tileX, cx}, new int[]{tileY, tileY + PIECE_SIZE, cy}, 3);
 
         drawPatternTriangle(g2d, n, north, tileX, tileY, PIECE_SIZE, 0);
-        drawPatternTriangle(g2d, e, east,  tileX, tileY, PIECE_SIZE, 1);
+        drawPatternTriangle(g2d, e, east, tileX, tileY, PIECE_SIZE, 1);
         drawPatternTriangle(g2d, s, south, tileX, tileY, PIECE_SIZE, 2);
-        drawPatternTriangle(g2d, w, west,  tileX, tileY, PIECE_SIZE, 3);
+        drawPatternTriangle(g2d, w, west, tileX, tileY, PIECE_SIZE, 3);
 
         g2d.setColor(new Color(30, 30, 30, 100));
         g2d.setStroke(new BasicStroke(1));
@@ -111,7 +119,8 @@ public class RecordManager {
         g2d.drawLine(tileX, tileY + PIECE_SIZE, tileX + PIECE_SIZE, tileY);
     }
 
-    private static void drawPatternTriangle(Graphics2D g2d, int patternId, Polygon clip, int tileX, int tileY, int size, int rotIdx) {
+    private static void drawPatternTriangle(Graphics2D g2d, int patternId, Polygon clip, int tileX, int tileY,
+                                            int size, int rotIdx) {
         Shape oldClip = g2d.getClip();
         g2d.setClip(clip);
         g2d.setColor(getFallbackColor(patternId));
@@ -119,13 +128,23 @@ public class RecordManager {
 
         if (patternId > 0 && patternId <= 22 && rotatedImages[patternId][rotIdx] != null) {
             int edgeCenterX = 0, edgeCenterY = 0;
-            if (rotIdx == 0)      { edgeCenterX = tileX + size / 2; edgeCenterY = tileY; }
-            else if (rotIdx == 1) { edgeCenterX = tileX + size;     edgeCenterY = tileY + size / 2; }
-            else if (rotIdx == 2) { edgeCenterX = tileX + size / 2; edgeCenterY = tileY + size; }
-            else if (rotIdx == 3) { edgeCenterX = tileX;            edgeCenterY = tileY + size / 2; }
+            if (rotIdx == 0) {
+                edgeCenterX = tileX + size / 2;
+                edgeCenterY = tileY;
+            } else if (rotIdx == 1) {
+                edgeCenterX = tileX + size;
+                edgeCenterY = tileY + size / 2;
+            } else if (rotIdx == 2) {
+                edgeCenterX = tileX + size / 2;
+                edgeCenterY = tileY + size;
+            } else if (rotIdx == 3) {
+                edgeCenterX = tileX;
+                edgeCenterY = tileY + size / 2;
+            }
 
-            int imgSize = (int)(size * 0.6);
-            g2d.drawImage(rotatedImages[patternId][rotIdx], edgeCenterX - (imgSize / 2), edgeCenterY - (imgSize / 2), imgSize, imgSize, null);
+            int imgSize = (int) (size * 0.6);
+            g2d.drawImage(rotatedImages[patternId][rotIdx], edgeCenterX - (imgSize / 2), edgeCenterY - (imgSize / 2),
+                    imgSize, imgSize, null);
         }
         g2d.setClip(oldClip);
     }
@@ -134,7 +153,9 @@ public class RecordManager {
         try (PrintWriter out = new PrintWriter(filename)) {
             out.println("Row,Col,North,East,South,West");
             for (int r = 0; r < 16; r++) {
-                if (mainBoard[r] == null) continue;
+                if (mainBoard[r] == null) {
+                    continue;
+                }
                 for (int c = 0; c < 16; c++) {
                     int piece = mainBoard[r][c];
                     if (piece != -1) {
@@ -144,23 +165,49 @@ public class RecordManager {
                     }
                 }
             }
-        } catch (Exception e) { e.printStackTrace(); }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 
     private static Color getFallbackColor(int val) {
         switch (val) {
-            case 0: return new Color(100, 105, 110);
-            case 1: case 17: return new Color(100, 200, 230);
-            case 2: case 6: case 13: return new Color(230, 130, 180);
-            case 3: case 9: case 15: return new Color(80, 180, 100);
-            case 4: case 12: case 20: return new Color(40, 60, 120);
-            case 5: case 19: return new Color(240, 150, 50);
-            case 7: case 8: return new Color(130, 80, 160);
-            case 10: return new Color(80, 100, 200);
-            case 11: case 14: case 18: return new Color(240, 220, 80);
-            case 16: case 22: return new Color(160, 100, 80);
-            case 21: return new Color(180, 60, 100);
-            default: return new Color(40, 40, 40);
+            case 0:
+                return new Color(100, 105, 110);
+            case 1:
+            case 17:
+                return new Color(100, 200, 230);
+            case 2:
+            case 6:
+            case 13:
+                return new Color(230, 130, 180);
+            case 3:
+            case 9:
+            case 15:
+                return new Color(80, 180, 100);
+            case 4:
+            case 12:
+            case 20:
+                return new Color(40, 60, 120);
+            case 5:
+            case 19:
+                return new Color(240, 150, 50);
+            case 7:
+            case 8:
+                return new Color(130, 80, 160);
+            case 10:
+                return new Color(80, 100, 200);
+            case 11:
+            case 14:
+            case 18:
+                return new Color(240, 220, 80);
+            case 16:
+            case 22:
+                return new Color(160, 100, 80);
+            case 21:
+                return new Color(180, 60, 100);
+            default:
+                return new Color(40, 40, 40);
         }
     }
 }

@@ -1,4 +1,4 @@
-package dk.roleplay;
+package dk.puzzle;
 
 import java.util.ArrayList;
 import java.util.Arrays;

@@ -1,4 +1,4 @@
-package dk.roleplay;
+package dk.puzzle;
 
 import javax.swing.*;
 import java.awt.*;
