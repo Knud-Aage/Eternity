@@ -203,7 +203,7 @@ public class MasterSolverPBP implements Runnable {
         return false;
     }
 
-    private void runGpuHandoff(List<int[]> partialBoardsList, int startingStep) {
+    private void runGpuHandoff(List<int[]> partialBoardsList, int startingStep, int radarLimit) {
         int numBoards = partialBoardsList.size();
         if (numBoards == 0) {
             return;
@@ -253,6 +253,11 @@ public class MasterSolverPBP implements Runnable {
         CUdeviceptr d_threadDepths = new CUdeviceptr();
         cuMemAlloc(d_threadDepths, (long) numBoards * Sizeof.INT);
 
+        int[] limitArr = { radarLimit };
+        CUdeviceptr d_radarLimit = new CUdeviceptr();
+        cuMemAlloc(d_radarLimit, Sizeof.INT);
+        cuMemcpyHtoD(d_radarLimit, Pointer.to(limitArr), Sizeof.INT);
+
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards),
                 Pointer.to(new int[]{numBoards}),
@@ -265,8 +270,9 @@ public class MasterSolverPBP implements Runnable {
                 Pointer.to(d_gpuHighScore),
                 Pointer.to(d_bestBoardOut),
                 Pointer.to(d_totalSteps),
-                Pointer.to(new int[]{lockCenter ? 1 : 0}),
-                Pointer.to(d_threadDepths)
+                Pointer.to(new int[]{ lockCenter ? 1 : 0 }),
+                Pointer.to(d_threadDepths),
+                Pointer.to(d_radarLimit)
         );
 
         int threadsPerBlock = 256;
@@ -301,7 +307,7 @@ public class MasterSolverPBP implements Runnable {
 
         if (numBoards > 0 && (double) deadOnArrival / numBoards >= extinctionThreshold) {
             cuFreeResources(d_partialBoards, d_buildOrder, d_allOrientations, d_physicalMapping, d_solution,
-                    d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths);
+                    d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths, d_radarLimit);
             throw new PoisonedBaseCampException();
         }
 
@@ -339,7 +345,7 @@ public class MasterSolverPBP implements Runnable {
                 }
             }
 
-            if (currentStrategy == BuildStrategy.SPIRAL && deepestStep > handoffDepth + 30) {
+            if (deepestStep > handoffDepth + 30) {
                 cuFreeResources(d_partialBoards, d_buildOrder, d_allOrientations, d_physicalMapping, d_solution,
                         d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths);
                 throw new EvolutionLeapException();
@@ -377,13 +383,13 @@ public class MasterSolverPBP implements Runnable {
 
                 System.out.println("\n" + timestamp() + " [!!!] AUTONOMOUS DEEP EXTINCTION [!!!]");
                 System.out.println(timestamp() + " No progression in the last " + minutesSinceProgress + " minutes.");
-                System.out.println(timestamp() + " Forces Base Camp all the down to tile : " + deepRetreat + "\n");
+                System.out.println(timestamp() + " Forces Base Camp all the way down to tile : " + deepRetreat + "\n");
 
                 Arrays.fill(flatResumeBoard, -1);
             }
 
             int lockedPieces = 0;
-            if (deepestStep > 0 && currentStrategy == BuildStrategy.SPIRAL) {
+            if (deepestStep > 0) {
                 lockedPieces = Math.max(0, deepestStep - 30);
 
                 int gap;
@@ -435,14 +441,14 @@ public class MasterSolverPBP implements Runnable {
                         return;
                     }
                 }
+                int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 10 : 0;
 
                 if (currentBatchSize.get() >= activeBatch) {
-                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth);
+                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth, radarDistance); // <-- Send radarDistance
                     spaceExhausted = false;
                 } else if (currentBatchSize.get() > 0) {
-                    System.out.println(timestamp() + ">>> Exhaustion! Send " + currentBatchSize.get() + " seeds to " +
-                            "GPU...");
-                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth);
+                    System.out.println(timestamp() + ">>> Search space exhausted early! Sending remaining " + currentBatchSize.get() + " seeds to GPU...");
+                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth, radarDistance); // <-- Send radarDistance
                 }
 
             } catch (EvolutionLeapException e) {
@@ -471,7 +477,7 @@ public class MasterSolverPBP implements Runnable {
             }
 
             if (spaceExhausted) {
-                if (currentStrategy == BuildStrategy.SPIRAL && lockedPieces > 0) {
+                if (lockedPieces > 0) {
                     deepestStep = Math.max(0, lockedPieces - 10);
                     System.out.println(timestamp() + ">>> Base camp exhausted. Falling back to search new path...");
                 } else {

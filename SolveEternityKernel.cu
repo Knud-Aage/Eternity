@@ -1,6 +1,6 @@
 /**
  * SolveEternityKernel.cu
- * Opgraderet til SPIRAL-BUILD metoden!
+ * Upgraded for SPIRAL-BUILD and TYPEWRITER (Radar Leash) methods!
  */
 
 // --- DEVICE HELPER FUNCTIONS ---
@@ -42,10 +42,14 @@ extern "C" __global__ void solvePBP(
     int* d_bestBoardOut,
     unsigned long long* d_totalSteps,
     int lockCenterFlag,
-    int* d_threadDepths
+    int* d_threadDepths,
+    int* p_radarLimit      // [NEW] The Radar Leash limit parameter
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numPartialBoards) return;
+
+    // Read the radar limit into a local variable
+    int radarLimit = p_radarLimit[0];
 
     int board[256];
     int pieceStack[256];
@@ -78,55 +82,69 @@ extern "C" __global__ void solvePBP(
         if (stepCounter > 5000000) break;
         if (*d_solvedFlag == 1) break;
 
-        int boardIdx = d_buildOrder[step];
-
-        // ONLY skip the center piece if the rule is locked!
-        if (lockCenterFlag == 1 && boardIdx == 135) {
-            step++;
-            continue;
+        // ==========================================================
+        // [NEW] THE RADAR LEASH LOGIC
+        // If the leash is active (>0) and we reached the maximum
+        // allowed look-ahead distance, we force a backtrack.
+        // ==========================================================
+        bool forceBacktrack = false;
+        if (radarLimit > 0 && step >= startingStep + radarLimit) {
+            forceBacktrack = true;
         }
-
-        int row = boardIdx / 16;
-        int col = boardIdx % 16;
-
-        int n_req = (row == 0) ? 0 : (board[boardIdx - 16] != -1 ? getSouth(board[boardIdx - 16]) : 255);
-        int s_req = (row == 15) ? 0 : (board[boardIdx + 16] != -1 ? getNorth(board[boardIdx + 16]) : 255);
-        int w_req = (col == 0) ? 0 : (board[boardIdx - 1] != -1 ? getEast(board[boardIdx - 1]) : 255);
-        int e_req = (col == 15) ? 0 : (board[boardIdx + 1] != -1 ? getWest(board[boardIdx + 1]) : 255);
 
         bool foundPiece = false;
-        int startIdx = pieceStack[step];
 
-        for (int idx = startIdx; idx < 1024; idx++) {
-            int physId = d_physicalMapping[idx];
+        // Only search for a piece if we haven't hit the radar limit
+        if (!forceBacktrack) {
+            int boardIdx = d_buildOrder[step];
 
-            if (inventoryMask[physId / 64] & (1ULL << (physId % 64))) {
-                int p = d_allOrientations[idx];
+            // ONLY skip the center piece if the rule is locked!
+            if (lockCenterFlag == 1 && boardIdx == 135) {
+                step++;
+                continue;
+            }
 
-                if (matches(p, n_req, e_req, s_req, w_req, row, col)) {
+            int row = boardIdx / 16;
+            int col = boardIdx % 16;
 
-                    board[boardIdx] = p;
-                    inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
+            int n_req = (row == 0) ? 0 : (board[boardIdx - 16] != -1 ? getSouth(board[boardIdx - 16]) : 255);
+            int s_req = (row == 15) ? 0 : (board[boardIdx + 16] != -1 ? getNorth(board[boardIdx + 16]) : 255);
+            int w_req = (col == 0) ? 0 : (board[boardIdx - 1] != -1 ? getEast(board[boardIdx - 1]) : 255);
+            int e_req = (col == 15) ? 0 : (board[boardIdx + 1] != -1 ? getWest(board[boardIdx + 1]) : 255);
 
-                    pieceStack[step] = idx + 1;
-                    foundPiece = true;
-                    step++;
+            int startIdx = pieceStack[step];
 
-                    if (step > maxStepReached) {
-                        maxStepReached = step;
-                        // Vi gemmer det fysiske bræt, så vi nemt kan overlevere det
-                        for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+            for (int idx = startIdx; idx < 1024; idx++) {
+                int physId = d_physicalMapping[idx];
+
+                if (inventoryMask[physId / 64] & (1ULL << (physId % 64))) {
+                    int p = d_allOrientations[idx];
+
+                    if (matches(p, n_req, e_req, s_req, w_req, row, col)) {
+
+                        board[boardIdx] = p;
+                        inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
+
+                        pieceStack[step] = idx + 1;
+                        foundPiece = true;
+                        step++;
+
+                        if (step > maxStepReached) {
+                            maxStepReached = step;
+                            // Save the physical board layout for Java retrieval
+                            for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+                        }
+
+                        break;
                     }
-
-                    break;
                 }
             }
-        }
+        } // End of (!forceBacktrack) execution
 
+        // Standard backtrack logic (Triggers on dead ends AND when radar limit is hit)
         if (!foundPiece) {
             pieceStack[step] = 0;
             step--;
-
 
             // ONLY skip backwards over the center piece if the rule is locked!
             if (lockCenterFlag == 1 && step >= 0 && d_buildOrder[step] == 135) step--;
