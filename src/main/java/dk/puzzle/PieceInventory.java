@@ -1,7 +1,9 @@
 package dk.puzzle;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Manages the collection of Eternity II puzzle pieces.
@@ -16,8 +18,15 @@ public class PieceInventory {
     public final List<Integer> edges = new ArrayList<>();
     public final List<Integer> interior = new ArrayList<>();
 
-    public List<Integer>[][] compatibility;
-    public int[] colorFrequency;
+    // New: Precomputed maps for fast lookup of orientations by edge pattern
+    public final Map<Integer, List<Integer>> northEdgeToOrientations = new HashMap<>();
+    public final Map<Integer, List<Integer>> eastEdgeToOrientations = new HashMap<>();
+    public final Map<Integer, List<Integer>> southEdgeToOrientations = new HashMap<>();
+    public final Map<Integer, List<Integer>> westEdgeToOrientations = new HashMap<>();
+
+
+    public List<Integer>[][] compatibility; // This seems unused in MasterSolverPBP, but keeping it for now
+    public int[] colorFrequency; // This seems unused in MasterSolverPBP, but keeping it for now
 
     /**
      * Initializes the inventory from base physical pieces.
@@ -46,10 +55,18 @@ public class PieceInventory {
                 allOrientations[orientationIdx] = oriented;
                 physicalMapping[orientationIdx] = i;
 
+                // Populate compatibility (if still used elsewhere)
                 compatibility[0][PieceUtils.getNorth(oriented)].add(orientationIdx);
                 compatibility[1][PieceUtils.getEast(oriented)].add(orientationIdx);
                 compatibility[2][PieceUtils.getSouth(oriented)].add(orientationIdx);
                 compatibility[3][PieceUtils.getWest(oriented)].add(orientationIdx);
+
+                // Populate new edge-to-orientations maps
+                northEdgeToOrientations.computeIfAbsent(PieceUtils.getNorth(oriented), k -> new ArrayList<>()).add(orientationIdx);
+                eastEdgeToOrientations.computeIfAbsent(PieceUtils.getEast(oriented), k -> new ArrayList<>()).add(orientationIdx);
+                southEdgeToOrientations.computeIfAbsent(PieceUtils.getSouth(oriented), k -> new ArrayList<>()).add(orientationIdx);
+                westEdgeToOrientations.computeIfAbsent(PieceUtils.getWest(oriented), k -> new ArrayList<>()).add(orientationIdx);
+
 
                 colorFrequency[PieceUtils.getNorth(oriented)]++;
                 colorFrequency[PieceUtils.getEast(oriented)]++;

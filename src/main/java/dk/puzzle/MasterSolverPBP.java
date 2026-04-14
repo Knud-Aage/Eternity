@@ -64,6 +64,13 @@ public class MasterSolverPBP implements Runnable {
     private volatile int userBatchSizeOverride = -1;
     private long lastProgressTimestamp = System.currentTimeMillis();
     private volatile int stagnationLimitMinutes = 20;
+    private final int[][] piecesByNorth = new int[256][];
+    private final int[][] piecesByEast = new int[256][];
+    private final int[][] piecesBySouth = new int[256][];
+    private final int[][] piecesByWest = new int[256][];
+
+    // Extinction tracker for Rec 4
+    private int consecutiveExtinctions = 0;
 
     public void setStagnationLimit(int minutes) {
         this.stagnationLimitMinutes = minutes;
@@ -126,6 +133,36 @@ public class MasterSolverPBP implements Runnable {
                     bestBoard[135] = targetPiece;
                 }
             }
+        }
+        java.util.Set<Integer>[] tempNorth = new java.util.HashSet[256];
+        java.util.Set<Integer>[] tempEast = new java.util.HashSet[256];
+        java.util.Set<Integer>[] tempSouth = new java.util.HashSet[256];
+        java.util.Set<Integer>[] tempWest = new java.util.HashSet[256];
+
+        for (int i = 0; i < 256; i++) {
+            tempNorth[i] = new java.util.HashSet<>();
+            tempEast[i] = new java.util.HashSet<>();
+            tempSouth[i] = new java.util.HashSet<>();
+            tempWest[i] = new java.util.HashSet<>();
+        }
+
+        for (int i = 0; i < 1024; i++) {
+            int p = inventory.allOrientations[i];
+            int physId = inventory.physicalMapping[i];
+
+            // Assuming PieceUtils methods exist, otherwise use bit shifts: (p >> 24) & 0xFF
+            tempNorth[PieceUtils.getNorth(p)].add(physId);
+            tempEast[PieceUtils.getEast(p)].add(physId);
+            tempSouth[PieceUtils.getSouth(p)].add(physId);
+            tempWest[PieceUtils.getWest(p)].add(physId);
+        }
+
+        // Convert to fast native int arrays
+        for (int i = 0; i < 256; i++) {
+            piecesByNorth[i] = tempNorth[i].stream().mapToInt(Integer::intValue).toArray();
+            piecesByEast[i]  = tempEast[i].stream().mapToInt(Integer::intValue).toArray();
+            piecesBySouth[i] = tempSouth[i].stream().mapToInt(Integer::intValue).toArray();
+            piecesByWest[i]  = tempWest[i].stream().mapToInt(Integer::intValue).toArray();
         }
     }
 
@@ -453,13 +490,25 @@ public class MasterSolverPBP implements Runnable {
 
             } catch (EvolutionLeapException e) {
                 spaceExhausted = false;
+                consecutiveExtinctions = 0; // Reset frustration meter on progress
             } catch (PoisonedBaseCampException e) {
                 spaceExhausted = false;
-                if (lockedPieces > 70) {
-                    deepestStep = Math.max(70, lockedPieces - 8);
-                    System.out.println("\n" + timestamp() + "[!] EXTINCTION EVENT! " + (int) (extinctionThreshold * 100) + "%+ seeds died instantly.");
-                    System.out.println(timestamp() + "[!] Poisoned Base Camp detected. Retreating to step " + deepestStep + "...\n");
+                consecutiveExtinctions++;
+
+                // Graduated retreat logic: -8, -20, or -40 steps based on repeated failures
+                int retreatSize = (consecutiveExtinctions == 1) ? 8 : (consecutiveExtinctions == 2) ? 20 : 40;
+
+                if (lockedPieces > retreatSize) {
+                    deepestStep = Math.max(40, lockedPieces - retreatSize);
+                    System.out.println("\n" + timestamp() + "[!] EXTINCTION EVENT (" + consecutiveExtinctions + " consecutive failures)!");
+                    System.out.println(timestamp() + "[!] Structural dead-end detected. Retreating " + retreatSize + " steps to base camp " + deepestStep + "...\n");
+                } else {
+                    deepestStep = 0;
                 }
+
+                // Reset the counter after a massive retreat
+                if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
+
             } catch (ExecutionException e) {
                 Throwable cause = e.getCause();
                 if (cause instanceof ManualOverrideException) {
@@ -539,6 +588,13 @@ public class MasterSolverPBP implements Runnable {
                     localUsed[centerPhysicalIdx] = true;
                 }
             }
+        }
+
+        private boolean hasAvailablePiece(int[] candidatePhysIds) {
+            for (int physId : candidatePhysIds) {
+                if (!localUsed[physId]) return true;
+            }
+            return false;
         }
 
         @Override
@@ -644,21 +700,33 @@ public class MasterSolverPBP implements Runnable {
                     return false;
                 }
 
+
+
                 int orientationIdx = pool.get((i + offset) % size);
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
 
                 if (localResumeBoard[boardIdx] != -1) {
-                    if (p != localResumeBoard[boardIdx]) {
-                        continue;
-                    }
+                    if (p != localResumeBoard[boardIdx]) continue;
                 }
 
-                if (localUsed[physicalIdx]) {
-                    continue;
-                }
+                if (localUsed[physicalIdx]) continue;
 
                 if (matches(p, n_req, e_req, s_req, w_req)) {
+
+                    // --- FORWARD CHECKING (LOOKAHEAD) ---
+                    // If we place this piece, does the empty cell below us have any valid pieces left?
+                    if (row < 15 && localResumeBoard[boardIdx + 16] == -1 && localBoard[boardIdx + 16] == -1) {
+                        int requiredNorth = PieceUtils.getSouth(p);
+                        if (!hasAvailablePiece(piecesByNorth[requiredNorth])) continue; // Prune immediately!
+                    }
+
+                    // Does the empty cell to the right have any valid pieces left?
+                    if (col < 15 && localResumeBoard[boardIdx + 1] == -1 && localBoard[boardIdx + 1] == -1) {
+                        int requiredWest = PieceUtils.getEast(p);
+                        if (!hasAvailablePiece(piecesByWest[requiredWest])) continue; // Prune immediately!
+                    }
+                    // ------------------------------------
 
                     localBoard[boardIdx] = p;
                     localUsed[physicalIdx] = true;
@@ -666,12 +734,11 @@ public class MasterSolverPBP implements Runnable {
                     int ghostPiece = localResumeBoard[boardIdx];
                     localResumeBoard[boardIdx] = -1;
 
-                    if (solve(step + 1)) {
-                        return true;
-                    }
+                    if (solve(step + 1)) return true;
 
                     localBoard[boardIdx] = -1;
                     localUsed[physicalIdx] = false;
+                    localResumeBoard[boardIdx] = ghostPiece; // Restore the ghost piece correctly
                 }
             }
             return false;
