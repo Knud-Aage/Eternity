@@ -20,6 +20,7 @@ import static jcuda.driver.JCudaDriver.cuMemcpyHtoD;
 import static jcuda.driver.JCudaDriver.cuModuleGetFunction;
 import static jcuda.driver.JCudaDriver.cuModuleLoad;
 
+import java.time.Instant;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -107,7 +108,7 @@ public class MasterSolverPBP implements Runnable {
             handoffDepth = 70;
         } else {
             buildOrder = generateTypewriterOrder();
-            handoffDepth = 50;
+            handoffDepth = 32; // Handoff at the end of row 2
         }
 
         int[][] loaded = CheckpointManager.load(saveProfile);
@@ -150,7 +151,6 @@ public class MasterSolverPBP implements Runnable {
             int p = inventory.allOrientations[i];
             int physId = inventory.physicalMapping[i];
 
-            // Assuming PieceUtils methods exist, otherwise use bit shifts: (p >> 24) & 0xFF
             tempNorth[PieceUtils.getNorth(p)].add(physId);
             tempEast[PieceUtils.getEast(p)].add(physId);
             tempSouth[PieceUtils.getSouth(p)].add(physId);
@@ -384,13 +384,13 @@ public class MasterSolverPBP implements Runnable {
 
             if (deepestStep > handoffDepth + 30) {
                 cuFreeResources(d_partialBoards, d_buildOrder, d_allOrientations, d_physicalMapping, d_solution,
-                        d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths);
+                        d_solvedFlag, d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths, d_radarLimit);
                 throw new EvolutionLeapException();
             }
         }
 
         cuFreeResources(d_partialBoards, d_buildOrder, d_allOrientations, d_physicalMapping, d_solution, d_solvedFlag
-                , d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths);
+                , d_gpuHighScore, d_bestBoardOut, d_totalSteps, d_threadDepths, d_radarLimit);
     }
 
     private void cuFreeResources(CUdeviceptr... pointers) {
@@ -408,7 +408,6 @@ public class MasterSolverPBP implements Runnable {
         }
 
         System.out.println(timestamp() + "Starting Autonomous Engine...");
-        if (useGpu) initCUDA();
 
         while (true) {
             long minutesSinceProgress = (System.currentTimeMillis() - lastProgressTimestamp) / 60000;
@@ -442,14 +441,6 @@ public class MasterSolverPBP implements Runnable {
                 }
 
                 handoffDepth = lockedPieces + gap;
-                int activeBatch = (userBatchSizeOverride > 0) ? userBatchSizeOverride : targetBatchSize;
-
-//                System.out.println("\n" + timestamp() + "=======================================================");
-//                System.out.println(timestamp() + ">>> EVOLUTION! Base Camp locked to step " + lockedPieces);
-//                System.out.println(timestamp() + ">>> CPU build to Handoff at step " + HANDOFF_DEPTH);
-//                System.out.println(timestamp() + ">>> Goal: " + activeBatch + " seeds (" + numCores + " kernels
-//                work parallel)");
-//                System.out.println(timestamp() + "=======================================================\n");
 
                 for (int step = 0; step < lockedPieces; step++) {
                     int boardIdx = buildOrder[step];
@@ -478,24 +469,30 @@ public class MasterSolverPBP implements Runnable {
                         return;
                     }
                 }
-                int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 10 : 0;
+                
+                // Allow the GPU to search deeper. A radarDistance of 0 was too restrictive,
+                // causing very short GPU sessions and low piece/second rates.
+                // Setting it to a positive value allows the GPU to explore more steps.
+                int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 120 : 50;
 
                 if (currentBatchSize.get() >= activeBatch) {
-                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth, radarDistance); // <-- Send radarDistance
+                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth, radarDistance);
                     spaceExhausted = false;
                 } else if (currentBatchSize.get() > 0) {
                     System.out.println(timestamp() + ">>> Search space exhausted early! Sending remaining " + currentBatchSize.get() + " seeds to GPU...");
-                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth, radarDistance); // <-- Send radarDistance
+                    runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth, radarDistance);
+                    spaceExhausted = false;
                 }
+
+                consecutiveExtinctions = 0;
 
             } catch (EvolutionLeapException e) {
                 spaceExhausted = false;
-                consecutiveExtinctions = 0; // Reset frustration meter on progress
+                consecutiveExtinctions = 0;
             } catch (PoisonedBaseCampException e) {
                 spaceExhausted = false;
                 consecutiveExtinctions++;
 
-                // Graduated retreat logic: -8, -20, or -40 steps based on repeated failures
                 int retreatSize = (consecutiveExtinctions == 1) ? 8 : (consecutiveExtinctions == 2) ? 20 : 40;
 
                 if (lockedPieces > retreatSize) {
@@ -506,7 +503,6 @@ public class MasterSolverPBP implements Runnable {
                     deepestStep = 0;
                 }
 
-                // Reset the counter after a massive retreat
                 if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
 
             } catch (ExecutionException e) {
@@ -529,6 +525,8 @@ public class MasterSolverPBP implements Runnable {
                 if (lockedPieces > 0) {
                     deepestStep = Math.max(0, lockedPieces - 10);
                     System.out.println(timestamp() + ">>> Base camp exhausted. Falling back to search new path...");
+//                    Instant restartTime = Instant.now();
+//                    if (restartTime.minus(Instant.now()))
                 } else {
                     System.out.println(timestamp() + "Total search space exhausted. No solution found.");
                     return;
@@ -597,6 +595,26 @@ public class MasterSolverPBP implements Runnable {
             return false;
         }
 
+        /**
+         * 2-Step Lookahead: Checks if a piece matching 'reqNorth' exists,
+         * and if that piece leaves its own southern neighbor solvable.
+         */
+        private boolean isSecondaryNeighborViable(int reqNorth) {
+            int[] candidates = piecesByNorth[reqNorth];
+            for (int physId : candidates) {
+                if (localUsed[physId]) continue;
+                // Check all 4 orientations of this physical piece
+                for (int rot = 0; rot < 4; rot++) {
+                    int p_orient = inventory.allOrientations[physId * 4 + rot];
+                    if (PieceUtils.getNorth(p_orient) == reqNorth) {
+                        int s_edge = PieceUtils.getSouth(p_orient);
+                        if (hasAvailablePiece(piecesByNorth[s_edge])) return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         @Override
         public Boolean call() {
             return solve(0);
@@ -631,12 +649,6 @@ public class MasterSolverPBP implements Runnable {
                 gpuSeedBoards.add(clonedBoard);
 
                 int size = currentBatchSize.incrementAndGet();
-                int printInterval = (activeBatch <= 250) ? 10 : (activeBatch <= 1000 ? 100 : 1000);
-
-//                if (size % printInterval == 0) {
-//                    System.out.println(timestamp() + "   [CPU Pool] Found " + size + " / " + activeBatch + " seeds.
-//                    ..");
-//                }
                 return false;
             }
 
@@ -700,8 +712,6 @@ public class MasterSolverPBP implements Runnable {
                     return false;
                 }
 
-
-
                 int orientationIdx = pool.get((i + offset) % size);
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
@@ -714,19 +724,24 @@ public class MasterSolverPBP implements Runnable {
 
                 if (matches(p, n_req, e_req, s_req, w_req)) {
 
-                    // --- FORWARD CHECKING (LOOKAHEAD) ---
-                    // If we place this piece, does the empty cell below us have any valid pieces left?
-                    if (row < 15 && localResumeBoard[boardIdx + 16] == -1 && localBoard[boardIdx + 16] == -1) {
-                        int requiredNorth = PieceUtils.getSouth(p);
-                        if (!hasAvailablePiece(piecesByNorth[requiredNorth])) continue; // Prune immediately!
+                    // --- TIERED CPU LOOKAHEAD ---
+                    // Step 1: South neighbor solvable? (Always check)
+                    if (row < 15 && localBoard[boardIdx + 16] == -1) {
+                        int reqN = PieceUtils.getSouth(p);
+                        if (!hasAvailablePiece(piecesByNorth[reqN])) continue;
+
+                        // Step 2: South-South secondary lookahead (Mid-board optimization)
+                        if (step > 30 && row < 14 && localBoard[boardIdx + 32] == -1) {
+                            if (!isSecondaryNeighborViable(reqN)) continue;
+                        }
                     }
 
-                    // Does the empty cell to the right have any valid pieces left?
-                    if (col < 15 && localResumeBoard[boardIdx + 1] == -1 && localBoard[boardIdx + 1] == -1) {
-                        int requiredWest = PieceUtils.getEast(p);
-                        if (!hasAvailablePiece(piecesByWest[requiredWest])) continue; // Prune immediately!
+                    // Step 3: East neighbor solvable? (Always check)
+                    if (col < 15 && localBoard[boardIdx + 1] == -1) {
+                        int reqW = PieceUtils.getEast(p);
+                        if (!hasAvailablePiece(piecesByWest[reqW])) continue;
                     }
-                    // ------------------------------------
+                    // ----------------------------
 
                     localBoard[boardIdx] = p;
                     localUsed[physicalIdx] = true;
@@ -738,7 +753,7 @@ public class MasterSolverPBP implements Runnable {
 
                     localBoard[boardIdx] = -1;
                     localUsed[physicalIdx] = false;
-                    localResumeBoard[boardIdx] = ghostPiece; // Restore the ghost piece correctly
+                    localResumeBoard[boardIdx] = ghostPiece;
                 }
             }
             return false;
