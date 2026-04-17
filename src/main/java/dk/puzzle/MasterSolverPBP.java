@@ -745,13 +745,13 @@ public class MasterSolverPBP implements Runnable {
         }
 
         private boolean matches(int p, int n, int e, int s, int w) {
-            if (n != PieceUtils.WILDCARD && PieceUtils.getNorth(p) != n) {
+            if (n != PieceUtils.WILDCARD && ((p >>> 24) & 0xFF) != n) {
                 return false;
             }
-            if (e != PieceUtils.WILDCARD && PieceUtils.getEast(p) != e) {
+            if (e != PieceUtils.WILDCARD && ((p >>> 16) & 0xFF) != e) {
                 return false;
             }
-            if (s != PieceUtils.WILDCARD && PieceUtils.getSouth(p) != s) {
+            if (s != PieceUtils.WILDCARD && ((p >>> 8) & 0xFF) != s) {
                 return false;
             }
             return w == PieceUtils.WILDCARD || PieceUtils.getWest(p) == w;
