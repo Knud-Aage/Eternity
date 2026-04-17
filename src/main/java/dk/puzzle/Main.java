@@ -44,18 +44,11 @@ public class Main {
         Runnable solverTask = null;
 
         if (usePbp) {
-            if (useSpiral) {
-                // Den avancerede Hybrid-motor
-                solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, MasterSolverPBP.BuildStrategy.SPIRAL, lockCenter);
-            } else {
-                // Den rå CPU-brute-forcer
-                solverTask = new TypewriterSolver(inventory, targetPiece, lockCenter);
-            }
-//            MasterSolverPBP.BuildStrategy strategy = useSpiral ?
-//                    MasterSolverPBP.BuildStrategy.SPIRAL :
-//                    MasterSolverPBP.BuildStrategy.TYPEWRITER;
-//
-//            solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy, lockCenter);
+            MasterSolverPBP.BuildStrategy strategy = useSpiral ?
+                    MasterSolverPBP.BuildStrategy.SPIRAL :
+                    MasterSolverPBP.BuildStrategy.TYPEWRITER;
+
+            solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy, lockCenter);
         } else {
             System.out.println("Macro solver not implemented in this main.");
         }
