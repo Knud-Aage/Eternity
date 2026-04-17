@@ -1,34 +1,109 @@
-The MasterSolverPBP class is the high-performance "Piece-By-Piece" (PBP) engine of your solver. Unlike the Macro-Tile approach which tries to solve 4x4 blocks, this class places pieces one at a time in a specific sequence. It uses a hybrid architecture that combines CPU multi-threading for "broad" search and GPU acceleration for "deep" exploration.
-Here is a breakdown of how the key components work together:
-1. Build Orders: Typewriter vs. Spiral
-The efficiency of a backtracking solver is heavily dependent on the order in which cells are filled. This is because the earlier you can highly constrain a cell (by having neighbors already placed), the faster you can prune invalid branches.
+The MasterSolverPBP class is the central orchestrator for solving the Eternity II puzzle using a Piece-By-Piece (PBP) backtracking approach. It employs a sophisticated hybrid strategy, leveraging both CPU multi-threading for broad exploration and GPU acceleration for deep, parallel searches.
+Here's a detailed breakdown of how it works, focusing on the spiral/typewriter build orders and the CPU/GPU interaction:
+1. Build Orders: Guiding the Search Path
+The order in which the solver attempts to place pieces significantly impacts its efficiency. MasterSolverPBP offers two primary build orders:
 •
-Typewriter Order (generateTypewriterOrder): This is the standard linear approach. It fills the board from index 0 to 255 (left-to-right, top-to-bottom). While simple, its weakness is that pieces in the middle of a row are often only constrained by their West neighbor, leading to a high branching factor.
+Typewriter Order (generateTypewriterOrder):
+◦
+This is the simplest, linear approach. It fills the 16x16 board sequentially, from index 0 to 255 (left-to-right, top-to-bottom).
+◦
+Pros: Easy to implement and understand.
+◦
+Cons: Often leads to a high branching factor early in the search, as pieces in the middle of a row might only be constrained by their left (West) neighbor, leaving many possibilities for other edges. This can result in deeper, less efficient searches.
+◦
+Associated handoffDepth: Typically set lower (e.g., 50 pieces) because the branching factor is higher, meaning the CPU can't go as deep before needing GPU assistance.
 •
-Spiral Order (generateSpiralOrder): This starts at the top-left corner (0,0) and spirals inward. By using a spiral, the solver tends to complete edges and then "wrap" around the existing structure. This often ensures that new pieces are constrained by at least two neighbors (e.g., North and West) much sooner than in a linear search, significantly reducing the number of valid candidates to check at each step.
-2. The CPU Role: "Wide" Seed Generation
-The CPU doesn't try to solve the entire puzzle. Instead, it acts as a "Seed Generator."
+Spiral Order (generateSpiralOrder):
+◦
+This strategy starts at the top-left corner (0,0) and spirals inward, filling the outer perimeter first, then moving towards the center.
+◦
+Pros: This is generally a more effective heuristic for constraint satisfaction problems. By completing the outer edges and then "wrapping" around the existing structure, new pieces are often constrained by two or more neighbors (e.g., North and West) much earlier in the search. This significantly reduces the number of valid candidates at each step, leading to faster pruning of invalid branches.
+◦
+Associated handoffDepth: Typically set higher (e.g., 70 pieces) because the tighter constraints allow the CPU to go deeper into the search tree more efficiently before needing to offload to the GPU.
+2. The CPU Role: "Wide" Exploration and Seed Generation
+The CPU acts as the "master" of the search, managing the overall strategy and generating partial solutions (seeds) for the GPU.
 •
-Multi-threading: The solver detects your CPU cores and creates a thread pool. Each thread runs a SearchWorker.
+Multi-threading (ExecutorService and SearchWorker):
+◦
+The MasterSolverPBP initializes an ExecutorService with a number of threads equal to the available CPU cores (numCores).
+◦
+Each CPU thread runs a SearchWorker, which is a Callable task. These workers perform standard backtracking on a local copy of the board.
 •
-Handoff Depth: Each worker performs a standard backtrack until it reaches the handoffDepth (e.g., 50 or 70 pieces placed).
+Handoff Depth:
+◦
+CPU workers backtrack piece-by-piece until they reach a predefined handoffDepth. This depth is dynamically adjusted based on the build strategy and current progress.
+◦
+Once a worker reaches this depth, it doesn't try to solve the rest of the puzzle itself. Instead, it takes its current partial board state, clones it, and adds it to a ConcurrentLinkedQueue called gpuSeedBoards.
 •
-Forward Checking: To keep the CPU search efficient, it uses a "Lookahead" optimization. Before placing a piece, it checks if the empty cells directly below or to the right still have any matching pieces left in the inventory. If placing a piece "dooms" a neighbor, it prunes that branch immediately.
+Lookahead Optimization (isSecondaryNeighborViable):
+◦
+The SearchWorker employs a crucial optimization: before placing a piece, it performs a "lookahead." It checks if placing the current piece would make it impossible to place future pieces (specifically, its immediate South and East neighbors).
+◦
+It uses pre-computed piecesByNorth, piecesByEast, etc., arrays (which store physical IDs of pieces that have a specific color on a given edge) to quickly determine if any available piece could satisfy the future constraint. If not, it prunes the current branch immediately. This significantly reduces the CPU's branching factor.
 •
-Seed Collection: Once a worker reaches the handoffDepth, it stops, clones the current board state, and adds it to the gpuSeedBoards queue. These partial boards are the "seeds" that will be given to the GPU.
+Seed Collection: The CPU workers continuously generate these partial board configurations (seeds) until the gpuSeedBoards queue reaches a targetBatchSize.
 3. The GPU Role: "Deep" Parallel Search
-The GPU is where the "brute-force" happens. While a CPU might have 16 or 32 threads, your GPU has thousands of cores.
+Once the CPU has generated a sufficient batch of seeds, the GPU takes over for a massive parallel deep dive.
 •
-Massive Parallelism: The runGpuHandoff method takes thousands of seeds (the targetBatchSize) and uploads them to the GPU. Every CUDA thread takes one seed and tries to finish the puzzle from that specific starting point.
+runGpuHandoff Method:
+◦
+This method is responsible for taking the collected gpuSeedBoards from the CPU, preparing them for the GPU, launching the CUDA kernel, and processing its results.
+◦
+It flattens the 2D board arrays into a single 1D array (flatBoards) for efficient transfer to GPU memory.
+◦
+It also transfers the buildOrder, allOrientations, physicalMapping, and various control flags (like lockCenter) to the GPU.
 •
-Inventory Tracking: In the CUDA kernel (SolveEternityKernel.cu), the inventory is tracked using bit-masks (unsigned long long inventoryMask[4]). Checking if a piece is available is a lightning-fast bitwise operation rather than an array lookup.
+CUDA Kernel (SolveEternityKernel.cu - solvePBP function):
+◦
+This kernel is the brute-force engine. Each GPU thread is assigned one of the partial board "seeds" generated by the CPU.
+◦
+Iterative Backtracking: The kernel performs iterative (non-recursive) backtracking from the startingStep (which is the handoffDepth).
+◦
+Bit-Masked Inventory: It uses unsigned long long inventoryMask[4] to track used physical pieces. This is extremely fast for checking piece availability.
+◦
+"Radar Leash" (radarLimit): This is a critical optimization. If a GPU thread goes too deep into a search branch (i.e., step >= startingStep + radarLimit) without finding a solution, it's forced to backtrack. This prevents individual threads from getting stuck in extremely long, fruitless paths and ensures that GPU resources are efficiently utilized across many seeds.
+◦
+Atomic Operations: Since thousands of threads run concurrently, atomic operations (atomicExch, atomicCAS, atomicAdd) are used to safely update shared global state on the GPU, such as:
+▪
+d_solvedFlag: To signal if any thread found a complete solution.
+▪
+d_gpuHighScore: To track the deepest solution found by any GPU thread.
+▪
+d_bestBoardOut: To store the board configuration corresponding to the d_gpuHighScore.
+▪
+d_totalSteps: To count the total number of piece placements attempted by all threads.
 •
-The Radar Leash: This is a safety mechanism. If a GPU thread wanders too deep into a branch without finding a solution (the radarLimit), it forces a backtrack. This ensures the GPU doesn't get stuck in a single massive, useless branch.
-4. Coordination and Resilience
-The class includes several advanced features to ensure the solver doesn't get "stuck":
+Result Processing: After the kernel execution, runGpuHandoff retrieves the solvedFlag, gpuHighScore, and bestBoardOut from the GPU. If a solution is found, it's immediately displayed and saved. If a new high score is achieved, the display is updated, and the progress is checkpointed.
+4. Coordination and Resilience: The Autonomous Engine
+The run() method of MasterSolverPBP orchestrates the entire process, acting as an "autonomous engine" that adapts to the search landscape.
 •
-Base Camp Logic: The deepestStep tracks the best progress ever made. The solver periodically locks a "Base Camp" (e.g., 30 steps behind the high score). If the current search space is exhausted, it retreats to this base camp to try a different direction.
+Main Loop (while(true)): The solver continuously runs, generating seeds, offloading to the GPU, and adjusting its strategy.
 •
-Extinction Events: If the GPU reports that a huge percentage of seeds were "Dead on Arrival" (couldn't place more than 5 pieces), the solver triggers a Poisoned Base Camp exception. It realizes the current path is a dead-end, retreats significantly further back, and tries again.
+Base Camp Logic:
+◦
+deepestStep tracks the highest number of pieces ever placed on the board.
+◦
+lockedPieces defines the starting point for the next batch of CPU workers. It's typically set to deepestStep minus a small offset (e.g., 30 pieces). This means CPU workers start from a known good partial solution and try to extend it.
+◦
+flatResumeBoard is used to initialize the localBoard of SearchWorkers with this "base camp" configuration.
 •
-Stagnation Tracking: If no new high score is found for a set amount of time (e.g., 20 minutes), the solver triggers an Autonomous Deep Extinction, forcing a retreat to a much earlier state to ensure search diversity.
+Stagnation Tracking (stagnationLimitMinutes):
+◦
+If absoluteHighScore (the best score across all runs) hasn't improved for a set duration, the solver triggers an "AUTONOMOUS DEEP EXTINCTION."
+◦
+This forces a significant retreat (deepestStep is reset to a much lower value), effectively abandoning the current search area and trying a completely different path to avoid getting stuck in local optima.
+•
+Extinction Events (PoisonedBaseCampException, EvolutionLeapException):
+◦
+PoisonedBaseCampException: If the GPU reports that a high percentage of the seeds it received were "Dead on Arrival" (i.e., couldn't extend the partial solution by more than a few pieces), it indicates that the current lockedPieces configuration is likely a dead end. The solver then triggers a retreat, reducing deepestStep to an earlier, more promising state. Consecutive extinctions lead to larger retreats.
+◦
+EvolutionLeapException: If the GPU finds a solution significantly deeper than the handoffDepth (e.g., deepestStep > handoffDepth + 30), it suggests the current handoffDepth might be too conservative. This exception signals the CPU to potentially increase the handoffDepth for future batches.
+•
+Manual Override: The triggerManualOverride method allows a user to force the solver to retreat to a specific deepestStep, providing external control over the search.
+•
+Checkpointing (CheckpointManager, RecordManager):
+◦
+The solver periodically saves the bestBoard (the deepest partial solution found so far) using CheckpointManager. This allows the solver to resume from its best-known state if the program is restarted.
+◦
+RecordManager saves visual and text records of new high scores, providing a historical log of progress.
+In essence, MasterSolverPBP is a highly adaptive and resilient backtracking solver. It intelligently divides the search problem, using the CPU for strategic, wide exploration and seed generation, and the GPU for massive, parallel deep dives, all while employing various heuristics and adaptive mechanisms to navigate the vast search space of the Eternity II puzzle.
