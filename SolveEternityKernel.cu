@@ -43,7 +43,7 @@ extern "C" __global__ void solvePBP(
     unsigned long long* d_totalSteps,
     int lockCenterFlag,
     int* d_threadDepths,
-    int* p_radarLimit      // [NEW] The Radar Leash limit parameter
+    int* p_radarLimit
 ) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numPartialBoards) return;

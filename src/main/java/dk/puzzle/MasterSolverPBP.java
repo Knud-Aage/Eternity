@@ -51,7 +51,12 @@ public class MasterSolverPBP implements Runnable {
     private final int numCores;
     private final ConcurrentLinkedQueue<int[]> gpuSeedBoards = new ConcurrentLinkedQueue<>();
     private final AtomicInteger currentBatchSize = new AtomicInteger(0);
+    private final java.util.Set<Integer> structuralDiversityFilter = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final int[] buildOrder;
+    private final int[][] piecesByNorth = new int[256][];
+    private final int[][] piecesByEast = new int[256][];
+    private final int[][] piecesBySouth = new int[256][];
+    private final int[][] piecesByWest = new int[256][];
     private CUfunction cuFunction;
     private int centerPhysicalIdx = -1;
     private volatile int deepestStep = 0;
@@ -64,17 +69,8 @@ public class MasterSolverPBP implements Runnable {
     private volatile int userBatchSizeOverride = -1;
     private long lastProgressTimestamp = System.currentTimeMillis();
     private volatile int stagnationLimitMinutes = 20;
-    private final int[][] piecesByNorth = new int[256][];
-    private final int[][] piecesByEast = new int[256][];
-    private final int[][] piecesBySouth = new int[256][];
-    private final int[][] piecesByWest = new int[256][];
-
     private int consecutiveExtinctions = 0;
     private int consecutiveExhaustions = 0;
-
-    public void setStagnationLimit(int minutes) {
-        this.stagnationLimitMinutes = minutes;
-    }
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                            boolean lockCenter) {
@@ -159,9 +155,9 @@ public class MasterSolverPBP implements Runnable {
         // Convert to fast native int arrays
         for (int i = 0; i < 256; i++) {
             piecesByNorth[i] = tempNorth[i].stream().mapToInt(Integer::intValue).toArray();
-            piecesByEast[i]  = tempEast[i].stream().mapToInt(Integer::intValue).toArray();
+            piecesByEast[i] = tempEast[i].stream().mapToInt(Integer::intValue).toArray();
             piecesBySouth[i] = tempSouth[i].stream().mapToInt(Integer::intValue).toArray();
-            piecesByWest[i]  = tempWest[i].stream().mapToInt(Integer::intValue).toArray();
+            piecesByWest[i] = tempWest[i].stream().mapToInt(Integer::intValue).toArray();
         }
     }
 
@@ -192,6 +188,10 @@ public class MasterSolverPBP implements Runnable {
             c = nc;
         }
         return order;
+    }
+
+    public void setStagnationLimit(int minutes) {
+        this.stagnationLimitMinutes = minutes;
     }
 
     private String timestamp() {
@@ -289,7 +289,7 @@ public class MasterSolverPBP implements Runnable {
         CUdeviceptr d_threadDepths = new CUdeviceptr();
         cuMemAlloc(d_threadDepths, (long) numBoards * Sizeof.INT);
 
-        int[] limitArr = { radarLimit };
+        int[] limitArr = {radarLimit};
         CUdeviceptr d_radarLimit = new CUdeviceptr();
         cuMemAlloc(d_radarLimit, Sizeof.INT);
         cuMemcpyHtoD(d_radarLimit, Pointer.to(limitArr), Sizeof.INT);
@@ -306,7 +306,7 @@ public class MasterSolverPBP implements Runnable {
                 Pointer.to(d_gpuHighScore),
                 Pointer.to(d_bestBoardOut),
                 Pointer.to(d_totalSteps),
-                Pointer.to(new int[]{ lockCenter ? 1 : 0 }),
+                Pointer.to(new int[]{lockCenter ? 1 : 0}),
                 Pointer.to(d_threadDepths),
                 Pointer.to(d_radarLimit)
         );
@@ -428,13 +428,13 @@ public class MasterSolverPBP implements Runnable {
                 // --- IMPROVED TYPEWRITER HANDOFF LOGIC ---
                 if (deepestStep > 160) {
                     // Late game: We need a wider window to find 10k seeds
-                    lockedPieces = Math.max(0, deepestStep - 60); 
-                    handoffDepth = lockedPieces + 28; 
+                    lockedPieces = Math.max(0, deepestStep - 60);
+                    handoffDepth = lockedPieces + 28;
                     targetBatchSize = 8000; // Slightly lower target for late-game speed
                 } else {
                     // Early/Mid game: Start fresh or from a safe distance
                     lockedPieces = Math.max(0, deepestStep - 45);
-                    handoffDepth = lockedPieces + 30; 
+                    handoffDepth = lockedPieces + 30;
                     targetBatchSize = 10000;
                 }
 
@@ -473,6 +473,7 @@ public class MasterSolverPBP implements Runnable {
             }
 
             gpuSeedBoards.clear();
+            structuralDiversityFilter.clear(); // <--- ADD THIS LINE
             currentBatchSize.set(0);
             int activeBatch = (userBatchSizeOverride > 0) ? userBatchSizeOverride : targetBatchSize;
 
@@ -490,9 +491,9 @@ public class MasterSolverPBP implements Runnable {
                         return;
                     }
                 }
-                
+
                 // Give the GPU work to do! 0 means "don't search". 120 allows deep exploration.
-                int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 120 : 50; 
+                int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 120 : 50;
                 int foundSeeds = currentBatchSize.get();
 
                 if (foundSeeds >= activeBatch) {
@@ -503,10 +504,12 @@ public class MasterSolverPBP implements Runnable {
                 } else if (foundSeeds > 0) {
                     // If we found very few seeds, the Base Camp is likely poisoned.
                     if (foundSeeds < activeBatch / 4) {
-                        System.out.println(timestamp() + ">>> CPU exhausted with only " + foundSeeds + " seeds. Base Camp is likely a dead end.");
+                        System.out.println(timestamp() + ">>> CPU exhausted with only " + foundSeeds + " seeds. Base " +
+                                "Camp is likely a dead end.");
                         spaceExhausted = true; // Trigger retreat
                     } else {
-                        System.out.println(timestamp() + ">>> Sending partial batch: " + foundSeeds + " seeds to GPU...");
+                        System.out.println(timestamp() + ">>> Sending partial batch: " + foundSeeds + " seeds to GPU." +
+                                "..");
                         runGpuHandoff(new ArrayList<>(gpuSeedBoards), handoffDepth, radarDistance);
                         spaceExhausted = false;
                         consecutiveExhaustions = 0;
@@ -525,13 +528,17 @@ public class MasterSolverPBP implements Runnable {
 
                 if (lockedPieces > retreatSize) {
                     deepestStep = Math.max(40, lockedPieces - retreatSize);
-                    System.out.println("\n" + timestamp() + "[!] EXTINCTION EVENT (" + consecutiveExtinctions + " consecutive failures)!");
-                    System.out.println(timestamp() + "[!] Structural dead-end detected. Retreating " + retreatSize + " steps to base camp " + deepestStep + "...\n");
+                    System.out.println("\n" + timestamp() + "[!] EXTINCTION EVENT (" + consecutiveExtinctions + " " +
+                            "consecutive failures)!");
+                    System.out.println(timestamp() + "[!] Structural dead-end detected. Retreating " + retreatSize +
+                            " steps to base camp " + deepestStep + "...\n");
                 } else {
                     deepestStep = 0;
                 }
 
-                if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
+                if (consecutiveExtinctions >= 3) {
+                    consecutiveExtinctions = 0;
+                }
 
             } catch (ExecutionException e) {
                 Throwable cause = e.getCause();
@@ -556,12 +563,14 @@ public class MasterSolverPBP implements Runnable {
                     // Implement requested: 50 step retreat if 2+ minutes passed on typewriter exhaustion
                     if (currentStrategy == BuildStrategy.TYPEWRITER && minutesSinceProgress >= 2) {
                         retreat = 50;
-                        System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Stagnated for 2+ minutes. Retreating 50 steps.");
+                        System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Stagnated for " +
+                                "2+ minutes. Retreating 50 steps.");
                     }
                     deepestStep = Math.max(0, lockedPieces - retreat);
                     System.out.println(timestamp() + ">>> Base camp exhausted. Falling back to search new path...");
                 } else if (currentStrategy == BuildStrategy.TYPEWRITER && useGpu) {
-                     System.out.println(timestamp() + ">>> [FIXED MODE] Seeds exhausted. Restarting CPU search for new seeds...");
+                    System.out.println(timestamp() + ">>> [FIXED MODE] Seeds exhausted. Restarting CPU search for new" +
+                            " seeds...");
                 } else {
                     System.out.println(timestamp() + "Total search space exhausted. No solution found.");
                     return;
@@ -625,7 +634,9 @@ public class MasterSolverPBP implements Runnable {
 
         private boolean hasAvailablePiece(int[] candidatePhysIds) {
             for (int physId : candidatePhysIds) {
-                if (!localUsed[physId]) return true;
+                if (!localUsed[physId]) {
+                    return true;
+                }
             }
             return false;
         }
@@ -637,12 +648,16 @@ public class MasterSolverPBP implements Runnable {
         private boolean isSecondaryNeighborViable(int reqNorth) {
             int[] candidates = piecesByNorth[reqNorth];
             for (int physId : candidates) {
-                if (localUsed[physId]) continue;
+                if (localUsed[physId]) {
+                    continue;
+                }
                 for (int rot = 0; rot < 4; rot++) {
                     int p_orient = inventory.allOrientations[physId * 4 + rot];
                     if (PieceUtils.getNorth(p_orient) == reqNorth) {
                         int s_edge = PieceUtils.getSouth(p_orient);
-                        if (hasAvailablePiece(piecesByNorth[s_edge])) return true;
+                        if (hasAvailablePiece(piecesByNorth[s_edge])) {
+                            return true;
+                        }
                     }
                 }
             }
@@ -678,6 +693,25 @@ public class MasterSolverPBP implements Runnable {
                     return false;
                 }
 
+                // =========================================================
+                // STRUCTURAL DIVERSITY FILTER
+                // Defines the "Foundation" as all pieces EXCEPT the last 10.
+                // =========================================================
+                int foundationDepth = Math.max(1, handoffDepth - 10);
+                int structureHash = 1;
+
+                // Calculate a fast rolling hash of the foundation pieces
+                for (int i = 0; i < foundationDepth; i++) {
+                    int boardIndex = buildOrder[i];
+                    structureHash = 31 * structureHash + localBoard[boardIndex];
+                }
+
+                // If this exact foundation structure is already in the Set, REJECT IT!
+                if (!structuralDiversityFilter.add(structureHash)) {
+                    return false; // Force the DFS to backtrack and find a structurally different branch
+                }
+                // =========================================================
+
                 int[] clonedBoard = new int[256];
                 System.arraycopy(localBoard, 0, clonedBoard, 0, 256);
                 gpuSeedBoards.add(clonedBoard);
@@ -700,7 +734,8 @@ public class MasterSolverPBP implements Runnable {
                             absoluteHighScore = deepestStep;
                             RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
                             CheckpointManager.save(buildDisplayBoard(bestBoard), saveProfile);
-                            System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " PIECES! <<<");
+                            System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " " +
+                                    "PIECES! <<<");
                         }
                     }
                 }
@@ -752,26 +787,36 @@ public class MasterSolverPBP implements Runnable {
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
 
                 if (localResumeBoard[boardIdx] != -1) {
-                    if (p != localResumeBoard[boardIdx]) continue;
+                    if (p != localResumeBoard[boardIdx]) {
+                        continue;
+                    }
                 }
 
-                if (localUsed[physicalIdx]) continue;
+                if (localUsed[physicalIdx]) {
+                    continue;
+                }
 
                 if (matches(p, n_req, e_req, s_req, w_req)) {
 
                     // --- TIERED CPU LOOKAHEAD ---
                     if (row < 15 && localBoard[boardIdx + 16] == -1) {
                         int reqN = PieceUtils.getSouth(p);
-                        if (!hasAvailablePiece(piecesByNorth[reqN])) continue;
+                        if (!hasAvailablePiece(piecesByNorth[reqN])) {
+                            continue;
+                        }
 
                         if (step > 40 && row < 14 && localBoard[boardIdx + 32] == -1) {
-                            if (!isSecondaryNeighborViable(reqN)) continue;
+                            if (!isSecondaryNeighborViable(reqN)) {
+                                continue;
+                            }
                         }
                     }
 
                     if (col < 15 && localBoard[boardIdx + 1] == -1) {
                         int reqW = PieceUtils.getEast(p);
-                        if (!hasAvailablePiece(piecesByWest[reqW])) continue;
+                        if (!hasAvailablePiece(piecesByWest[reqW])) {
+                            continue;
+                        }
                     }
 
                     localBoard[boardIdx] = p;
@@ -780,7 +825,9 @@ public class MasterSolverPBP implements Runnable {
                     int ghostPiece = localResumeBoard[boardIdx];
                     localResumeBoard[boardIdx] = -1;
 
-                    if (solve(step + 1)) return true;
+                    if (solve(step + 1)) {
+                        return true;
+                    }
 
                     localBoard[boardIdx] = -1;
                     localUsed[physicalIdx] = false;
