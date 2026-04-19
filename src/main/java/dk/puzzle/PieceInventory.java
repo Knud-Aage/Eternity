@@ -11,8 +11,8 @@ import java.util.Map;
  * and maintains compatibility tables for fast lookup.
  */
 public class PieceInventory {
-    public final int[] allOrientations = new int[1024];
-    public final int[] physicalMapping = new int[1024];
+    public int[] allOrientations = new int[1024];
+    public int[] physicalMapping = new int[1024];
 
     public final List<Integer> corners = new ArrayList<>();
     public final List<Integer> edges = new ArrayList<>();

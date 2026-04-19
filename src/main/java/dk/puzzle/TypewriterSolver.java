@@ -123,7 +123,7 @@ public class TypewriterSolver implements Runnable {
                         absoluteHighScore = step;
                         System.arraycopy(localBoard, 0, bestBoard, 0, 256);
                         int[][] displayBoard = buildDisplayBoard(bestBoard);
-                        Main.updateDisplay(absoluteHighScore, displayBoard);
+                        Main.updateDisplay(step, displayBoard);
                         RecordManager.saveRecord(displayBoard, absoluteHighScore, saveProfile);
                         CheckpointManager.save(displayBoard, saveProfile);
 
