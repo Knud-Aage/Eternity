@@ -318,7 +318,7 @@ public class MasterSolverPBP implements Runnable {
                         int[] gpuWinningBoard = new int[256];
                         cuMemcpyDtoH(Pointer.to(gpuWinningBoard), d_bestBoardOut, 256L * Sizeof.INT);
                         System.arraycopy(gpuWinningBoard, 0, bestBoard, 0, 256);
-                        updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
+                        updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
 
                         if (deepestStep > absoluteHighScore) {
                             absoluteHighScore = deepestStep;
@@ -426,7 +426,7 @@ public class MasterSolverPBP implements Runnable {
                     absoluteHighScore = resultHighScore[0];
                     deepestStep = absoluteHighScore; // Opdater base camp
                     System.arraycopy(repairedBoard, 0, bestBoard, 0, 256);
-                    updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
+                    updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
 
                     // Gem billeder og filer af det nye reparerede bræt!
                     RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
@@ -713,7 +713,7 @@ public class MasterSolverPBP implements Runnable {
         deepestStep = Math.max(0, targetStep);
         for (int s = deepestStep; s < 256; s++) bestBoard[buildOrder[s]] = -1;
         if (lockCenter) bestBoard[135] = targetPiece;
-        updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
+        updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
         if (logMessage != null) System.out.println(logMessage);
     }
 
@@ -949,7 +949,7 @@ public class MasterSolverPBP implements Runnable {
                 if (step > deepestStep) {
                     deepestStep = step;
                     System.arraycopy(localBoard, 0, bestBoard, 0, 256);
-                    updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
+                    updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
                     if (step + 1 > absoluteHighScore) {
                         absoluteHighScore = step + 1;
                         System.arraycopy(localBoard, 0, recordBoard, 0, 256);
