@@ -25,7 +25,7 @@ class MasterSolverPBPTest {
         // Mock static dependencies to prevent file I/O or UI updates during tests
         try (MockedStatic<CheckpointManager> checkpointMock = mockStatic(CheckpointManager.class);
              MockedStatic<Main> mainMock = mockStatic(Main.class)) {
-            checkpointMock.when(() -> CheckpointManager.load(anyString())).thenReturn(null);
+            checkpointMock.when(() -> CheckpointManager.loadSmartCheckpoint(anyString())).thenReturn(null);
         }
     }
 

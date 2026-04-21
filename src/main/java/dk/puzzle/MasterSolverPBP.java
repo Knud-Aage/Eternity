@@ -73,6 +73,8 @@ public class MasterSolverPBP implements Runnable {
     private volatile int stagnationLimitMinutes = 20;
     private int consecutiveExtinctions = 0;
     private int consecutiveExhaustions = 0;
+    private long lastRepairPrintTime = 0;
+    private long repairLoopsCounter = 0;
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                            boolean lockCenter) {
@@ -108,8 +110,7 @@ public class MasterSolverPBP implements Runnable {
             handoffDepth = 50;
         }
 
-        int[][] loaded = CheckpointManager.load(saveProfile);
-        if (loaded != null) {
+        int[][] loaded = CheckpointManager.loadSmartCheckpoint(saveProfile);        if (loaded != null) {
             int highestStepLoaded = -1;
             for (int step = 0; step < 256; step++) {
                 int boardIdx = buildOrder[step];
@@ -128,6 +129,7 @@ public class MasterSolverPBP implements Runnable {
             if (highestStepLoaded >= 0) {
                 this.deepestStep = highestStepLoaded;
                 this.absoluteHighScore = highestStepLoaded;
+                this.deepestStep = highestStepLoaded;
                 if (lockCenter) {
                     bestBoard[135] = targetPiece;
                 }
@@ -324,7 +326,7 @@ public class MasterSolverPBP implements Runnable {
                             absoluteHighScore = deepestStep;
                             lastProgressTimestamp = System.currentTimeMillis();
                             RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                            CheckpointManager.save(buildDisplayBoard(bestBoard), saveProfile);
+                            CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
                             System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE (GPU): " + absoluteHighScore + " PIECES! <<<");
                         }
                     }
@@ -430,7 +432,7 @@ public class MasterSolverPBP implements Runnable {
 
                     // Gem billeder og filer af det nye reparerede bræt!
                     RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                    CheckpointManager.save(buildDisplayBoard(bestBoard), saveProfile);
+                    CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
 
                     System.out.println("\n" + timestamp() + ">>> KIRURGEN SLOG REKORDEN! NY HIGH SCORE: " + absoluteHighScore + " <<<");
                 }
@@ -500,7 +502,7 @@ public class MasterSolverPBP implements Runnable {
             Runtime.getRuntime().addShutdownHook(new Thread(() -> {
                 System.out.println("\n" + timestamp() + ">>> Shutdown hook: Saving final checkpoint...");
                 synchronized (displayLock) {
-                    CheckpointManager.save(buildDisplayBoard(bestBoard), saveProfile);
+                    CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
                 }
             }));
 
@@ -535,7 +537,7 @@ public class MasterSolverPBP implements Runnable {
                 // Safety: Periodic save every 5 minutes
                 if (System.currentTimeMillis() - lastPeriodicSave > 300_000) {
                     synchronized (displayLock) {
-                        CheckpointManager.save(buildDisplayBoard(bestBoard), saveProfile);
+                        CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
                     }
                     lastPeriodicSave = System.currentTimeMillis();
                 }
@@ -546,7 +548,7 @@ public class MasterSolverPBP implements Runnable {
             }
 
         } finally {
-            CheckpointManager.save(buildDisplayBoard(bestBoard), saveProfile);
+            CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
         }
     }
 
@@ -589,6 +591,8 @@ public class MasterSolverPBP implements Runnable {
     private void prepareSearchIteration(int lockedPieces) {
         Arrays.fill(flatResumeBoard, -1);
 
+        Arrays.fill(usedPhysicalPieces, false);
+
         if (lockedPieces > 0) {
             for (int step = 0; step < lockedPieces; step++) {
                 int idx = buildOrder[step];
@@ -618,54 +622,50 @@ public class MasterSolverPBP implements Runnable {
         int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 120 : 50;
         int foundSeeds = currentBatchSize.get();
 
-        if (foundSeeds >= activeBatch) {
+        if (absoluteHighScore >= 195 && (consecutiveExtinctions >= 1 || consecutiveExhaustions >= 1 || foundSeeds == 0)) {
 
-            // =========================================================
-            // THE TWO-STAGE ROCKET ENGINE (REPAIR MODE INTERCEPTOR)
-            // =========================================================
-            if (absoluteHighScore >= 210 && consecutiveExtinctions >= 2) {
-                System.out.println("\n" + timestamp() + ">>> INITIATING LATE-GAME REPAIR MODE! <<<");
-                System.out.println(timestamp() + ">>> Punching 15 holes in the " + absoluteHighScore + "-piece High Score board...");
-
-                int numClones = 10000;
-                int holesToPunch = 15;
-                List<int[]> swissCheeseBoards = punchHolesInBestBoard(bestBoard, numClones, holesToPunch);
-
-                runRepairGpuHandoff(swissCheeseBoards);
-
-                consecutiveExtinctions = 0;
-                consecutiveExhaustions = 0;
-            } else {
-                runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
+            repairLoopsCounter++;
+            long now = System.currentTimeMillis();
+            if (now - lastRepairPrintTime > 20000) {
+                System.out.println("\n" + timestamp() + ">>> LATE-GAME REPAIR MODE ACTIVE <<<");
+                System.out.println(timestamp() + ">>> Performing " + (repairLoopsCounter / 2) + " batches/sek... Shuffling 15 pieces in the " + absoluteHighScore + "-piece board!");
+                lastRepairPrintTime = now;
+                repairLoopsCounter = 0;
             }
-            // =========================================================
+            // =======================================================
 
+            int numClones = 10000;
+            int holesToPunch = 15;
+            List<int[]> swissCheeseBoards = punchHolesInBestBoard(bestBoard, numClones, holesToPunch);
+
+            runRepairGpuHandoff(swissCheeseBoards);
+
+            consecutiveExtinctions = 0;
+            consecutiveExhaustions = 0;
+            resetCounters();
+
+            deepestStep = absoluteHighScore;
+            if (repairLoopsCounter == 1) {
+                Main.updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
+            }
+
+            return false;        }
+        // =========================================================
+
+        if (foundSeeds >= activeBatch) {
+            runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
             resetCounters();
             return false;
-
         } else if (foundSeeds > 0) {
-
-            // =========================================================
-            // FIX: Accepter små batches i the late-game!
-            // =========================================================
-            // Vi fjerner grænsen på 'activeBatch / 4'. Hvis the Search Space
-            // er udtømt, men vi har fundet frø, så fyr dem afsted til GPU'en.
-            // GPU'en afgør, om de er ægte dead-ends!
-
             System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch of " + foundSeeds + " HIGH-VALUE seeds to GPU...");
-
-            // Hvis det er et ekstremt lille batch (f.eks. 3 seeds), behøver vi ikke Repair Mode. Vi sender dem bare til normal DFS.
             runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
-
-            consecutiveExhaustions = 0;
-            return false;
+            resetCounters();
+            return true;
         }
 
-        // Return true KUN hvis foundSeeds == 0 (Brættet er reelt umuligt at bygge videre på)
         System.out.println(timestamp() + ">>> ZERO seeds found. Base Camp is a dead end.");
         return true;
     }
-
     private void handleExtinctionEvent(int lockedPieces) {
         consecutiveExtinctions++;
         int retreatSize = (consecutiveExtinctions == 1) ? 8 : (consecutiveExtinctions == 2) ? 20 : 40;
@@ -749,39 +749,39 @@ public class MasterSolverPBP implements Runnable {
         List<int[]> swissCheeseBoards = new ArrayList<>(numClones);
         Random rnd = new Random();
 
-        // 1. Find all indices that currently have a piece placed
         int[] placedIndices = new int[256];
         int placedCount = 0;
 
         for (int i = 0; i < 256; i++) {
             if (sourceBoard[i] != -1) {
-                // NEVER remove the locked center piece (if applicable)
                 if (lockCenter && i == 135) continue;
                 placedIndices[placedCount++] = i;
             }
         }
 
-        // Safety check: Don't punch more holes than we have pieces
         int actualHoles = Math.min(numHoles, placedCount);
 
-        // 2. Generate 'numClones' uniquely punched boards
         for (int clone = 0; clone < numClones; clone++) {
             int[] clonedBoard = new int[256];
             System.arraycopy(sourceBoard, 0, clonedBoard, 0, 256);
 
-            // 3. Fast Fisher-Yates partial shuffle to pick 'actualHoles' unique targets
             for (int i = 0; i < actualHoles; i++) {
                 int swapIdx = i + rnd.nextInt(placedCount - i);
-
-                // Swap
                 int temp = placedIndices[i];
                 placedIndices[i] = placedIndices[swapIdx];
                 placedIndices[swapIdx] = temp;
 
-                // 4. "Punch the hole" by setting the cell to -1 (empty)
                 int holeIndex = placedIndices[i];
-                clonedBoard[holeIndex] = -1;
+                // FIX: Brug -2 til at markere TARGETED HOLES!
+                clonedBoard[holeIndex] = -2;
             }
+
+            // FIX: Gør det næste tomme felt (Brik 203) til vores ultimative mål!
+            if (absoluteHighScore < 256) {
+                int nextTargetIdx = buildOrder[absoluteHighScore];
+                clonedBoard[nextTargetIdx] = -2;
+            }
+
             swissCheeseBoards.add(clonedBoard);
         }
 
@@ -819,6 +819,20 @@ public class MasterSolverPBP implements Runnable {
             System.arraycopy(flatResumeBoard, 0, localResumeBoard, 0, 256);
             System.arraycopy(usedPhysicalPieces, 0, localUsed, 0, 256);
 
+            // *** FIX: mark all resumed pieces as used ***
+            for (int i = 0; i < 256; i++) {
+                int p = localBoard[i];
+                if (p != -1) {
+                    // Find the physical index for this piece value
+                    for (int oi = 0; oi < 1024; oi++) {
+                        if (inventory.allOrientations[oi] == p) {
+                            localUsed[inventory.physicalMapping[oi]] = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
             if (lockCenter) {
                 localBoard[135] = targetPiece;
                 if (centerPhysicalIdx != -1) {
@@ -826,6 +840,7 @@ public class MasterSolverPBP implements Runnable {
                 }
             }
         }
+        
 //        public SearchWorker(int activeBatch) {
 //            this.activeBatch = activeBatch;
 //            // Initialize localBoard from the CURRENT base camp, not the empty flatBoard
@@ -944,21 +959,48 @@ public class MasterSolverPBP implements Runnable {
         }
 
         private void updateProgress(int step) {
-            if (step <= deepestStep) return;
-            synchronized (displayLock) {
-                if (step > deepestStep) {
-                    deepestStep = step;
-                    System.arraycopy(localBoard, 0, bestBoard, 0, 256);
-                    updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
-                    if (step + 1 > absoluteHighScore) {
-                        absoluteHighScore = step + 1;
-                        System.arraycopy(localBoard, 0, recordBoard, 0, 256);
-                        RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                        CheckpointManager.save(buildDisplayBoard(bestBoard), saveProfile);
-                        System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " PIECES! <<<");
+            if (step > deepestStep) {
+                synchronized (displayLock) {
+                    if (step > deepestStep) {
+                        deepestStep = step;
+
+                        updateDisplay(deepestStep, buildDisplayBoard(localBoard));
+
+                        if (deepestStep > absoluteHighScore) {
+                            absoluteHighScore = deepestStep;
+
+                            System.arraycopy(localBoard, 0, bestBoard, 0, 256);
+
+                            RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                            CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                            System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " PIECES! <<<");
+                        }
                     }
                 }
             }
+//            if (step <= deepestStep) return;
+//            synchronized (displayLock) {
+//                if (step > deepestStep) {
+//                    deepestStep = step;
+//                    System.arraycopy(localBoard, 0, bestBoard, 0, 256);
+//                    updateDisplay(step, buildDisplayBoard(bestBoard));
+//
+//                    if (step + 1 > absoluteHighScore) {
+//                        absoluteHighScore = step + 1;
+//                        System.arraycopy(localBoard, 0, recordBoard, 0, 256);
+//                        RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+//                        CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
+//
+//                        // NEW LOGIC: Save checkpoint.dat if above 209 pieces
+//                        if (absoluteHighScore > 209) {
+//                            CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
+//                            System.out.println(timestamp() + ">>> HIGH SCORE > 209! Saved to checkpoint.dat <<<");
+//                        }
+//
+//                        System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " PIECES! <<<");
+//                    }
+//                }
+//            }
         }
 
         private List<Integer> getCandidatePool(int row, int col) {
