@@ -110,7 +110,8 @@ public class MasterSolverPBP implements Runnable {
             handoffDepth = 50;
         }
 
-        int[][] loaded = CheckpointManager.loadSmartCheckpoint(saveProfile);        if (loaded != null) {
+        int[][] loaded = CheckpointManager.loadSmartCheckpoint(saveProfile);
+        if (loaded != null) {
             int highestStepLoaded = -1;
             for (int step = 0; step < 256; step++) {
                 int boardIdx = buildOrder[step];
@@ -129,7 +130,6 @@ public class MasterSolverPBP implements Runnable {
             if (highestStepLoaded >= 0) {
                 this.deepestStep = highestStepLoaded;
                 this.absoluteHighScore = highestStepLoaded;
-                this.deepestStep = highestStepLoaded;
                 if (lockCenter) {
                     bestBoard[135] = targetPiece;
                 }
@@ -554,7 +554,7 @@ public class MasterSolverPBP implements Runnable {
 
     private void handleGlobalStagnation() {
         long minutesSinceProgress = (System.currentTimeMillis() - lastProgressTimestamp) / 60000;
-        if (minutesSinceProgress >= stagnationLimitMinutes && deepestStep > 0) {
+        if (minutesSinceProgress >= stagnationLimitMinutes && deepestStep > 0 && deepestStep <= 208) {
             int deepRetreat = 40 + new Random().nextInt(41);
             String msg = "\n" + timestamp() + " [!!!] AUTONOMOUS DEEP EXTINCTION [!!!]\n" +
                     timestamp() + " No progression in the last " + minutesSinceProgress + " minutes.\n" +
@@ -622,7 +622,7 @@ public class MasterSolverPBP implements Runnable {
         int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 120 : 50;
         int foundSeeds = currentBatchSize.get();
 
-        if (absoluteHighScore >= 195 && (consecutiveExtinctions >= 1 || consecutiveExhaustions >= 1 || foundSeeds == 0)) {
+        if (useGpu && absoluteHighScore >= 208 && (consecutiveExtinctions >= 1 || consecutiveExhaustions >= 1 || foundSeeds == 0)) {
 
             repairLoopsCounter++;
             long now = System.currentTimeMillis();
@@ -649,16 +649,21 @@ public class MasterSolverPBP implements Runnable {
                 Main.updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
             }
 
-            return false;        }
+            return false;
+        }
         // =========================================================
 
         if (foundSeeds >= activeBatch) {
-            runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
+            if (useGpu) {
+                runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
+            }
             resetCounters();
             return false;
         } else if (foundSeeds > 0) {
             System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch of " + foundSeeds + " HIGH-VALUE seeds to GPU...");
-            runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
+            if (useGpu) {
+                runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
+            }
             resetCounters();
             return true;
         }
@@ -666,14 +671,25 @@ public class MasterSolverPBP implements Runnable {
         System.out.println(timestamp() + ">>> ZERO seeds found. Base Camp is a dead end.");
         return true;
     }
+
     private void handleExtinctionEvent(int lockedPieces) {
         consecutiveExtinctions++;
+
+        // =======================================================
+        // THE ENDGAME ANCHOR: NEVER RETREAT IN THE LATE GAME!
+        // =======================================================
+        if (absoluteHighScore >= 208) {
+            deepestStep = absoluteHighScore;
+            if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
+            return; // <-- Forhindrer retreat!
+        }
+        // =======================================================
+
         int retreatSize = (consecutiveExtinctions == 1) ? 8 : (consecutiveExtinctions == 2) ? 20 : 40;
         if (lockedPieces > retreatSize) {
             String msg = "\n" + timestamp() + "[!] EXTINCTION EVENT (" + consecutiveExtinctions + " failures)!\n" +
                     timestamp() + "[!] Structural dead-end detected. Retreating " + retreatSize + " steps to " + (deepestStep - retreatSize);
 
-            // FIX: Træk fra deepestStep, ikke lockedPieces!
             retreat(deepestStep - retreatSize, msg);
         } else {
             retreat(0, null);
@@ -700,7 +716,6 @@ public class MasterSolverPBP implements Runnable {
                     (System.currentTimeMillis() - lastProgressTimestamp) / 60000 >= 2) ? 50 : 10;
             if (retreat == 50) System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Retreating 50 steps.");
 
-            // FIX: Vi trækker fra deepestStep, ikke lockedPieces!
             retreat(deepestStep - retreat, timestamp() + ">>> Base camp exhausted. Searching new path...");
         } else if (currentStrategy == BuildStrategy.TYPEWRITER && useGpu) {
             System.out.println(timestamp() + ">>> [FIXED MODE] Seeds exhausted. Restarting search...");
@@ -840,21 +855,6 @@ public class MasterSolverPBP implements Runnable {
                 }
             }
         }
-        
-//        public SearchWorker(int activeBatch) {
-//            this.activeBatch = activeBatch;
-//            // Initialize localBoard from the CURRENT base camp, not the empty flatBoard
-//            System.arraycopy(flatResumeBoard, 0, localBoard, 0, 256);
-//            System.arraycopy(flatResumeBoard, 0, localResumeBoard, 0, 256);
-//            System.arraycopy(usedPhysicalPieces, 0, localUsed, 0, 256);
-//
-//            if (lockCenter) {
-//                localBoard[135] = targetPiece;
-//                if (centerPhysicalIdx != -1) {
-//                    localUsed[centerPhysicalIdx] = true;
-//                }
-//            }
-//        }
 
         private boolean hasAvailablePiece(int[] candidatePhysIds) {
             for (int physId : candidatePhysIds) {
@@ -978,29 +978,6 @@ public class MasterSolverPBP implements Runnable {
                     }
                 }
             }
-//            if (step <= deepestStep) return;
-//            synchronized (displayLock) {
-//                if (step > deepestStep) {
-//                    deepestStep = step;
-//                    System.arraycopy(localBoard, 0, bestBoard, 0, 256);
-//                    updateDisplay(step, buildDisplayBoard(bestBoard));
-//
-//                    if (step + 1 > absoluteHighScore) {
-//                        absoluteHighScore = step + 1;
-//                        System.arraycopy(localBoard, 0, recordBoard, 0, 256);
-//                        RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-//                        CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
-//
-//                        // NEW LOGIC: Save checkpoint.dat if above 209 pieces
-//                        if (absoluteHighScore > 209) {
-//                            CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
-//                            System.out.println(timestamp() + ">>> HIGH SCORE > 209! Saved to checkpoint.dat <<<");
-//                        }
-//
-//                        System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " PIECES! <<<");
-//                    }
-//                }
-//            }
         }
 
         private List<Integer> getCandidatePool(int row, int col) {
