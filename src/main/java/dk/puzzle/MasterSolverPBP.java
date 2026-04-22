@@ -257,7 +257,9 @@ public class MasterSolverPBP implements Runnable {
 
     private void runGpuHandoff(List<int[]> partialBoardsList, int startingStep, int radarLimit) {
         int numBoards = partialBoardsList.size();
-        if (numBoards == 0) return;
+        if (numBoards == 0) {
+            return;
+        }
 
         List<CUdeviceptr> gpuPointers = new ArrayList<>();
         try {
@@ -275,7 +277,7 @@ public class MasterSolverPBP implements Runnable {
             CUdeviceptr d_bestBoardOut = gpuAlloc(256 * Sizeof.INT, gpuPointers);
             CUdeviceptr d_totalSteps = gpuAlloc(8, gpuPointers);
             cuMemcpyHtoD(d_totalSteps, Pointer.to(new long[]{0L}), 8L);
-            CUdeviceptr d_threadDepths = gpuAlloc(numBoards * Sizeof.INT, gpuPointers);
+            CUdeviceptr d_threadDepths = gpuAlloc((long) numBoards * Sizeof.INT, gpuPointers);
             CUdeviceptr d_radarLimit = gpuAllocAndUpload(new int[]{radarLimit}, gpuPointers);
 
             // 2. Kernel Launch
@@ -288,7 +290,8 @@ public class MasterSolverPBP implements Runnable {
             );
 
             long startTime = System.currentTimeMillis();
-            cuLaunchKernel(dfsFunction, (int)Math.ceil(numBoards/256.0), 1, 1, 256, 1, 1, 0, null, kernelParams, null);
+            cuLaunchKernel(dfsFunction, (int) Math.ceil(numBoards / 256.0), 1, 1, 256, 1, 1, 0, null, kernelParams,
+                    null);
             cuCtxSynchronize();
             long timeTaken = System.currentTimeMillis() - startTime;
 
@@ -326,12 +329,15 @@ public class MasterSolverPBP implements Runnable {
                             absoluteHighScore = deepestStep;
                             lastProgressTimestamp = System.currentTimeMillis();
                             RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                            CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                            CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore,
+                                    saveProfile);
                             System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE (GPU): " + absoluteHighScore + " PIECES! <<<");
                         }
                     }
                 }
-                if (deepestStep > handoffDepth + 30) throw new EvolutionLeapException();
+                if (deepestStep > handoffDepth + 30) {
+                    throw new EvolutionLeapException();
+                }
             }
         } finally {
             gpuPointers.forEach(JCudaDriver::cuMemFree);
@@ -340,7 +346,9 @@ public class MasterSolverPBP implements Runnable {
 
     private void runRepairGpuHandoff(List<int[]> swissCheeseBoards) {
         int numBoards = swissCheeseBoards.size();
-        if (numBoards == 0) return;
+        if (numBoards == 0) {
+            return;
+        }
 
         // 1. Flatten the 2D boards into a 1D array for the GPU
         int[] flatBoards = new int[numBoards * 256];
@@ -368,19 +376,19 @@ public class MasterSolverPBP implements Runnable {
 
         CUdeviceptr d_solvedFlag = new CUdeviceptr();
         cuMemAlloc(d_solvedFlag, Sizeof.INT);
-        cuMemcpyHtoD(d_solvedFlag, Pointer.to(new int[]{ 0 }), Sizeof.INT);
+        cuMemcpyHtoD(d_solvedFlag, Pointer.to(new int[]{0}), Sizeof.INT);
 
         CUdeviceptr d_gpuHighScore = new CUdeviceptr();
         cuMemAlloc(d_gpuHighScore, Sizeof.INT);
         // GPU'en skal vide, hvad highscoren er lige nu, for at kunne slå den!
-        cuMemcpyHtoD(d_gpuHighScore, Pointer.to(new int[]{ absoluteHighScore }), Sizeof.INT);
+        cuMemcpyHtoD(d_gpuHighScore, Pointer.to(new int[]{absoluteHighScore}), Sizeof.INT);
 
         CUdeviceptr d_bestBoardOut = new CUdeviceptr();
         cuMemAlloc(d_bestBoardOut, 256L * Sizeof.INT);
 
         CUdeviceptr d_totalSteps = new CUdeviceptr();
         cuMemAlloc(d_totalSteps, Sizeof.LONG);
-        cuMemcpyHtoD(d_totalSteps, Pointer.to(new long[]{ 0L }), Sizeof.LONG);
+        cuMemcpyHtoD(d_totalSteps, Pointer.to(new long[]{0L}), Sizeof.LONG);
 
         // ==========================================================
         // 3. SETUP & LAUNCH THE SURGEON KERNEL
@@ -389,7 +397,7 @@ public class MasterSolverPBP implements Runnable {
 
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards),
-                Pointer.to(new int[]{ numBoards }),
+                Pointer.to(new int[]{numBoards}),
                 Pointer.to(d_allOrientations),
                 Pointer.to(d_physicalMapping),
                 Pointer.to(d_solution),
@@ -397,7 +405,7 @@ public class MasterSolverPBP implements Runnable {
                 Pointer.to(d_gpuHighScore),
                 Pointer.to(d_bestBoardOut),
                 Pointer.to(d_totalSteps),
-                Pointer.to(new int[]{ maxStepsPerThread })
+                Pointer.to(new int[]{maxStepsPerThread})
         );
 
         int blockSizeX = 256;
@@ -432,7 +440,8 @@ public class MasterSolverPBP implements Runnable {
 
                     // Gem billeder og filer af det nye reparerede bræt!
                     RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                    CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                    CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore,
+                            saveProfile);
 
                     System.out.println("\n" + timestamp() + ">>> KIRURGEN SLOG REKORDEN! NY HIGH SCORE: " + absoluteHighScore + " <<<");
                 }
@@ -477,16 +486,23 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private void processGpuResults(long timeMs, long steps, int[] depths, int start, int n) {
-        double speed = steps / Math.max(timeMs/1000.0, 0.001);
-        long sum = 0; int max = 0, dead = 0;
+        double speed = steps / Math.max(timeMs / 1000.0, 0.001);
+        long sum = 0;
+        int max = 0, dead = 0;
         for (int d : depths) {
             sum += d;
-            if (d > max) max = d;
-            if (d <= start + 5) dead++;
+            if (d > max) {
+                max = d;
+            }
+            if (d <= start + 5) {
+                dead++;
+            }
         }
         System.out.printf("%sGPU | %d ms | %,.0f pcs/s | Avg Depth: %.1f | Max: %d | Dead < 5: %d/%d\n",
-                timestamp(), timeMs, speed, (double)sum/n, max, dead, n);
-        if (n > 0 && (double)dead/n >= extinctionThreshold) throw new PoisonedBaseCampException();
+                timestamp(), timeMs, speed, (double) sum / n, max, dead, n);
+        if (n > 0 && (double) dead / n >= extinctionThreshold) {
+            throw new PoisonedBaseCampException();
+        }
     }
 
     private void cuFreeResources(CUdeviceptr... pointers) {
@@ -507,7 +523,9 @@ public class MasterSolverPBP implements Runnable {
             }));
 
             System.out.println(timestamp() + "Starting Multithreaded Engine (Profile: " + saveProfile + ")...");
-            if (useGpu) initCUDA();
+            if (useGpu) {
+                initCUDA();
+            }
             System.out.println(timestamp() + "Starting Autonomous Engine...");
             long lastPeriodicSave = System.currentTimeMillis();
 
@@ -519,7 +537,9 @@ public class MasterSolverPBP implements Runnable {
 
                 boolean spaceExhausted = true;
                 try {
-                    if (executeCpuSeedGeneration()) return;
+                    if (executeCpuSeedGeneration()) {
+                        return;
+                    }
                     spaceExhausted = handleSearchHandoff();
                 } catch (EvolutionLeapException e) {
                     spaceExhausted = false;
@@ -577,7 +597,9 @@ public class MasterSolverPBP implements Runnable {
                 handoffDepth = lockedPieces + 30;
                 targetBatchSize = 10000;
             }
-            if (lockedPieces == 0 && deepestStep > 0) retreat(0, null);
+            if (lockedPieces == 0 && deepestStep > 0) {
+                retreat(0, null);
+            }
         } else if (deepestStep > 0) {
             int retreatDistance = (deepestStep > 180) ? 80 : 30;
             lockedPieces = Math.max(0, deepestStep - retreatDistance);
@@ -596,7 +618,9 @@ public class MasterSolverPBP implements Runnable {
         if (lockedPieces > 0) {
             for (int step = 0; step < lockedPieces; step++) {
                 int idx = buildOrder[step];
-                if (lockCenter && idx == 135) continue;
+                if (lockCenter && idx == 135) {
+                    continue;
+                }
                 flatResumeBoard[idx] = bestBoard[idx];
             }
         }
@@ -612,7 +636,9 @@ public class MasterSolverPBP implements Runnable {
 
         List<Future<Boolean>> results = executor.invokeAll(workers);
         for (Future<Boolean> f : results) {
-            if (f.get()) return true;
+            if (f.get()) {
+                return true;
+            }
         }
         return false;
     }
@@ -628,7 +654,8 @@ public class MasterSolverPBP implements Runnable {
             long now = System.currentTimeMillis();
             if (now - lastRepairPrintTime > 20000) {
                 System.out.println("\n" + timestamp() + ">>> LATE-GAME REPAIR MODE ACTIVE <<<");
-                System.out.println(timestamp() + ">>> Performing " + (repairLoopsCounter / 2) + " batches/sek... Shuffling 15 pieces in the " + absoluteHighScore + "-piece board!");
+                System.out.println(timestamp() + ">>> Performing " + (repairLoopsCounter / 2) + " batches/sek... " +
+                        "Shuffling 15 pieces in the " + absoluteHighScore + "-piece board!");
                 lastRepairPrintTime = now;
                 repairLoopsCounter = 0;
             }
@@ -660,7 +687,8 @@ public class MasterSolverPBP implements Runnable {
             resetCounters();
             return false;
         } else if (foundSeeds > 0) {
-            System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch of " + foundSeeds + " HIGH-VALUE seeds to GPU...");
+            System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch of " + foundSeeds + " " +
+                    "HIGH-VALUE seeds to GPU...");
             if (useGpu) {
                 runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
             }
@@ -680,7 +708,9 @@ public class MasterSolverPBP implements Runnable {
         // =======================================================
         if (absoluteHighScore >= 208) {
             deepestStep = absoluteHighScore;
-            if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
+            if (consecutiveExtinctions >= 3) {
+                consecutiveExtinctions = 0;
+            }
             return; // <-- Forhindrer retreat!
         }
         // =======================================================
@@ -694,14 +724,17 @@ public class MasterSolverPBP implements Runnable {
         } else {
             retreat(0, null);
         }
-        if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
+        if (consecutiveExtinctions >= 3) {
+            consecutiveExtinctions = 0;
+        }
     }
 
     private boolean handleWorkerException(ExecutionException e) {
         Throwable cause = e.getCause();
         if (cause instanceof ManualOverrideException) {
             manualOverrideRequested = false;
-            retreat(manualBaseCampTarget, "\n" + timestamp() + "[!] MANUAL OVERRIDE! Jumping to " + manualBaseCampTarget);
+            retreat(manualBaseCampTarget,
+                    "\n" + timestamp() + "[!] MANUAL OVERRIDE! Jumping to " + manualBaseCampTarget);
             deepestStep = manualBaseCampTarget + 30;
             return true;
         }
@@ -714,7 +747,9 @@ public class MasterSolverPBP implements Runnable {
         if (lockedPieces > 0) {
             int retreat = (currentStrategy == BuildStrategy.TYPEWRITER &&
                     (System.currentTimeMillis() - lastProgressTimestamp) / 60000 >= 2) ? 50 : 10;
-            if (retreat == 50) System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Retreating 50 steps.");
+            if (retreat == 50) {
+                System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Retreating 50 steps.");
+            }
 
             retreat(deepestStep - retreat, timestamp() + ">>> Base camp exhausted. Searching new path...");
         } else if (currentStrategy == BuildStrategy.TYPEWRITER && useGpu) {
@@ -727,9 +762,13 @@ public class MasterSolverPBP implements Runnable {
     private void retreat(int targetStep, String logMessage) {
         deepestStep = Math.max(0, targetStep);
         for (int s = deepestStep; s < 256; s++) bestBoard[buildOrder[s]] = -1;
-        if (lockCenter) bestBoard[135] = targetPiece;
+        if (lockCenter) {
+            bestBoard[135] = targetPiece;
+        }
         updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
-        if (logMessage != null) System.out.println(logMessage);
+        if (logMessage != null) {
+            System.out.println(logMessage);
+        }
     }
 
     private void resetCounters() {
@@ -756,42 +795,150 @@ public class MasterSolverPBP implements Runnable {
     // ==========================================================
 
     /**
-     * Takes the best known board and generates thousands of clones.
-     * In each clone, a specific number of random pieces are removed ("punched out"),
-     * forcing the GPU to re-evaluate and optimize those specific localized holes.
+     * Scores each placed cell by the number of edge mismatches with its neighbors.
+     * A score of 0 means the piece fits perfectly on all sides.
+     * A score of 4 means all four neighbors are mismatched (maximally conflicted).
+     * Empty cells (-1) and the locked center are excluded.
+     *
+     * @return array of conflict scores, indexed by board position (0..255)
+     */
+    private int[] scoreConflicts(int[] sourceBoard) {
+        int[] conflicts = new int[256];
+        for (int idx = 0; idx < 256; idx++) {
+            int p = sourceBoard[idx];
+            if (p == -1 || p == -2) {
+                continue;
+            }
+            if (lockCenter && idx == 135) {
+                continue;
+            }
+
+            int row = idx / 16;
+            int col = idx % 16;
+            int score = 0;
+
+            // North neighbor
+            if (row > 0) {
+                int northPiece = sourceBoard[idx - 16];
+                if (northPiece > 0 && PieceUtils.getSouth(northPiece) != PieceUtils.getNorth(p)) {
+                    score++;
+                }
+            }
+            // South neighbor
+            if (row < 15) {
+                int southPiece = sourceBoard[idx + 16];
+                if (southPiece > 0 && PieceUtils.getNorth(southPiece) != PieceUtils.getSouth(p)) {
+                    score++;
+                }
+            }
+            // West neighbor
+            if (col > 0) {
+                int westPiece = sourceBoard[idx - 1];
+                if (westPiece > 0 && PieceUtils.getEast(westPiece) != PieceUtils.getWest(p)) {
+                    score++;
+                }
+            }
+            // East neighbor
+            if (col < 15) {
+                int eastPiece = sourceBoard[idx + 1];
+                if (eastPiece > 0 && PieceUtils.getWest(eastPiece) != PieceUtils.getEast(p)) {
+                    score++;
+                }
+            }
+
+            conflicts[idx] = score;
+        }
+        return conflicts;
+    }
+
+    /**
+     * Takes the best known board and generates thousands of clones using targeted LNS.
+     * <p>
+     * Hole selection strategy (per clone):
+     * - 70% of holes are drawn from the HIGH-CONFLICT region (cells with the most
+     * edge mismatches), focusing repair effort where it matters most.
+     * - 30% of holes are drawn randomly from all placed cells, preserving diversity
+     * and preventing the search from getting tunnel-visioned on one area.
+     * <p>
+     * Additionally, the "frontier" cell (the next unplaced position in build order)
+     * is always included as a hole, so every clone targets progression.
      */
     private List<int[]> punchHolesInBestBoard(int[] sourceBoard, int numClones, int numHoles) {
         List<int[]> swissCheeseBoards = new ArrayList<>(numClones);
         Random rnd = new Random();
 
+        // --- 1. Collect placed indices and their conflict scores ---
         int[] placedIndices = new int[256];
         int placedCount = 0;
 
         for (int i = 0; i < 256; i++) {
-            if (sourceBoard[i] != -1) {
-                if (lockCenter && i == 135) continue;
+            if (sourceBoard[i] != -1 && sourceBoard[i] != -2) {
+                if (lockCenter && i == 135) {
+                    continue;
+                }
                 placedIndices[placedCount++] = i;
             }
         }
 
         int actualHoles = Math.min(numHoles, placedCount);
 
+        // --- 2. Score conflicts and build a sorted high-conflict candidate list ---
+        int[] conflicts = scoreConflicts(sourceBoard);
+
+        // Collect and sort placed indices by descending conflict score
+        Integer[] sortedByConflict = new Integer[placedCount];
+        for (int i = 0; i < placedCount; i++) sortedByConflict[i] = placedIndices[i];
+        Arrays.sort(sortedByConflict, (a, b) -> Integer.compare(conflicts[b], conflicts[a]));
+
+        // Top 25% most-conflicted cells form the "hot zone"
+        int hotZoneSize = Math.max(actualHoles, placedCount / 4);
+        int[] hotZone = new int[hotZoneSize];
+        for (int i = 0; i < hotZoneSize; i++) hotZone[i] = sortedByConflict[i];
+
+        // --- 3. Generate clones with targeted holes ---
+        int targetedHoles = (int) Math.round(actualHoles * 0.70);
+        int randomHoles = actualHoles - targetedHoles;
+
         for (int clone = 0; clone < numClones; clone++) {
             int[] clonedBoard = new int[256];
             System.arraycopy(sourceBoard, 0, clonedBoard, 0, 256);
 
-            for (int i = 0; i < actualHoles; i++) {
-                int swapIdx = i + rnd.nextInt(placedCount - i);
-                int temp = placedIndices[i];
-                placedIndices[i] = placedIndices[swapIdx];
-                placedIndices[swapIdx] = temp;
+            // Track which indices we've already punched this clone (avoid double-punching)
+            boolean[] punched = new boolean[256];
 
-                int holeIndex = placedIndices[i];
-                // FIX: Brug -2 til at markere TARGETED HOLES!
-                clonedBoard[holeIndex] = -2;
+            // Phase A: targeted holes from the hot zone (shuffle + pick first N)
+            int hotPicked = 0;
+            int[] hotShuffled = hotZone.clone();
+            for (int i = 0; i < hotShuffled.length && hotPicked < targetedHoles; i++) {
+                int swapIdx = i + rnd.nextInt(hotShuffled.length - i);
+                int tmp = hotShuffled[i];
+                hotShuffled[i] = hotShuffled[swapIdx];
+                hotShuffled[swapIdx] = tmp;
+                int holeIdx = hotShuffled[i];
+                if (!punched[holeIdx]) {
+                    clonedBoard[holeIdx] = -2;
+                    punched[holeIdx] = true;
+                    hotPicked++;
+                }
             }
 
-            // FIX: Gør det næste tomme felt (Brik 203) til vores ultimative mål!
+            // Phase B: random holes from all placed cells for diversity
+            int randPicked = 0;
+            int[] allShuffled = Arrays.copyOf(placedIndices, placedCount);
+            for (int i = 0; i < allShuffled.length && randPicked < randomHoles; i++) {
+                int swapIdx = i + rnd.nextInt(allShuffled.length - i);
+                int tmp = allShuffled[i];
+                allShuffled[i] = allShuffled[swapIdx];
+                allShuffled[swapIdx] = tmp;
+                int holeIdx = allShuffled[i];
+                if (!punched[holeIdx]) {
+                    clonedBoard[holeIdx] = -2;
+                    punched[holeIdx] = true;
+                    randPicked++;
+                }
+            }
+
+            // Always punch the frontier cell (next unplaced position in build order)
             if (absoluteHighScore < 256) {
                 int nextTargetIdx = buildOrder[absoluteHighScore];
                 clonedBoard[nextTargetIdx] = -2;
@@ -894,34 +1041,54 @@ public class MasterSolverPBP implements Runnable {
         }
 
         private boolean solve(int step) {
-            if (manualOverrideRequested) throw new ManualOverrideException();
-            if (currentBatchSize.get() >= activeBatch) return false;
-            if (step == 256) return true;
+            if (manualOverrideRequested) {
+                throw new ManualOverrideException();
+            }
+            if (currentBatchSize.get() >= activeBatch) {
+                return false;
+            }
+            if (step == 256) {
+                return true;
+            }
 
             int boardIdx = buildOrder[step];
-            if (lockCenter && boardIdx == 135) return solve(step + 1);
+            if (lockCenter && boardIdx == 135) {
+                return solve(step + 1);
+            }
 
-            if (useGpu && step == handoffDepth) return registerGpuSeed();
+            if (useGpu && step == handoffDepth) {
+                return registerGpuSeed();
+            }
 
             updateProgress(step);
 
-            int row = boardIdx / 16, col = boardIdx % 16;
-            int n = (row == 0) ? 0 : (localBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(localBoard[boardIdx - 16]) : PieceUtils.WILDCARD);
-            int s = (row == 15) ? 0 : (localBoard[boardIdx + 16] != -1 ? PieceUtils.getNorth(localBoard[boardIdx + 16]) : PieceUtils.WILDCARD);
-            int w = (col == 0) ? 0 : (localBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(localBoard[boardIdx - 1]) : PieceUtils.WILDCARD);
-            int e = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(localBoard[boardIdx + 1]) : PieceUtils.WILDCARD);
+            int row = boardIdx / 16;
+            int col = boardIdx % 16;
+            int n = (row == 0) ? 0 : (localBoard[boardIdx - 16] != -1 ?
+                    PieceUtils.getSouth(localBoard[boardIdx - 16]) : PieceUtils.WILDCARD);
+            int s = (row == 15) ? 0 : (localBoard[boardIdx + 16] != -1 ?
+                    PieceUtils.getNorth(localBoard[boardIdx + 16]) : PieceUtils.WILDCARD);
+            int w = (col == 0) ? 0 : (localBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(localBoard[boardIdx - 1]) :
+                                      PieceUtils.WILDCARD);
+            int e = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(localBoard[boardIdx + 1])
+                                       : PieceUtils.WILDCARD);
 
             List<Integer> pool = getCandidatePool(row, col);
-            int size = pool.size(), offset = rnd.nextInt(size);
+            int size = pool.size();
+            int offset = rnd.nextInt(size);
 
             for (int i = 0; i < size; i++) {
-                if (currentBatchSize.get() >= activeBatch) return false;
+                if (currentBatchSize.get() >= activeBatch) {
+                    return false;
+                }
 
                 int orientationIdx = pool.get((i + offset) % size);
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
 
-                if (localUsed[physicalIdx] || (localResumeBoard[boardIdx] != -1 && p != localResumeBoard[boardIdx])) continue;
+                if (localUsed[physicalIdx] || (localResumeBoard[boardIdx] != -1 && p != localResumeBoard[boardIdx])) {
+                    continue;
+                }
 
                 if (matches(p, n, e, s, w) && passesLookahead(p, step, row, col, boardIdx)) {
                     localBoard[boardIdx] = p;
@@ -929,7 +1096,9 @@ public class MasterSolverPBP implements Runnable {
                     int ghost = localResumeBoard[boardIdx];
                     localResumeBoard[boardIdx] = -1;
 
-                    if (solve(step + 1)) return true;
+                    if (solve(step + 1)) {
+                        return true;
+                    }
 
                     localBoard[boardIdx] = -1;
                     localUsed[physicalIdx] = false;
@@ -940,21 +1109,27 @@ public class MasterSolverPBP implements Runnable {
         }
 
         private boolean registerGpuSeed() {
-            if (currentBatchSize.get() >= activeBatch) return false;
+            if (currentBatchSize.get() >= activeBatch) {
+                return false;
+            }
             int foundationDepth = Math.max(1, handoffDepth - 5);
             long hash = 0;
             for (int i = 0; i < foundationDepth; i++) {
                 long p = localBoard[buildOrder[i]];
                 hash ^= (p * 0x9e3779b97f4a7c15L) + 0x6c62272e07bb0142L + (hash << 6) + (hash >>> 2);
             }
-            if (!structuralDiversityFilter.add(hash)) return false;
+            if (!structuralDiversityFilter.add(hash)) {
+                return false;
+            }
 
             int[] cloned = new int[256];
             System.arraycopy(localBoard, 0, cloned, 0, 256);
             gpuSeedBoards.add(cloned);
 
             int size = currentBatchSize.incrementAndGet();
-            if (size % 1000 == 0) System.out.println(timestamp() + "   [CPU Pool] Found " + size + " / " + activeBatch + " seeds...");
+            if (size % 1000 == 0) {
+                System.out.println(timestamp() + "   [CPU Pool] Found " + size + " / " + activeBatch + " seeds...");
+            }
             return false;
         }
 
@@ -972,8 +1147,10 @@ public class MasterSolverPBP implements Runnable {
                             System.arraycopy(localBoard, 0, bestBoard, 0, 256);
 
                             RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                            CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                            System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " PIECES! <<<");
+                            CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore,
+                                    saveProfile);
+                            System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE: " + absoluteHighScore + " " +
+                                    "PIECES! <<<");
                         }
                     }
                 }
@@ -988,12 +1165,16 @@ public class MasterSolverPBP implements Runnable {
         private boolean passesLookahead(int p, int step, int row, int col, int idx) {
             if (row < 15 && localBoard[idx + 16] == -1) {
                 int reqN = PieceUtils.getSouth(p);
-                if (!hasAvailablePiece(piecesByNorth[reqN])) return false;
-                if (step > 40 && row < 14 && localBoard[idx + 32] == -1 && !isSecondaryNeighborViable(reqN)) return false;
+                if (!hasAvailablePiece(piecesByNorth[reqN])) {
+                    return false;
+                }
+                if (step > 40 && row < 14 && localBoard[idx + 32] == -1 && !isSecondaryNeighborViable(reqN)) {
+                    return false;
+                }
             }
             if (col < 15 && localBoard[idx + 1] == -1) {
                 int reqW = PieceUtils.getEast(p);
-                if (!hasAvailablePiece(piecesByWest[reqW])) return false;
+                return hasAvailablePiece(piecesByWest[reqW]);
             }
             return true;
         }
