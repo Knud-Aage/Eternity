@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class MasterSolverPBP implements Runnable {
 
+    public static final int SWISS_CHEESE_LEVEL = 214;
     private final PieceInventory inventory;
     private final int[] flatBoard = new int[256];
     private final int[] bestBoard = new int[256];
@@ -75,6 +76,9 @@ public class MasterSolverPBP implements Runnable {
     private int consecutiveExhaustions = 0;
     private long lastRepairPrintTime = 0;
     private long repairLoopsCounter = 0;
+    private long totalRepairVariationsTested = 0;
+    private long repairStartTime = 0;
+    private volatile double targetedHolesPercentage = 0.70;
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                            boolean lockCenter) {
@@ -219,6 +223,10 @@ public class MasterSolverPBP implements Runnable {
 
     public void setBatchSizeOverride(int size) {
         this.userBatchSizeOverride = size;
+    }
+
+    public void setTargetedHolesPercentage(double percentage) {
+        this.targetedHolesPercentage = percentage;
     }
 
     private void initCUDA() {
@@ -574,7 +582,7 @@ public class MasterSolverPBP implements Runnable {
 
     private void handleGlobalStagnation() {
         long minutesSinceProgress = (System.currentTimeMillis() - lastProgressTimestamp) / 60000;
-        if (minutesSinceProgress >= stagnationLimitMinutes && deepestStep > 0 && deepestStep <= 208) {
+        if (minutesSinceProgress >= stagnationLimitMinutes && deepestStep > 0 && deepestStep <= SWISS_CHEESE_LEVEL) {
             int deepRetreat = 40 + new Random().nextInt(41);
             String msg = "\n" + timestamp() + " [!!!] AUTONOMOUS DEEP EXTINCTION [!!!]\n" +
                     timestamp() + " No progression in the last " + minutesSinceProgress + " minutes.\n" +
@@ -647,24 +655,49 @@ public class MasterSolverPBP implements Runnable {
         int activeBatch = (userBatchSizeOverride > 0) ? userBatchSizeOverride : targetBatchSize;
         int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 120 : 50;
         int foundSeeds = currentBatchSize.get();
+        int numClones = 10000;
+        int holesToPunch = 15;
 
-        if (useGpu && absoluteHighScore >= 208 && (consecutiveExtinctions >= 1 || consecutiveExhaustions >= 1 || foundSeeds == 0)) {
+        if (!useGpu) {
+            if (foundSeeds > 0) {
+                // I CPU-mode betragter vi fundne seeds som "fundne stier".
+                // Vi nulstiller bare og lader CPU'en køre videre uden at trigge retreat.
+                currentBatchSize.set(0);
+                gpuSeedBoards.clear();
+                return false; // FALSE betyder: "Bliv hvor du er, ikke træk dig tilbage"
+            }
+            return false;
+        }
+
+        if (repairStartTime == 0) repairStartTime = System.currentTimeMillis();
+        totalRepairVariationsTested += numClones;
+        repairLoopsCounter++;
+
+        if (useGpu && absoluteHighScore >= SWISS_CHEESE_LEVEL && (consecutiveExtinctions >= 1 || consecutiveExhaustions >= 1 || foundSeeds == 0)) {
 
             repairLoopsCounter++;
             long now = System.currentTimeMillis();
-            if (now - lastRepairPrintTime > 20000) {
-                System.out.println("\n" + timestamp() + ">>> LATE-GAME REPAIR MODE ACTIVE <<<");
-                System.out.println(timestamp() + ">>> Performing " + (repairLoopsCounter / 2) + " batches/sek... " +
-                        "Shuffling 15 pieces in the " + absoluteHighScore + "-piece board!");
+            List<int[]> swissCheeseBoards = punchHolesInBestBoard(bestBoard, numClones, holesToPunch);
+
+            if (now - lastRepairPrintTime > 2000) {
+                long secondsRunning = (now - repairStartTime) / 1000;
+                String timeFormatted = String.format("%02d:%02d:%02d", secondsRunning / 3600, (secondsRunning % 3600) / 60, secondsRunning % 60);
+
+//                System.out.println(String.format("%s >>> [REPAIR MODE] Uptime: %s | Speed: %d batches/sec | Total variations: %,d",
+//                        timestamp(), timeFormatted, (repairLoopsCounter / 2), totalRepairVariationsTested));
+                // =======================================================
+                int[] visualBoard = new int[256];
+                System.arraycopy(swissCheeseBoards.get(0), 0, visualBoard, 0, 256);
+
+                for(int i = 0; i < 256; i++) {
+                    if (visualBoard[i] == -2) visualBoard[i] = -1;
+                }
+                Main.updateDisplay(absoluteHighScore, buildDisplayBoard(visualBoard));
+                // =======================================================
+
                 lastRepairPrintTime = now;
                 repairLoopsCounter = 0;
             }
-            // =======================================================
-
-            int numClones = 10000;
-            int holesToPunch = 15;
-            List<int[]> swissCheeseBoards = punchHolesInBestBoard(bestBoard, numClones, holesToPunch);
-
             runRepairGpuHandoff(swissCheeseBoards);
 
             consecutiveExtinctions = 0;
@@ -672,9 +705,9 @@ public class MasterSolverPBP implements Runnable {
             resetCounters();
 
             deepestStep = absoluteHighScore;
-            if (repairLoopsCounter == 1) {
-                Main.updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
-            }
+//            if (repairLoopsCounter == 1) {
+//                Main.updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
+//            }
 
             return false;
         }
@@ -687,11 +720,8 @@ public class MasterSolverPBP implements Runnable {
             resetCounters();
             return false;
         } else if (foundSeeds > 0) {
-            System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch of " + foundSeeds + " " +
-                    "HIGH-VALUE seeds to GPU...");
-            if (useGpu) {
-                runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
-            }
+            System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch to GPU...");
+            runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, 120);
             resetCounters();
             return true;
         }
@@ -706,7 +736,7 @@ public class MasterSolverPBP implements Runnable {
         // =======================================================
         // THE ENDGAME ANCHOR: NEVER RETREAT IN THE LATE GAME!
         // =======================================================
-        if (absoluteHighScore >= 208) {
+        if (absoluteHighScore >= SWISS_CHEESE_LEVEL) {
             deepestStep = absoluteHighScore;
             if (consecutiveExtinctions >= 3) {
                 consecutiveExtinctions = 0;
@@ -855,9 +885,9 @@ public class MasterSolverPBP implements Runnable {
      * Takes the best known board and generates thousands of clones using targeted LNS.
      * <p>
      * Hole selection strategy (per clone):
-     * - 70% of holes are drawn from the HIGH-CONFLICT region (cells with the most
+     * - A percentage of holes are drawn from the HIGH-CONFLICT region (cells with the most
      * edge mismatches), focusing repair effort where it matters most.
-     * - 30% of holes are drawn randomly from all placed cells, preserving diversity
+     * - The remaining holes are drawn randomly from all placed cells, preserving diversity
      * and preventing the search from getting tunnel-visioned on one area.
      * <p>
      * Additionally, the "frontier" cell (the next unplaced position in build order)
@@ -896,7 +926,7 @@ public class MasterSolverPBP implements Runnable {
         for (int i = 0; i < hotZoneSize; i++) hotZone[i] = sortedByConflict[i];
 
         // --- 3. Generate clones with targeted holes ---
-        int targetedHoles = (int) Math.round(actualHoles * 0.70);
+        int targetedHoles = (int) Math.round(actualHoles * targetedHolesPercentage);
         int randomHoles = actualHoles - targetedHoles;
 
         for (int clone = 0; clone < numClones; clone++) {

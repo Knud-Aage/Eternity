@@ -96,7 +96,7 @@ public class Main {
                     pbpSolver.setExtinctionThreshold(extSlider.getValue() / 100.0);
                 });
 
-                // 2. Batch Size Dropdown (NYT)
+                // 2. Batch Size Dropdown
                 JLabel batchLabel = new JLabel("Target Seeds: AUTO (Dynamic)");
                 batchLabel.setFont(labelFont);
                 batchLabel.setForeground(textColor);
@@ -115,6 +115,19 @@ public class Main {
                         batchLabel.setText("Target Seeds: " + selected + " (LOCKED)");
                         pbpSolver.setBatchSizeOverride(Integer.parseInt(selected));
                     }
+                });
+
+                // Targeted Holes Percentage Slider
+                JLabel targetedHolesLabel = new JLabel("Targeted Holes: 70%");
+                targetedHolesLabel.setFont(labelFont);
+                targetedHolesLabel.setForeground(textColor);
+                targetedHolesLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                JSlider targetedHolesSlider = new JSlider(0, 100, 70);
+                targetedHolesSlider.setBackground(new Color(40, 42, 45));
+                targetedHolesSlider.addChangeListener(e -> {
+                    targetedHolesLabel.setText("Targeted Holes: " + targetedHolesSlider.getValue() + "%");
+                    pbpSolver.setTargetedHolesPercentage(targetedHolesSlider.getValue() / 100.0);
                 });
 
                 // 3. Base Camp Override Slider
@@ -148,6 +161,11 @@ public class Main {
                 controlPanel.add(batchLabel);
                 controlPanel.add(Box.createVerticalStrut(10));
                 controlPanel.add(batchBox);
+
+                controlPanel.add(Box.createVerticalStrut(30));
+                controlPanel.add(targetedHolesLabel);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(targetedHolesSlider);
 
                 controlPanel.add(Box.createVerticalStrut(50));
 
