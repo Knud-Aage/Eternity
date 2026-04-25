@@ -7,8 +7,8 @@ public class BucasExporter {
 
     public static void main(String[] args) {
         // Skift navnet her, hvis din fil hedder noget andet!
-        String filename = "records/SPIRAL/Record_209Pieces.csv";
-//        String filename = "records/RYPEWRITER/Record_209Pieces.csv";
+//        String filename = "records/SPIRAL/Record_209Pieces.csv";
+        String filename = "records/TYPEWRITER_LOCKED/Record_210Pieces.csv";
 
         // Vi bygger et "virtuelt bræt" med 256 faste pladser.
         // Vi fylder det med "0000" (tomme brikker) fra start.

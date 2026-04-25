@@ -3,7 +3,11 @@ package dk.puzzle;
 import javax.swing.*;
 import java.awt.*;
 import java.io.BufferedReader;
+import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.time.LocalDateTime;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -13,8 +17,13 @@ public class Main {
 
     private static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
+//    private static final AtomicInteger currentScore = new AtomicInteger(0);
+    private static final AtomicInteger highScore = new AtomicInteger(0); // <-- NY TILFØJELSE
+//    private static final int[][] currentDisplayBoard = new int[16][];
 
     public static void main(String[] args) {
+        initLogging();
+        
         StartupDialog dialog = new StartupDialog(null);
         dialog.setVisible(true);
 
@@ -204,15 +213,30 @@ public class Main {
 
             new javax.swing.Timer(100, e -> {
                 viz.repaint();
-                int score = currentScore.get();
-                String status = score == 0 ? " [SEARCHING...]" : (score == 256 ? " [SOLVED!]" : " [SOLVING...]");
-                frame.setTitle("Eternity II - " + score + "/256 Pieces" + status);
-            }).start();
-        });
+                int current = currentScore.get();
+                int record = highScore.get();
+
+                String status = current == 0 ? " [SØGER...]" : (current == 256 ? " [LØST!]" : " [ARBEJDER...]");
+                // Her bygger vi den nye, detaljerede titelbar!
+                frame.setTitle(String.format("Eternity II - Aktuel: %d | Rekord: %d | Total: 256 brikker%s", current, record, status));
+            }).start();        });
     }
 
-    public static synchronized void updateDisplay(int score, int[][] board) {
-        currentScore.set(score);
+    private static void initLogging() {
+        try {
+            PrintStream logFile = new PrintStream(new FileOutputStream("eternity_log.txt", true));
+            System.setOut(logFile);
+            System.setErr(logFile);
+            System.out.println("\n--- Session started at " + LocalDateTime.now() + " ---");
+        } catch (IOException e) {
+            System.err.println("Could not initialize log file: " + e.getMessage());
+        }
+    }
+
+    // Udskift din nuværende updateDisplay metode med denne:
+    public static synchronized void updateDisplay(int current, int record, int[][] board) {
+        currentScore.set(current);
+        highScore.set(record);
         for (int i = 0; i < 16; i++) {
             if (board[i] != null) {
                 currentDisplayBoard[i] = board[i].clone();
@@ -221,6 +245,17 @@ public class Main {
             }
         }
     }
+
+//    public static synchronized void updateDisplay(int score, int[][] board) {
+//        currentScore.set(score);
+//        for (int i = 0; i < 16; i++) {
+//            if (board[i] != null) {
+//                currentDisplayBoard[i] = board[i].clone();
+//            } else {
+//                currentDisplayBoard[i] = null;
+//            }
+//        }
+//    }
 
     private static int[] loadPieces() {
         try (BufferedReader br = new BufferedReader(new FileReader("pieces.csv"))) {

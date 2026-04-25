@@ -33,6 +33,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class MasterSolverPBP implements Runnable {
 
@@ -53,6 +54,8 @@ public class MasterSolverPBP implements Runnable {
     private final ConcurrentLinkedQueue<int[]> gpuSeedBoards = new ConcurrentLinkedQueue<>();
     private final AtomicInteger currentBatchSize = new AtomicInteger(0);
     private final java.util.Set<Long> structuralDiversityFilter = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final AtomicLong globalTrialCount = new AtomicLong(0);
+    private long lastThroughputReportTime = System.currentTimeMillis();
     private final int[] buildOrder;
     private final int[][] piecesByNorth = new int[256][];
     private final int[][] piecesByEast = new int[256][];
@@ -132,16 +135,15 @@ public class MasterSolverPBP implements Runnable {
                 }
             }
             if (highestStepLoaded >= 0) {
-                this.deepestStep = highestStepLoaded;
-                this.absoluteHighScore = highestStepLoaded;
+                this.deepestStep = highestStepLoaded + 1;
+                this.absoluteHighScore = highestStepLoaded + 1;
                 if (lockCenter) {
                     bestBoard[135] = targetPiece;
                 }
-                // Visual fix: Show the loaded highscore immediately on startup
                 System.arraycopy(bestBoard, 0, flatBoard, 0, 256);
                 System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
                 updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
-                System.out.println(timestamp() + ">>> Loaded checkpoint: " + (highestStepLoaded + 1) + " pieces.");
+                System.out.println(timestamp() + ">>> Loaded checkpoint: " + absoluteHighScore + " pieces.");
             }
         }
         java.util.Set<Integer>[] tempNorth = new java.util.HashSet[256];
@@ -331,7 +333,7 @@ public class MasterSolverPBP implements Runnable {
                         int[] gpuWinningBoard = new int[256];
                         cuMemcpyDtoH(Pointer.to(gpuWinningBoard), d_bestBoardOut, 256L * Sizeof.INT);
                         System.arraycopy(gpuWinningBoard, 0, bestBoard, 0, 256);
-                        updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
+                        updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
 
                         if (deepestStep > absoluteHighScore) {
                             absoluteHighScore = deepestStep;
@@ -444,7 +446,7 @@ public class MasterSolverPBP implements Runnable {
                     absoluteHighScore = resultHighScore[0];
                     deepestStep = absoluteHighScore; // Opdater base camp
                     System.arraycopy(repairedBoard, 0, bestBoard, 0, 256);
-                    updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
+                    updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
 
                     // Gem billeder og filer af det nye reparerede bræt!
                     RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
@@ -463,7 +465,7 @@ public class MasterSolverPBP implements Runnable {
             int[] winningBoard = new int[256];
             cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
             System.out.println("\n" + timestamp() + ">>> ETERNITY II LØST AF REPAIR MODE (GPU)!!! <<<");
-            Main.updateDisplay(256, buildDisplayBoard(winningBoard));
+            updateDisplay(256, buildDisplayBoard(winningBoard));
             System.exit(0);
         }
 
@@ -495,6 +497,7 @@ public class MasterSolverPBP implements Runnable {
 
     private void processGpuResults(long timeMs, long steps, int[] depths, int start, int n) {
         double speed = steps / Math.max(timeMs / 1000.0, 0.001);
+        globalTrialCount.addAndGet(steps);
         long sum = 0;
         int max = 0, dead = 0;
         for (int d : depths) {
@@ -539,6 +542,17 @@ public class MasterSolverPBP implements Runnable {
 
             while (true) {
                 handleGlobalStagnation();
+
+                // --- Throughput Reporting ---
+                long now = System.currentTimeMillis();
+                long elapsed = now - lastThroughputReportTime;
+                if (elapsed >= 5000) { // Report every 5 seconds
+                    long trials = globalTrialCount.getAndSet(0);
+                    double tps = trials / (elapsed / 1000.0);
+                    System.out.printf("%s[STATS] Throughput: %,.0f trials/sec (Total in window: %,d)\n",
+                                      timestamp(), tps, trials);
+                    lastThroughputReportTime = now;
+                }
 
                 int lockedPieces = updateHandoffConfig();
                 prepareSearchIteration(lockedPieces);
@@ -692,13 +706,14 @@ public class MasterSolverPBP implements Runnable {
                 for(int i = 0; i < 256; i++) {
                     if (visualBoard[i] == -2) visualBoard[i] = -1;
                 }
-                Main.updateDisplay(absoluteHighScore, buildDisplayBoard(visualBoard));
+                updateDisplay(countPieces(visualBoard), buildDisplayBoard(visualBoard));
                 // =======================================================
 
                 lastRepairPrintTime = now;
                 repairLoopsCounter = 0;
             }
             runRepairGpuHandoff(swissCheeseBoards);
+            updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
 
             consecutiveExtinctions = 0;
             consecutiveExhaustions = 0;
@@ -726,25 +741,53 @@ public class MasterSolverPBP implements Runnable {
             return true;
         }
 
-        System.out.println(timestamp() + ">>> ZERO seeds found. Base Camp is a dead end.");
+//        System.out.println(timestamp() + ">>> ZERO seeds found. Base Camp is a dead end.");
         return true;
     }
+
+//    private void handleExtinctionEvent(int lockedPieces) {
+//        consecutiveExtinctions++;
+//
+//        // =======================================================
+//        // THE ENDGAME ANCHOR: NEVER RETREAT IN THE LATE GAME!
+//        // =======================================================
+//        if (absoluteHighScore >= SWISS_CHEESE_LEVEL) {
+//            deepestStep = absoluteHighScore;
+//            if (consecutiveExtinctions >= 3) {
+//                consecutiveExtinctions = 0;
+//            }
+//            return; // <-- Forhindrer retreat!
+//        }
+//        // =======================================================
+//
+//        int retreatSize = (consecutiveExtinctions == 1) ? 8 : (consecutiveExtinctions == 2) ? 20 : 40;
+//        if (lockedPieces > retreatSize) {
+//            String msg = "\n" + timestamp() + "[!] EXTINCTION EVENT (" + consecutiveExtinctions + " failures)!\n" +
+//                    timestamp() + "[!] Structural dead-end detected. Retreating " + retreatSize + " steps to " + (deepestStep - retreatSize);
+//
+//            retreat(deepestStep - retreatSize, msg);
+//        } else {
+//            retreat(0, null);
+//        }
+//        if (consecutiveExtinctions >= 3) {
+//            consecutiveExtinctions = 0;
+//        }
+//    }
 
     private void handleExtinctionEvent(int lockedPieces) {
         consecutiveExtinctions++;
 
         // =======================================================
-        // THE ENDGAME ANCHOR: NEVER RETREAT IN THE LATE GAME!
+        // ANKER-LOGIK: KUN SPIRAL MÅ TRÆKKE SIG TILBAGE
         // =======================================================
-        if (absoluteHighScore >= SWISS_CHEESE_LEVEL) {
+        if (currentStrategy == BuildStrategy.TYPEWRITER) {
             deepestStep = absoluteHighScore;
-            if (consecutiveExtinctions >= 3) {
-                consecutiveExtinctions = 0;
-            }
-            return; // <-- Forhindrer retreat!
+            if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
+            return;
         }
         // =======================================================
 
+        // Herunder kører koden kun, hvis strategien er SPIRAL
         int retreatSize = (consecutiveExtinctions == 1) ? 8 : (consecutiveExtinctions == 2) ? 20 : 40;
         if (lockedPieces > retreatSize) {
             String msg = "\n" + timestamp() + "[!] EXTINCTION EVENT (" + consecutiveExtinctions + " failures)!\n" +
@@ -754,9 +797,7 @@ public class MasterSolverPBP implements Runnable {
         } else {
             retreat(0, null);
         }
-        if (consecutiveExtinctions >= 3) {
-            consecutiveExtinctions = 0;
-        }
+        if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
     }
 
     private boolean handleWorkerException(ExecutionException e) {
@@ -774,16 +815,28 @@ public class MasterSolverPBP implements Runnable {
 
     private void handleSearchExhaustion(int lockedPieces) {
         consecutiveExhaustions++;
-        if (lockedPieces > 0) {
-            int retreat = (currentStrategy == BuildStrategy.TYPEWRITER &&
-                    (System.currentTimeMillis() - lastProgressTimestamp) / 60000 >= 2) ? 50 : 10;
-            if (retreat == 50) {
-                System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Retreating 50 steps.");
-            }
 
-            retreat(deepestStep - retreat, timestamp() + ">>> Base camp exhausted. Searching new path...");
-        } else if (currentStrategy == BuildStrategy.TYPEWRITER && useGpu) {
-            System.out.println(timestamp() + ">>> [FIXED MODE] Seeds exhausted. Restarting search...");
+        // =======================================================
+        // ANKER-LOGIK: KUN SPIRAL MÅ TRÆKKE SIG TILBAGE
+        // =======================================================
+        if (currentStrategy == BuildStrategy.TYPEWRITER) {
+            if (consecutiveExhaustions >= 15) {
+                // If we are stuck with 0 seeds 3 times in a row, the base camp is "poisoned".
+                // We must retreat slightly to find a branch that actually has seeds.
+                int retreatAmount = 5 + new Random().nextInt(30);
+                retreat(deepestStep - retreatAmount, timestamp() + ">>> [RECOVERY] Zero seeds found repeatedly. Retreating " + retreatAmount + " pieces to find a healthy branch...");
+                consecutiveExhaustions = 0;
+            } else {
+                deepestStep = absoluteHighScore;
+            }
+            return;
+        }
+        // =======================================================
+
+        // Herunder kører koden kun, hvis strategien er SPIRAL
+        if (lockedPieces > 0) {
+            int retreat = 10; // Standard retreat for Spiral
+            retreat(deepestStep - retreat, timestamp() + ">>> Base camp exhausted. Searching new path (SPIRAL)...");
         } else {
             System.out.println(timestamp() + "Total search space exhausted.");
         }
@@ -795,7 +848,7 @@ public class MasterSolverPBP implements Runnable {
         if (lockCenter) {
             bestBoard[135] = targetPiece;
         }
-        updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
+        updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
         if (logMessage != null) {
             System.out.println(logMessage);
         }
@@ -804,6 +857,12 @@ public class MasterSolverPBP implements Runnable {
     private void resetCounters() {
         consecutiveExtinctions = 0;
         consecutiveExhaustions = 0;
+    }
+
+    private int countPieces(int[] board) {
+        int count = 0;
+        for (int p : board) if (p != -1 && p != -2) count++;
+        return count;
     }
 
     private int[][] buildDisplayBoard(int[] sourceArray) {
@@ -980,10 +1039,13 @@ public class MasterSolverPBP implements Runnable {
         return swissCheeseBoards;
     }
 
-    private void updateDisplay(int score, int[][] displayBoard) {
-        Main.updateDisplay(score, displayBoard);
-    }
-
+//    private void updateDisplay(int score, int[][] displayBoard) {
+//        Main.updateDisplay(score, displayBoard);
+//    }
+private void updateDisplay(int score, int[][] displayBoard) {
+    // Nu sender den altid både det aktuelle antal brikker og rekorden til titelbaren!
+    Main.updateDisplay(score, this.absoluteHighScore, displayBoard);
+}
 
     public enum BuildStrategy {
         TYPEWRITER, SPIRAL
@@ -1003,6 +1065,7 @@ public class MasterSolverPBP implements Runnable {
         private final int[] localResumeBoard = new int[256];
         private final boolean[] localUsed = new boolean[256];
         private final Random rnd = new Random();
+        private long localTrialCount = 0;
         private final int activeBatch;
 
         public SearchWorker(int activeBatch) {
@@ -1077,11 +1140,23 @@ public class MasterSolverPBP implements Runnable {
             if (currentBatchSize.get() >= activeBatch) {
                 return false;
             }
+
+            localTrialCount++;
+            if (localTrialCount >= 100000) { // Batch updates to avoid memory contention
+                globalTrialCount.addAndGet(localTrialCount);
+                localTrialCount = 0;
+            }
+
             if (step == 256) {
                 return true;
             }
 
             int boardIdx = buildOrder[step];
+            if (localBoard[boardIdx] != -1) {
+                if (useGpu && step == handoffDepth) return registerGpuSeed();
+                return solve(step + 1);
+            }
+
             if (lockCenter && boardIdx == 135) {
                 return solve(step + 1);
             }
@@ -1169,7 +1244,7 @@ public class MasterSolverPBP implements Runnable {
                     if (step > deepestStep) {
                         deepestStep = step;
 
-                        updateDisplay(deepestStep, buildDisplayBoard(localBoard));
+                        updateDisplay(countPieces(localBoard), buildDisplayBoard(localBoard));
 
                         if (deepestStep > absoluteHighScore) {
                             absoluteHighScore = deepestStep;
