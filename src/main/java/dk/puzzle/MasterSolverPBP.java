@@ -82,6 +82,8 @@ public class MasterSolverPBP implements Runnable {
     private long totalRepairVariationsTested = 0;
     private long repairStartTime = 0;
     private volatile double targetedHolesPercentage = 0.70;
+    private final int[] tabuTenure = new int[256]; // Holder styr på hvornår en brik "frigives" fra Tabu
+    private int currentRepairIteration = 0;        // Tæller hvor mange batches vi har skudt afsted
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                            boolean lockCenter) {
@@ -443,21 +445,35 @@ public class MasterSolverPBP implements Runnable {
 
             synchronized (displayLock) {
                 if (resultHighScore[0] > absoluteHighScore) {
+
+                    // =======================================================
+                    // TABU SEARCH: IDENTIFICER NYE/FLYTTE BRIKKER OG FRED DEM!
+                    // =======================================================
+                    int changedPieces = 0;
+                    for (int i = 0; i < 256; i++) {
+                        // Hvis feltet har ændret sig (f.eks. fået en ny brik)
+                        if (repairedBoard[i] != bestBoard[i] && repairedBoard[i] != -1) {
+                            // Sæt feltet på Tabu-listen i de næste 100 batches!
+                            // (Kirurgen tvinges nu til at bygge videre udenom disse felter)
+                            tabuTenure[i] = currentRepairIteration + 100;
+                            changedPieces++;
+                        }
+                    }
+                    System.out.println(timestamp() + ">>> TABU SEARCH: Fredet " + changedPieces + " nyligt flyttede brikker for de næste 100 batches.");
+                    // =======================================================
+
                     absoluteHighScore = resultHighScore[0];
-                    deepestStep = absoluteHighScore; // Opdater base camp
+                    deepestStep = absoluteHighScore;
                     System.arraycopy(repairedBoard, 0, bestBoard, 0, 256);
                     updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
 
-                    // Gem billeder og filer af det nye reparerede bræt!
                     RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                    CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore,
-                            saveProfile);
+                    CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
 
                     System.out.println("\n" + timestamp() + ">>> KIRURGEN SLOG REKORDEN! NY HIGH SCORE: " + absoluteHighScore + " <<<");
                 }
             }
         }
-
         // Did the surgeon actually SOLVE the whole puzzle?
         int[] solved = new int[1];
         cuMemcpyDtoH(Pointer.to(solved), d_solvedFlag, Sizeof.INT);
@@ -692,6 +708,8 @@ public class MasterSolverPBP implements Runnable {
             repairLoopsCounter++;
             long now = System.currentTimeMillis();
             List<int[]> swissCheeseBoards = punchHolesInBestBoard(bestBoard, numClones, holesToPunch);
+            // Tæl op for hver eneste Tabu-runde
+            currentRepairIteration++;
 
             if (now - lastRepairPrintTime > 2000) {
                 long secondsRunning = (now - repairStartTime) / 1000;
@@ -962,9 +980,15 @@ public class MasterSolverPBP implements Runnable {
 
         for (int i = 0; i < 256; i++) {
             if (sourceBoard[i] != -1 && sourceBoard[i] != -2) {
-                if (lockCenter && i == 135) {
-                    continue;
+                if (lockCenter && i == 135) continue;
+
+                // ========================================================
+                // TABU SEARCH FILTER: Må vi røre denne brik?
+                // ========================================================
+                if (tabuTenure[i] > currentRepairIteration) {
+                    continue; // BRIKKEN ER FREDET! Vi må ikke skyde hul i den.
                 }
+
                 placedIndices[placedCount++] = i;
             }
         }
