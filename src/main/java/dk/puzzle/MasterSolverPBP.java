@@ -2,23 +2,7 @@ package dk.puzzle;
 
 import jcuda.Pointer;
 import jcuda.Sizeof;
-import jcuda.driver.CUcontext;
-import jcuda.driver.CUdevice;
-import jcuda.driver.CUdeviceptr;
-import jcuda.driver.CUfunction;
-import jcuda.driver.CUmodule;
-import jcuda.driver.JCudaDriver;
-import static jcuda.driver.JCudaDriver.cuCtxCreate;
-import static jcuda.driver.JCudaDriver.cuCtxSynchronize;
-import static jcuda.driver.JCudaDriver.cuDeviceGet;
-import static jcuda.driver.JCudaDriver.cuInit;
-import static jcuda.driver.JCudaDriver.cuLaunchKernel;
-import static jcuda.driver.JCudaDriver.cuMemAlloc;
-import static jcuda.driver.JCudaDriver.cuMemFree;
-import static jcuda.driver.JCudaDriver.cuMemcpyDtoH;
-import static jcuda.driver.JCudaDriver.cuMemcpyHtoD;
-import static jcuda.driver.JCudaDriver.cuModuleGetFunction;
-import static jcuda.driver.JCudaDriver.cuModuleLoad;
+import jcuda.driver.*;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -26,14 +10,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+
+import static jcuda.driver.JCudaDriver.*;
 
 public class MasterSolverPBP implements Runnable {
 
@@ -55,13 +36,14 @@ public class MasterSolverPBP implements Runnable {
     private final AtomicInteger currentBatchSize = new AtomicInteger(0);
     private final java.util.Set<Long> structuralDiversityFilter = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final AtomicLong globalTrialCount = new AtomicLong(0);
-    private long lastThroughputReportTime = System.currentTimeMillis();
     private final int[] buildOrder;
     private final int[][] piecesByNorth = new int[256][];
     private final int[][] piecesByEast = new int[256][];
     private final int[][] piecesBySouth = new int[256][];
     private final int[][] piecesByWest = new int[256][];
     private final int[] recordBoard = new int[256];
+    private final int[] tabuTenure = new int[256]; // Holder styr på hvornår en brik "frigives" fra Tabu
+    private long lastThroughputReportTime = System.currentTimeMillis();
     private CUfunction dfsFunction;
     private CUfunction repairFunction;
     private int centerPhysicalIdx = -1;
@@ -82,7 +64,6 @@ public class MasterSolverPBP implements Runnable {
     private long totalRepairVariationsTested = 0;
     private long repairStartTime = 0;
     private volatile double targetedHolesPercentage = 0.70;
-    private final int[] tabuTenure = new int[256]; // Holder styr på hvornår en brik "frigives" fra Tabu
     private int currentRepairIteration = 0;        // Tæller hvor mange batches vi har skudt afsted
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
@@ -343,7 +324,7 @@ public class MasterSolverPBP implements Runnable {
                             RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
                             CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore,
                                     saveProfile);
-                            System.out.println(timestamp() + ">>> NY ALL-TIME HIGH SCORE (GPU): " + absoluteHighScore + " PIECES! <<<");
+                            System.out.println(timestamp() + ">>> NEW ALL-TIME HIGH SCORE (GPU): " + absoluteHighScore + " PIECES! <<<");
                         }
                     }
                 }
@@ -566,7 +547,7 @@ public class MasterSolverPBP implements Runnable {
                     long trials = globalTrialCount.getAndSet(0);
                     double tps = trials / (elapsed / 1000.0);
                     System.out.printf("%s[STATS] Throughput: %,.0f trials/sec (Total in window: %,d)\n",
-                                      timestamp(), tps, trials);
+                            timestamp(), tps, trials);
                     lastThroughputReportTime = now;
                 }
 
@@ -611,6 +592,7 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private void handleGlobalStagnation() {
+        if (currentStrategy == BuildStrategy.TYPEWRITER) return;
         long minutesSinceProgress = (System.currentTimeMillis() - lastProgressTimestamp) / 60000;
         if (minutesSinceProgress >= stagnationLimitMinutes && deepestStep > 0 && deepestStep <= SWISS_CHEESE_LEVEL) {
             int deepRetreat = 40 + new Random().nextInt(41);
@@ -721,7 +703,7 @@ public class MasterSolverPBP implements Runnable {
                 int[] visualBoard = new int[256];
                 System.arraycopy(swissCheeseBoards.get(0), 0, visualBoard, 0, 256);
 
-                for(int i = 0; i < 256; i++) {
+                for (int i = 0; i < 256; i++) {
                     if (visualBoard[i] == -2) visualBoard[i] = -1;
                 }
                 updateDisplay(countPieces(visualBoard), buildDisplayBoard(visualBoard));
@@ -763,35 +745,6 @@ public class MasterSolverPBP implements Runnable {
         return true;
     }
 
-//    private void handleExtinctionEvent(int lockedPieces) {
-//        consecutiveExtinctions++;
-//
-//        // =======================================================
-//        // THE ENDGAME ANCHOR: NEVER RETREAT IN THE LATE GAME!
-//        // =======================================================
-//        if (absoluteHighScore >= SWISS_CHEESE_LEVEL) {
-//            deepestStep = absoluteHighScore;
-//            if (consecutiveExtinctions >= 3) {
-//                consecutiveExtinctions = 0;
-//            }
-//            return; // <-- Forhindrer retreat!
-//        }
-//        // =======================================================
-//
-//        int retreatSize = (consecutiveExtinctions == 1) ? 8 : (consecutiveExtinctions == 2) ? 20 : 40;
-//        if (lockedPieces > retreatSize) {
-//            String msg = "\n" + timestamp() + "[!] EXTINCTION EVENT (" + consecutiveExtinctions + " failures)!\n" +
-//                    timestamp() + "[!] Structural dead-end detected. Retreating " + retreatSize + " steps to " + (deepestStep - retreatSize);
-//
-//            retreat(deepestStep - retreatSize, msg);
-//        } else {
-//            retreat(0, null);
-//        }
-//        if (consecutiveExtinctions >= 3) {
-//            consecutiveExtinctions = 0;
-//        }
-//    }
-
     private void handleExtinctionEvent(int lockedPieces) {
         consecutiveExtinctions++;
 
@@ -824,7 +777,14 @@ public class MasterSolverPBP implements Runnable {
             manualOverrideRequested = false;
             retreat(manualBaseCampTarget,
                     "\n" + timestamp() + "[!] MANUAL OVERRIDE! Jumping to " + manualBaseCampTarget);
+
+            // Fix: ensure absoluteHighScore is updated to reflect the new state,
+            // allowing us to exit Surgeon/Repair mode if necessary.
             deepestStep = manualBaseCampTarget + 30;
+            absoluteHighScore = deepestStep;
+            lastProgressTimestamp = System.currentTimeMillis();
+            resetCounters();
+
             return true;
         }
         e.printStackTrace();
@@ -1063,13 +1023,13 @@ public class MasterSolverPBP implements Runnable {
         return swissCheeseBoards;
     }
 
-//    private void updateDisplay(int score, int[][] displayBoard) {
+    //    private void updateDisplay(int score, int[][] displayBoard) {
 //        Main.updateDisplay(score, displayBoard);
 //    }
-private void updateDisplay(int score, int[][] displayBoard) {
-    // Nu sender den altid både det aktuelle antal brikker og rekorden til titelbaren!
-    Main.updateDisplay(score, this.absoluteHighScore, displayBoard);
-}
+    private void updateDisplay(int score, int[][] displayBoard) {
+        // Nu sender den altid både det aktuelle antal brikker og rekorden til titelbaren!
+        Main.updateDisplay(score, this.absoluteHighScore, displayBoard);
+    }
 
     public enum BuildStrategy {
         TYPEWRITER, SPIRAL
@@ -1089,8 +1049,8 @@ private void updateDisplay(int score, int[][] displayBoard) {
         private final int[] localResumeBoard = new int[256];
         private final boolean[] localUsed = new boolean[256];
         private final Random rnd = new Random();
-        private long localTrialCount = 0;
         private final int activeBatch;
+        private long localTrialCount = 0;
 
         public SearchWorker(int activeBatch) {
             this.activeBatch = activeBatch;

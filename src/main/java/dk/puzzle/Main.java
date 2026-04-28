@@ -233,7 +233,6 @@ public class Main {
         }
     }
 
-    // Udskift din nuværende updateDisplay metode med denne:
     public static synchronized void updateDisplay(int current, int record, int[][] board) {
         currentScore.set(current);
         highScore.set(record);
