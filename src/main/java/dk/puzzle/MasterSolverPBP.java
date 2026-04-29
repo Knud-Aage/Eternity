@@ -42,6 +42,7 @@ public class MasterSolverPBP implements Runnable {
     private final int[][] piecesBySouth = new int[256][];
     private final int[][] piecesByWest = new int[256][];
     private final int[] recordBoard = new int[256];
+    private final CompatibilityIndex compatIndex;
     private final int[] tabuTenure = new int[256]; // Holder styr på hvornår en brik "frigives" fra Tabu
     private long lastThroughputReportTime = System.currentTimeMillis();
     private CUfunction dfsFunction;
@@ -64,7 +65,8 @@ public class MasterSolverPBP implements Runnable {
     private long totalRepairVariationsTested = 0;
     private long repairStartTime = 0;
     private volatile double targetedHolesPercentage = 0.70;
-    private int currentRepairIteration = 0;        // Tæller hvor mange batches vi har skudt afsted
+    private int currentRepairIteration = 0;
+
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                            boolean lockCenter) {
@@ -141,16 +143,6 @@ public class MasterSolverPBP implements Runnable {
             tempWest[i] = new java.util.HashSet<>();
         }
 
-        for (int i = 0; i < 1024; i++) {
-            int p = inventory.allOrientations[i];
-            int physId = inventory.physicalMapping[i];
-
-            tempNorth[PieceUtils.getNorth(p)].add(physId);
-            tempEast[PieceUtils.getEast(p)].add(physId);
-            tempSouth[PieceUtils.getSouth(p)].add(physId);
-            tempWest[PieceUtils.getWest(p)].add(physId);
-        }
-
         // Convert to fast native int arrays
         for (int i = 0; i < 256; i++) {
             piecesByNorth[i] = tempNorth[i].stream().mapToInt(Integer::intValue).toArray();
@@ -158,6 +150,7 @@ public class MasterSolverPBP implements Runnable {
             piecesBySouth[i] = tempSouth[i].stream().mapToInt(Integer::intValue).toArray();
             piecesByWest[i] = tempWest[i].stream().mapToInt(Integer::intValue).toArray();
         }
+        this.compatIndex = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
     }
 
     private static int[] generateTypewriterOrder() {
@@ -1162,39 +1155,90 @@ public class MasterSolverPBP implements Runnable {
             int e = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(localBoard[boardIdx + 1])
                                        : PieceUtils.WILDCARD);
 
-            List<Integer> pool = getCandidatePool(row, col);
-            int size = pool.size();
-            int offset = rnd.nextInt(size);
+            int northReq = (row == 0) ? 0 : (localBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(localBoard[boardIdx - 16]) : CompatibilityIndex.WILDCARD);
+            int westReq  = (col == 0) ? 0 : (localBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(localBoard[boardIdx - 1])  : CompatibilityIndex.WILDCARD);
+            int southReq = (row == 15) ? 0 : CompatibilityIndex.WILDCARD;
+            int eastReq  = (col == 15) ? 0 : CompatibilityIndex.WILDCARD;
 
-            for (int i = 0; i < size; i++) {
-                if (currentBatchSize.get() >= activeBatch) {
-                    return false;
+            // 1. Slå op i BitMask indekset!
+            java.util.BitSet candidates = compatIndex.candidatesFor(northReq, eastReq, southReq, westReq);
+            compatIndex.andNotUsed(candidates, localUsed);
+
+            // 2. Hvis vi har en ghost-brik (resumeBoard), tvinger vi den til at bruge den
+            if (localResumeBoard[boardIdx] != -1) {
+                int resumeP = localResumeBoard[boardIdx];
+                for (int oi = candidates.nextSetBit(0); oi >= 0; oi = candidates.nextSetBit(oi + 1)) {
+                    if (inventory.allOrientations[oi] != resumeP) candidates.clear(oi);
                 }
+            }
 
-                int orientationIdx = pool.get((i + offset) % size);
+            int candidateCount = candidates.cardinality();
+            if (candidateCount == 0) return false;
+
+            // 3. Konverter de overlevende bits til et randomiseret array
+            int[] orientIdxs = new int[candidateCount];
+            int k = 0;
+            for (int oi = candidates.nextSetBit(0); oi >= 0; oi = candidates.nextSetBit(oi + 1)) {
+                orientIdxs[k++] = oi;
+            }
+            int offset = rnd.nextInt(candidateCount);
+
+            // 4. Test brikkerne
+            for (int i = 0; i < candidateCount; i++) {
+                if (currentBatchSize.get() >= activeBatch) return false;
+
+                int orientationIdx = orientIdxs[(i + offset) % candidateCount];
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
 
-                if (localUsed[physicalIdx] || (localResumeBoard[boardIdx] != -1 && p != localResumeBoard[boardIdx])) {
-                    continue;
-                }
-
-                if (matches(p, n, e, s, w) && passesLookahead(p, step, row, col, boardIdx)) {
+                // PassesLookahead tjekker "The Future"
+                if (passesLookahead(p, step, row, col, boardIdx)) {
                     localBoard[boardIdx] = p;
                     localUsed[physicalIdx] = true;
                     int ghost = localResumeBoard[boardIdx];
                     localResumeBoard[boardIdx] = -1;
 
-                    if (solve(step + 1)) {
-                        return true;
-                    }
+                    if (solve(step + 1)) return true;
 
+                    // Backtrack
                     localBoard[boardIdx] = -1;
                     localUsed[physicalIdx] = false;
                     localResumeBoard[boardIdx] = ghost;
                 }
             }
             return false;
+//            List<Integer> pool = getCandidatePool(row, col);
+//            int size = pool.size();
+//            int offset = rnd.nextInt(size);
+//
+//            for (int i = 0; i < size; i++) {
+//                if (currentBatchSize.get() >= activeBatch) {
+//                    return false;
+//                }
+//
+//                int orientationIdx = pool.get((i + offset) % size);
+//                int p = inventory.allOrientations[orientationIdx];
+//                int physicalIdx = inventory.physicalMapping[orientationIdx];
+//
+//                if (localUsed[physicalIdx] || (localResumeBoard[boardIdx] != -1 && p != localResumeBoard[boardIdx])) {
+//                    continue;
+//                }
+//
+//                if (matches(p, n, e, s, w) && passesLookahead(p, step, row, col, boardIdx)) {
+//                    localBoard[boardIdx] = p;
+//                    localUsed[physicalIdx] = true;
+//                    int ghost = localResumeBoard[boardIdx];
+//                    localResumeBoard[boardIdx] = -1;
+//
+//                    if (solve(step + 1)) {
+//                        return true;
+//                    }
+//
+//                    localBoard[boardIdx] = -1;
+//                    localUsed[physicalIdx] = false;
+//                    localResumeBoard[boardIdx] = ghost;
+//                }
+//            }
         }
 
         private boolean registerGpuSeed() {
@@ -1252,21 +1296,58 @@ public class MasterSolverPBP implements Runnable {
         }
 
         private boolean passesLookahead(int p, int step, int row, int col, int idx) {
+            // --- Check south neighbor ---
             if (row < 15 && localBoard[idx + 16] == -1) {
                 int reqN = PieceUtils.getSouth(p);
-                if (!hasAvailablePiece(piecesByNorth[reqN])) {
+                int reqW = (col > 0 && localBoard[idx + 15] != -1)
+                        ? PieceUtils.getEast(localBoard[idx + 15])
+                        : CompatibilityIndex.WILDCARD;
+                int reqE = (col < 15) ? CompatibilityIndex.WILDCARD : 0; // border
+                int reqS = (row == 14) ? 0 : CompatibilityIndex.WILDCARD; // border på række 15
+
+                if (!compatIndex.hasAnyCandidate(reqN, reqE, reqS, reqW, localUsed)) {
                     return false;
                 }
-                if (step > 40 && row < 14 && localBoard[idx + 32] == -1 && !isSecondaryNeighborViable(reqN)) {
-                    return false;
+
+                if (step > 40 && row < 14 && localBoard[idx + 32] == -1) {
+                    if (!isSecondaryNeighborViable(reqN)) {
+                        return false;
+                    }
                 }
             }
+
+            // --- Check east neighbor ---
             if (col < 15 && localBoard[idx + 1] == -1) {
                 int reqW = PieceUtils.getEast(p);
-                return hasAvailablePiece(piecesByWest[reqW]);
+                int reqN = (row > 0 && localBoard[idx - 15] != -1)
+                        ? PieceUtils.getSouth(localBoard[idx - 15])
+                        : CompatibilityIndex.WILDCARD;
+                int reqS = (row < 15) ? CompatibilityIndex.WILDCARD : 0; // border
+                int reqE = (col == 14) ? 0 : CompatibilityIndex.WILDCARD; // border på sidste kolonne
+
+                if (!compatIndex.hasAnyCandidate(reqN, reqE, reqS, reqW, localUsed)) {
+                    return false;
+                }
             }
             return true;
         }
+
+//        private boolean passesLookahead(int p, int step, int row, int col, int idx) {
+//            if (row < 15 && localBoard[idx + 16] == -1) {
+//                int reqN = PieceUtils.getSouth(p);
+//                if (!hasAvailablePiece(piecesByNorth[reqN])) {
+//                    return false;
+//                }
+//                if (step > 40 && row < 14 && localBoard[idx + 32] == -1 && !isSecondaryNeighborViable(reqN)) {
+//                    return false;
+//                }
+//            }
+//            if (col < 15 && localBoard[idx + 1] == -1) {
+//                int reqW = PieceUtils.getEast(p);
+//                return hasAvailablePiece(piecesByWest[reqW]);
+//            }
+//            return true;
+//        }
 
         private boolean matches(int p, int n, int e, int s, int w) {
             if (n != PieceUtils.WILDCARD && ((p >>> 24) & 0xFF) != n) {
