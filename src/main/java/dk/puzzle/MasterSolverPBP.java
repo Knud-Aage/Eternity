@@ -99,7 +99,7 @@ public class MasterSolverPBP implements Runnable {
             handoffDepth = 70;
         } else {
             buildOrder = generateTypewriterOrder();
-            handoffDepth = 50;
+            handoffDepth = 200;
         }
 
         int[][] loaded = CheckpointManager.loadSmartCheckpoint(saveProfile);
@@ -151,6 +151,7 @@ public class MasterSolverPBP implements Runnable {
             piecesByWest[i] = tempWest[i].stream().mapToInt(Integer::intValue).toArray();
         }
         this.compatIndex = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
+        this.handoffDepth = 170;
     }
 
     private static int[] generateTypewriterOrder() {
@@ -606,8 +607,13 @@ public class MasterSolverPBP implements Runnable {
                 handoffDepth = lockedPieces + 28;
                 targetBatchSize = 8000;
             } else {
-                lockedPieces = Math.max(0, deepestStep - 45);
-                handoffDepth = lockedPieces + 30;
+                if (deepestStep > 0) {
+                    lockedPieces = Math.max(0, deepestStep - 45);
+                    handoffDepth = lockedPieces + 30;
+                } else {
+                    lockedPieces = 0;
+                    handoffDepth = 200;
+                }
                 targetBatchSize = 10000;
             }
             if (lockedPieces == 0 && deepestStep > 0) {
@@ -690,8 +696,8 @@ public class MasterSolverPBP implements Runnable {
                 long secondsRunning = (now - repairStartTime) / 1000;
                 String timeFormatted = String.format("%02d:%02d:%02d", secondsRunning / 3600, (secondsRunning % 3600) / 60, secondsRunning % 60);
 
-//                System.out.println(String.format("%s >>> [REPAIR MODE] Uptime: %s | Speed: %d batches/sec | Total variations: %,d",
-//                        timestamp(), timeFormatted, (repairLoopsCounter / 2), totalRepairVariationsTested));
+                System.out.println(String.format("%s >>> [REPAIR MODE] Uptime: %s | Speed: %d batches/sec | Total variations: %,d",
+                        timestamp(), timeFormatted, (repairLoopsCounter / 2), totalRepairVariationsTested));
                 // =======================================================
                 int[] visualBoard = new int[256];
                 System.arraycopy(swissCheeseBoards.get(0), 0, visualBoard, 0, 256);
@@ -728,7 +734,7 @@ public class MasterSolverPBP implements Runnable {
             resetCounters();
             return false;
         } else if (foundSeeds > 0) {
-            System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch to GPU...");
+//            System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch to GPU...");
             runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, 120);
             resetCounters();
             return true;
@@ -1156,9 +1162,9 @@ public class MasterSolverPBP implements Runnable {
                                        : PieceUtils.WILDCARD);
 
             int northReq = (row == 0) ? 0 : (localBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(localBoard[boardIdx - 16]) : CompatibilityIndex.WILDCARD);
+            int southReq = (row == 15) ? 0 : (localBoard[boardIdx + 16] != -1 ? PieceUtils.getNorth(localBoard[boardIdx + 16]) : CompatibilityIndex.WILDCARD);
             int westReq  = (col == 0) ? 0 : (localBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(localBoard[boardIdx - 1])  : CompatibilityIndex.WILDCARD);
-            int southReq = (row == 15) ? 0 : CompatibilityIndex.WILDCARD;
-            int eastReq  = (col == 15) ? 0 : CompatibilityIndex.WILDCARD;
+            int eastReq  = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(localBoard[boardIdx + 1]) : CompatibilityIndex.WILDCARD);
 
             // 1. Slå op i BitMask indekset!
             java.util.BitSet candidates = compatIndex.candidatesFor(northReq, eastReq, southReq, westReq);
@@ -1299,31 +1305,46 @@ public class MasterSolverPBP implements Runnable {
             // --- Check south neighbor ---
             if (row < 15 && localBoard[idx + 16] == -1) {
                 int reqN = PieceUtils.getSouth(p);
-                int reqW = (col > 0 && localBoard[idx + 15] != -1)
-                        ? PieceUtils.getEast(localBoard[idx + 15])
-                        : CompatibilityIndex.WILDCARD;
-                int reqE = (col < 15) ? CompatibilityIndex.WILDCARD : 0; // border
-                int reqS = (row == 14) ? 0 : CompatibilityIndex.WILDCARD; // border på række 15
+                int reqE = (col == 15) ? 0 : (localBoard[idx + 17] != -1 ? PieceUtils.getWest(localBoard[idx + 17]) : CompatibilityIndex.WILDCARD);
+                int reqW = (col == 0)  ? 0 : (localBoard[idx + 15] != -1 ? PieceUtils.getEast(localBoard[idx + 15]) : CompatibilityIndex.WILDCARD);
+                int reqS = (row == 14) ? 0 : (localBoard[idx + 32] != -1 ? PieceUtils.getNorth(localBoard[idx + 32]) : CompatibilityIndex.WILDCARD);
 
-                if (!compatIndex.hasAnyCandidate(reqN, reqE, reqS, reqW, localUsed)) {
+                // 1. Hent alle gyldige kandidater til naboen direkte mod syd
+                java.util.BitSet southCandidates = compatIndex.candidatesFor(reqN, reqE, reqS, reqW);
+                compatIndex.andNotUsed(southCandidates, localUsed);
+
+                if (southCandidates.isEmpty()) {
                     return false;
                 }
 
+                // =======================================================
+                // NYT BITMASK SECONDARY LOOKAHEAD (Løser 41-brikkers muren!)
+                // =======================================================
                 if (step > 40 && row < 14 && localBoard[idx + 32] == -1) {
-                    if (!isSecondaryNeighborViable(reqN)) {
-                        return false;
+                    boolean secondaryFound = false;
+                    // Tjek om bare én af syd-kandidaterne OGSÅ har en gyldig nabo under sig
+                    for (int i = southCandidates.nextSetBit(0); i >= 0; i = southCandidates.nextSetBit(i + 1)) {
+                        int testPiece = inventory.allOrientations[i];
+                        int nextReqN = PieceUtils.getSouth(testPiece);
+
+                        if (compatIndex.hasAnyCandidate(nextReqN, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, localUsed)) {
+                            secondaryFound = true;
+                            break; // Vi fandt en vej frem, afbryd søgningen (lynhurtigt!)
+                        }
+                    }
+                    if (!secondaryFound) {
+                        return false; // Død ende opdaget i række 2!
                     }
                 }
+                // =======================================================
             }
 
             // --- Check east neighbor ---
             if (col < 15 && localBoard[idx + 1] == -1) {
                 int reqW = PieceUtils.getEast(p);
-                int reqN = (row > 0 && localBoard[idx - 15] != -1)
-                        ? PieceUtils.getSouth(localBoard[idx - 15])
-                        : CompatibilityIndex.WILDCARD;
-                int reqS = (row < 15) ? CompatibilityIndex.WILDCARD : 0; // border
-                int reqE = (col == 14) ? 0 : CompatibilityIndex.WILDCARD; // border på sidste kolonne
+                int reqN = (row == 0)  ? 0 : (localBoard[idx - 15] != -1 ? PieceUtils.getSouth(localBoard[idx - 15]) : CompatibilityIndex.WILDCARD);
+                int reqE = (col == 14) ? 0 : (localBoard[idx + 2]  != -1 ? PieceUtils.getWest(localBoard[idx + 2])   : CompatibilityIndex.WILDCARD);
+                int reqS = (row == 15) ? 0 : (localBoard[idx + 17] != -1 ? PieceUtils.getNorth(localBoard[idx + 17]) : CompatibilityIndex.WILDCARD);
 
                 if (!compatIndex.hasAnyCandidate(reqN, reqE, reqS, reqW, localUsed)) {
                     return false;
