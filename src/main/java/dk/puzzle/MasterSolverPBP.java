@@ -18,7 +18,7 @@ import static jcuda.driver.JCudaDriver.*;
 
 public class MasterSolverPBP implements Runnable {
 
-    public static final int SWISS_CHEESE_LEVEL = 214;
+    public static final int SWISS_CHEESE_LEVEL = 208;
     private final PieceInventory inventory;
     private final int[] flatBoard = new int[256];
     private final int[] bestBoard = new int[256];
@@ -430,7 +430,7 @@ public class MasterSolverPBP implements Runnable {
                         if (repairedBoard[i] != bestBoard[i] && repairedBoard[i] != -1) {
                             // Sæt feltet på Tabu-listen i de næste 100 batches!
                             // (Kirurgen tvinges nu til at bygge videre udenom disse felter)
-                            tabuTenure[i] = currentRepairIteration + 100;
+                            tabuTenure[i] = currentRepairIteration + 25;
                             changedPieces++;
                         }
                     }
@@ -601,25 +601,28 @@ public class MasterSolverPBP implements Runnable {
 
     private int updateHandoffConfig() {
         int lockedPieces = 0;
-        if (currentStrategy == BuildStrategy.TYPEWRITER && useGpu) {
-            if (deepestStep > 160) {
-                lockedPieces = Math.max(0, deepestStep - 60);
-                handoffDepth = lockedPieces + 28;
-                targetBatchSize = 8000;
-            } else {
-                if (deepestStep > 0) {
-                    lockedPieces = Math.max(0, deepestStep - 45);
-                    handoffDepth = lockedPieces + 30;
+
+        if (currentStrategy == BuildStrategy.TYPEWRITER) {
+            lockedPieces = Math.max(0, deepestStep - 40);
+
+            if (useGpu) {
+                if (deepestStep < 190) {
+                    handoffDepth = 190; // Tvinger CPU'en til at fortsætte!
+                    targetBatchSize = 10000;
                 } else {
-                    lockedPieces = 0;
-                    handoffDepth = 200;
+                    handoffDepth = lockedPieces + 30;
+                    targetBatchSize = 8000;
                 }
+            } else {
+                handoffDepth = lockedPieces + 40;
                 targetBatchSize = 10000;
             }
+
             if (lockedPieces == 0 && deepestStep > 0) {
                 retreat(0, null);
             }
-        } else if (deepestStep > 0) {
+        } else {
+            // Spiral (Beholdt som fallback)
             int retreatDistance = (deepestStep > 180) ? 80 : 30;
             lockedPieces = Math.max(0, deepestStep - retreatDistance);
             int gap = (lockedPieces > 180) ? 10 : (lockedPieces > 150) ? 12 : 15;
@@ -664,123 +667,118 @@ public class MasterSolverPBP implements Runnable {
 
     private boolean handleSearchHandoff() {
         int activeBatch = (userBatchSizeOverride > 0) ? userBatchSizeOverride : targetBatchSize;
-        int radarDistance = (currentStrategy == BuildStrategy.TYPEWRITER) ? 120 : 50;
         int foundSeeds = currentBatchSize.get();
         int numClones = 10000;
         int holesToPunch = 15;
 
+        if (currentStrategy == BuildStrategy.TYPEWRITER) {
+
+            if (useGpu && absoluteHighScore >= SWISS_CHEESE_LEVEL) {
+                if (repairStartTime == 0) repairStartTime = System.currentTimeMillis();
+                totalRepairVariationsTested += numClones;
+                repairLoopsCounter++;
+
+                long now = System.currentTimeMillis();
+                List<int[]> swissCheeseBoards = punchHolesInBestBoard(bestBoard, numClones, holesToPunch);
+                currentRepairIteration++;
+
+                if (now - lastRepairPrintTime > 2000) {
+                    long secondsRunning = (now - repairStartTime) / 1000;
+                    String timeFormatted = String.format("%02d:%02d:%02d", secondsRunning / 3600, (secondsRunning % 3600) / 60, secondsRunning % 60);
+
+                    System.out.println(String.format("%s >>> [REPAIR MODE] Uptime: %s | Speed: %d batches/sec | Total variations: %,d",
+                            timestamp(), timeFormatted, (repairLoopsCounter / 2), totalRepairVariationsTested));
+
+                    // Visuel opdatering af Kirurgens huller
+                    int[] visualBoard = new int[256];
+                    System.arraycopy(swissCheeseBoards.get(0), 0, visualBoard, 0, 256);
+                    for (int i = 0; i < 256; i++) {
+                        if (visualBoard[i] == -2) visualBoard[i] = -1;
+                    }
+                    updateDisplay(countPieces(visualBoard), buildDisplayBoard(visualBoard));
+
+                    lastRepairPrintTime = now;
+                    repairLoopsCounter = 0;
+                }
+
+                runRepairGpuHandoff(swissCheeseBoards);
+                updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
+
+                consecutiveExtinctions = 0;
+                consecutiveExhaustions = 0;
+                resetCounters();
+                deepestStep = absoluteHighScore;
+                currentBatchSize.set(0); // Nulstil
+
+                return false;
+            } else {
+                currentBatchSize.set(0);
+                if (foundSeeds == 0) return true; // Hvis CPU'en kører helt fast, tillad retreat
+                return false;
+            }
+        }
+
         if (!useGpu) {
             if (foundSeeds > 0) {
-                // I CPU-mode betragter vi fundne seeds som "fundne stier".
-                // Vi nulstiller bare og lader CPU'en køre videre uden at trigge retreat.
                 currentBatchSize.set(0);
                 gpuSeedBoards.clear();
-                return false; // FALSE betyder: "Bliv hvor du er, ikke træk dig tilbage"
+                return false;
             }
             return false;
         }
-
-        if (repairStartTime == 0) repairStartTime = System.currentTimeMillis();
-        totalRepairVariationsTested += numClones;
-        repairLoopsCounter++;
-
-        if (useGpu && absoluteHighScore >= SWISS_CHEESE_LEVEL && (consecutiveExtinctions >= 1 || consecutiveExhaustions >= 1 || foundSeeds == 0)) {
-
-            repairLoopsCounter++;
-            long now = System.currentTimeMillis();
-            List<int[]> swissCheeseBoards = punchHolesInBestBoard(bestBoard, numClones, holesToPunch);
-            // Tæl op for hver eneste Tabu-runde
-            currentRepairIteration++;
-
-            if (now - lastRepairPrintTime > 2000) {
-                long secondsRunning = (now - repairStartTime) / 1000;
-                String timeFormatted = String.format("%02d:%02d:%02d", secondsRunning / 3600, (secondsRunning % 3600) / 60, secondsRunning % 60);
-
-                System.out.println(String.format("%s >>> [REPAIR MODE] Uptime: %s | Speed: %d batches/sec | Total variations: %,d",
-                        timestamp(), timeFormatted, (repairLoopsCounter / 2), totalRepairVariationsTested));
-                // =======================================================
-                int[] visualBoard = new int[256];
-                System.arraycopy(swissCheeseBoards.get(0), 0, visualBoard, 0, 256);
-
-                for (int i = 0; i < 256; i++) {
-                    if (visualBoard[i] == -2) visualBoard[i] = -1;
-                }
-                updateDisplay(countPieces(visualBoard), buildDisplayBoard(visualBoard));
-                // =======================================================
-
-                lastRepairPrintTime = now;
-                repairLoopsCounter = 0;
-            }
-            runRepairGpuHandoff(swissCheeseBoards);
-            updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
-
-            consecutiveExtinctions = 0;
-            consecutiveExhaustions = 0;
-            resetCounters();
-
-            deepestStep = absoluteHighScore;
-//            if (repairLoopsCounter == 1) {
-//                Main.updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
-//            }
-
-            return false;
-        }
-        // =========================================================
 
         if (foundSeeds >= activeBatch) {
-            if (useGpu) {
-                runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, radarDistance);
-            }
+            runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, 50);
             resetCounters();
             return false;
         } else if (foundSeeds > 0) {
-//            System.out.println(timestamp() + ">>> CPU space exhausted. Sending partial batch to GPU...");
             runGpuHandoff(new ArrayList<>(gpuSeedBoards), this.handoffDepth, 120);
             resetCounters();
             return true;
         }
-
-//        System.out.println(timestamp() + ">>> ZERO seeds found. Base Camp is a dead end.");
         return true;
     }
 
     private void handleExtinctionEvent(int lockedPieces) {
         consecutiveExtinctions++;
 
-        // =======================================================
-        // ANKER-LOGIK: KUN SPIRAL MÅ TRÆKKE SIG TILBAGE
-        // =======================================================
-        if (currentStrategy == BuildStrategy.TYPEWRITER) {
+        if (absoluteHighScore >= 195) {
+            if (consecutiveExtinctions >= 50) {
+                int kickSize = 60;
+                int targetStep = absoluteHighScore - kickSize;
+
+                System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END SIGNAL DETECTED [!!!]");
+                System.out.println(timestamp() + ">>> Kirurgen har ramt et lokalt optimum ved " + absoluteHighScore + " brikker.");
+                System.out.println(timestamp() + ">>> Udfører 'State Kick': River " + kickSize + " brikker ned for at bygge en ny gren...");
+
+                consecutiveExtinctions = 0;
+                retreat(targetStep, timestamp() + ">>> Rebuilding foundation from piece " + targetStep);
+                return;
+            }
+
             deepestStep = absoluteHighScore;
-            if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
             return;
         }
-        // =======================================================
 
-        // Herunder kører koden kun, hvis strategien er SPIRAL
-        int retreatSize = (consecutiveExtinctions == 1) ? 8 : (consecutiveExtinctions == 2) ? 20 : 40;
-        if (lockedPieces > retreatSize) {
-            String msg = "\n" + timestamp() + "[!] EXTINCTION EVENT (" + consecutiveExtinctions + " failures)!\n" +
-                    timestamp() + "[!] Structural dead-end detected. Retreating " + retreatSize + " steps to " + (deepestStep - retreatSize);
-
-            retreat(deepestStep - retreatSize, msg);
+        if (lockedPieces > 0) {
+            int retreat = 50;
+            System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Retreating " + retreat + " steps.");
+            retreat(deepestStep - retreat, timestamp() + ">>> Base camp exhausted. Bulldozing new path...");
         } else {
-            retreat(0, null);
+            System.out.println(timestamp() + "Total search space exhausted.");
         }
-        if (consecutiveExtinctions >= 3) consecutiveExtinctions = 0;
     }
 
     private boolean handleWorkerException(ExecutionException e) {
         Throwable cause = e.getCause();
         if (cause instanceof ManualOverrideException) {
             manualOverrideRequested = false;
-            retreat(manualBaseCampTarget,
-                    "\n" + timestamp() + "[!] MANUAL OVERRIDE! Jumping to " + manualBaseCampTarget);
 
-            // Fix: ensure absoluteHighScore is updated to reflect the new state,
-            // allowing us to exit Surgeon/Repair mode if necessary.
-            deepestStep = manualBaseCampTarget + 30;
-            absoluteHighScore = deepestStep;
+            retreat(manualBaseCampTarget, "\n" + timestamp() + "[!] MANUAL OVERRIDE! Base Camp reset to " + manualBaseCampTarget);
+
+            absoluteHighScore = manualBaseCampTarget;
+            deepestStep = manualBaseCampTarget;
+
             lastProgressTimestamp = System.currentTimeMillis();
             resetCounters();
 
@@ -793,13 +791,8 @@ public class MasterSolverPBP implements Runnable {
     private void handleSearchExhaustion(int lockedPieces) {
         consecutiveExhaustions++;
 
-        // =======================================================
-        // ANKER-LOGIK: KUN SPIRAL MÅ TRÆKKE SIG TILBAGE
-        // =======================================================
         if (currentStrategy == BuildStrategy.TYPEWRITER) {
             if (consecutiveExhaustions >= 15) {
-                // If we are stuck with 0 seeds 3 times in a row, the base camp is "poisoned".
-                // We must retreat slightly to find a branch that actually has seeds.
                 int retreatAmount = 5 + new Random().nextInt(30);
                 retreat(deepestStep - retreatAmount, timestamp() + ">>> [RECOVERY] Zero seeds found repeatedly. Retreating " + retreatAmount + " pieces to find a healthy branch...");
                 consecutiveExhaustions = 0;
@@ -855,10 +848,6 @@ public class MasterSolverPBP implements Runnable {
         }
         return displayBoard;
     }
-
-// ==========================================================
-    // --- LATE GAME: REPAIR MODE (Large Neighborhood Search) ---
-    // ==========================================================
 
     /**
      * Scores each placed cell by the number of edge mismatches with its neighbors.
@@ -1128,15 +1117,24 @@ public class MasterSolverPBP implements Runnable {
             if (localTrialCount >= 100000) { // Batch updates to avoid memory contention
                 globalTrialCount.addAndGet(localTrialCount);
                 localTrialCount = 0;
+
+                if (useGpu && currentStrategy == BuildStrategy.TYPEWRITER && absoluteHighScore >= SWISS_CHEESE_LEVEL) {
+                    currentBatchSize.set(activeBatch); // Tvinger arbejderne til at afbryde
+                    return false;
+                }
             }
 
             if (step == 256) {
                 return true;
             }
 
+            updateProgress(step);
+
             int boardIdx = buildOrder[step];
             if (localBoard[boardIdx] != -1) {
-                if (useGpu && step == handoffDepth) return registerGpuSeed();
+                if (useGpu && currentStrategy != BuildStrategy.TYPEWRITER && step == handoffDepth) {
+                    return registerGpuSeed();
+                }
                 return solve(step + 1);
             }
 
@@ -1144,11 +1142,9 @@ public class MasterSolverPBP implements Runnable {
                 return solve(step + 1);
             }
 
-            if (useGpu && step == handoffDepth) {
+            if (useGpu && currentStrategy != BuildStrategy.TYPEWRITER && step == handoffDepth) {
                 return registerGpuSeed();
             }
-
-            updateProgress(step);
 
             int row = boardIdx / 16;
             int col = boardIdx % 16;
