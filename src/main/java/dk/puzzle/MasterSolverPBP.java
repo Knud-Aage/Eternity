@@ -32,6 +32,8 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -63,8 +65,8 @@ public class MasterSolverPBP implements Runnable {
     private final int[][] piecesByWest = new int[256][];
     private final int[] recordBoard = new int[256];
     private final CompatibilityIndex compatIndex;
-    private final int[] tabuTenure = new int[256]; // Holder styr på hvornår en brik "frigives" fra Tabu
-    private long lastThroughputReportTime = System.currentTimeMillis();
+    private final int[] tabuTenure = new int[256];
+    private ScheduledExecutorService statsTimer;
     private CUfunction dfsFunction;
     private CUfunction repairFunction;
     private int centerPhysicalIdx = -1;
@@ -387,7 +389,6 @@ public class MasterSolverPBP implements Runnable {
 
         CUdeviceptr d_gpuHighScore = new CUdeviceptr();
         cuMemAlloc(d_gpuHighScore, Sizeof.INT);
-        // GPU'en skal vide, hvad highscoren er lige nu, for at kunne slå den!
         cuMemcpyHtoD(d_gpuHighScore, Pointer.to(new int[]{absoluteHighScore}), Sizeof.INT);
 
         CUdeviceptr d_bestBoardOut = new CUdeviceptr();
@@ -444,22 +445,13 @@ public class MasterSolverPBP implements Runnable {
             synchronized (displayLock) {
                 if (resultHighScore[0] > absoluteHighScore) {
 
-                    // =======================================================
-                    // TABU SEARCH: IDENTIFICER NYE/FLYTTE BRIKKER OG FRED DEM!
-                    // =======================================================
                     int changedPieces = 0;
                     for (int i = 0; i < 256; i++) {
-                        // Hvis feltet har ændret sig (f.eks. fået en ny brik)
                         if (repairedBoard[i] != bestBoard[i] && repairedBoard[i] != -1) {
-                            // Sæt feltet på Tabu-listen i de næste 100 batches!
-                            // (Kirurgen tvinges nu til at bygge videre udenom disse felter)
                             tabuTenure[i] = currentRepairIteration + 25;
                             changedPieces++;
                         }
                     }
-                    System.out.println(timestamp() + ">>> TABU SEARCH: Fredet " + changedPieces + " nyligt flyttede " +
-                            "brikker for de næste 100 batches.");
-                    // =======================================================
 
                     absoluteHighScore = resultHighScore[0];
                     deepestStep = absoluteHighScore;
@@ -470,7 +462,7 @@ public class MasterSolverPBP implements Runnable {
                     CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore,
                             saveProfile);
 
-                    System.out.println("\n" + timestamp() + ">>> KIRURGEN SLOG REKORDEN! NY HIGH SCORE: " + absoluteHighScore + " <<<");
+                    System.out.println("\n" + timestamp() + ">>> THE SURGEON BEAT THE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
                 }
             }
         }
@@ -480,7 +472,7 @@ public class MasterSolverPBP implements Runnable {
         if (solved[0] == 1) {
             int[] winningBoard = new int[256];
             cuMemcpyDtoH(Pointer.to(winningBoard), d_solution, 256L * Sizeof.INT);
-            System.out.println("\n" + timestamp() + ">>> ETERNITY II LØST AF REPAIR MODE (GPU)!!! <<<");
+            System.out.println("\n" + timestamp() + ">>> ETERNITY II SOLVED IN REPAIR MODE (GPU)!!! <<<");
             updateDisplay(256, buildDisplayBoard(winningBoard));
             System.exit(0);
         }
@@ -556,24 +548,26 @@ public class MasterSolverPBP implements Runnable {
             System.out.println(timestamp() + "Starting Autonomous Engine...");
             long lastPeriodicSave = System.currentTimeMillis();
 
-            while (true) {
-                handleGlobalStagnation();
-
-                long now = System.currentTimeMillis();
-                long elapsed = now - lastThroughputReportTime;
-                if (elapsed >= 5000) { // Rapportér hvert 5. sekund
+            this.statsTimer = Executors.newSingleThreadScheduledExecutor();
+            this.statsTimer.scheduleAtFixedRate(() -> {
+                try {
                     long cpuTrials = globalCpuTrialCount.getAndSet(0);
                     long gpuTrials = globalGpuTrialCount.getAndSet(0);
 
-                    double cpuTps = cpuTrials / (elapsed / 1000.0);
-                    double gpuTps = gpuTrials / (elapsed / 1000.0);
+                    double cpuTps = cpuTrials / 5.0;
+                    double gpuTps = gpuTrials / 5.0;
 
-                    if (cpuTrials > 0 || gpuTrials > 0) {
-                        System.out.printf("%s[HASTIGHED] CPU: %,.0f træk/sek  |  GPU: %,.0f træk/sek\n",
-                                timestamp(), cpuTps, gpuTps);
-                    }
-                    lastThroughputReportTime = now;
+                    System.out.printf("%s[SPEED] CPU: %,.0f pieces/sec  |  GPU: %,.0f pieces/sec\n",
+                            timestamp(), cpuTps, gpuTps);
+
+                } catch (Exception e) {
+                    System.err.println(timestamp() + "ERROR IN TIMER: " + e.getMessage());
+                    e.printStackTrace();
                 }
+            }, 5, 5, TimeUnit.SECONDS);
+
+            while (true) {
+                handleGlobalStagnation();
 
                 int lockedPieces = updateHandoffConfig();
                 prepareSearchIteration(lockedPieces);
@@ -611,7 +605,17 @@ public class MasterSolverPBP implements Runnable {
             }
 
         } finally {
-            CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
+            Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+                System.out.println("\n" + timestamp() + ">>> Shutdown hook: Saving final checkpoint...");
+
+                if (statsTimer != null) {
+                    statsTimer.shutdownNow();
+                }
+
+                synchronized (displayLock) {
+                    CheckpointManager.saveWorkingState(buildDisplayBoard(bestBoard));
+                }
+            }));
         }
     }
 
@@ -639,7 +643,7 @@ public class MasterSolverPBP implements Runnable {
 
             if (useGpu) {
                 if (deepestStep < 190) {
-                    handoffDepth = 190; // Tvinger CPU'en til at fortsætte!
+                    handoffDepth = 190;
                     targetBatchSize = 10000;
                 } else {
                     handoffDepth = lockedPieces + 30;
@@ -654,7 +658,6 @@ public class MasterSolverPBP implements Runnable {
                 retreat(0, null);
             }
         } else {
-            // Spiral (Beholdt som fallback)
             int retreatDistance = (deepestStep > 180) ? 80 : 30;
             lockedPieces = Math.max(0, deepestStep - retreatDistance);
             int gap = (lockedPieces > 180) ? 10 : (lockedPieces > 150) ? 12 : 15;
@@ -705,7 +708,7 @@ public class MasterSolverPBP implements Runnable {
 
         if (currentStrategy == BuildStrategy.TYPEWRITER) {
 
-            if (useGpu && absoluteHighScore >= SWISS_CHEESE_LEVEL) {
+            if (useGpu && deepestStep >= SWISS_CHEESE_LEVEL) {
                 if (repairStartTime == 0) {
                     repairStartTime = System.currentTimeMillis();
                 }
@@ -725,7 +728,6 @@ public class MasterSolverPBP implements Runnable {
                                     " variations: %,d%n",
                             timestamp(), timeFormatted, (repairLoopsCounter / 2), totalRepairVariationsTested);
 
-                    // Visuel opdatering af Kirurgens huller
                     int[] visualBoard = new int[256];
                     System.arraycopy(swissCheeseBoards.get(0), 0, visualBoard, 0, 256);
                     for (int i = 0; i < 256; i++) {
@@ -746,12 +748,12 @@ public class MasterSolverPBP implements Runnable {
                 consecutiveExhaustions = 0;
                 resetCounters();
                 deepestStep = absoluteHighScore;
-                currentBatchSize.set(0); // Nulstil
+                currentBatchSize.set(0);
 
                 return false;
             } else {
                 currentBatchSize.set(0);
-                return foundSeeds == 0; // Hvis CPU'en kører helt fast, tillad retreat
+                return foundSeeds == 0;
             }
         }
 
@@ -779,15 +781,16 @@ public class MasterSolverPBP implements Runnable {
     private void handleExtinctionEvent(int lockedPieces) {
         consecutiveExtinctions++;
 
-        if (absoluteHighScore >= 195) {
-            if (consecutiveExtinctions >= 50) {
+        if (deepestStep >= SWISS_CHEESE_LEVEL) {
+            if (consecutiveExtinctions >= 10) {
                 int kickSize = 60;
                 int targetStep = absoluteHighScore - kickSize;
 
                 System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END SIGNAL DETECTED [!!!]");
-                System.out.println(timestamp() + ">>> Kirurgen har ramt et lokalt optimum ved " + absoluteHighScore + " brikker.");
-                System.out.println(timestamp() + ">>> Udfører 'State Kick': River " + kickSize + " brikker ned for at" +
-                        " bygge en ny gren...");
+                System.out.println(timestamp() + ">>> The surgeon has reached optimum at " + absoluteHighScore + " " +
+                        "pieces.");
+                System.out.println(timestamp() + ">>> Tore " + kickSize + " pieces down" +
+                        " build a new branch...");
 
                 consecutiveExtinctions = 0;
                 retreat(targetStep, timestamp() + ">>> Rebuilding foundation from piece " + targetStep);
@@ -816,7 +819,6 @@ public class MasterSolverPBP implements Runnable {
             retreat(manualBaseCampTarget,
                     "\n" + timestamp() + "[!] MANUAL OVERRIDE! Base Camp reset to " + manualBaseCampTarget);
 
-            absoluteHighScore = manualBaseCampTarget;
             deepestStep = manualBaseCampTarget;
 
             lastProgressTimestamp = System.currentTimeMillis();
@@ -833,7 +835,7 @@ public class MasterSolverPBP implements Runnable {
 
         if (currentStrategy == BuildStrategy.TYPEWRITER) {
             if (consecutiveExhaustions >= 15) {
-                int retreatAmount = 5 + new Random().nextInt(30);
+                int retreatAmount = 5 + new Random().nextInt(60);
                 retreat(deepestStep - retreatAmount, timestamp() + ">>> [RECOVERY] Zero seeds found repeatedly. " +
                         "Retreating " + retreatAmount + " pieces to find a healthy branch...");
                 consecutiveExhaustions = 0;
@@ -842,9 +844,7 @@ public class MasterSolverPBP implements Runnable {
             }
             return;
         }
-        // =======================================================
 
-        // Herunder kører koden kun, hvis strategien er SPIRAL
         if (lockedPieces > 0) {
             int retreat = 10; // Standard retreat for Spiral
             retreat(deepestStep - retreat, timestamp() + ">>> Base camp exhausted. Searching new path (SPIRAL)...");
@@ -976,11 +976,8 @@ public class MasterSolverPBP implements Runnable {
                     continue;
                 }
 
-                // ========================================================
-                // TABU SEARCH FILTER: Må vi røre denne brik?
-                // ========================================================
                 if (tabuTenure[i] > currentRepairIteration) {
-                    continue; // BRIKKEN ER FREDET! Vi må ikke skyde hul i den.
+                    continue;
                 }
 
                 placedIndices[placedCount++] = i;
@@ -1061,7 +1058,6 @@ public class MasterSolverPBP implements Runnable {
 //        Main.updateDisplay(score, displayBoard);
 //    }
     private void updateDisplay(int score, int[][] displayBoard) {
-        // Nu sender den altid både det aktuelle antal brikker og rekorden til titelbaren!
         Main.updateDisplay(score, this.absoluteHighScore, displayBoard);
     }
 
@@ -1148,7 +1144,14 @@ public class MasterSolverPBP implements Runnable {
 
         @Override
         public Boolean call() {
-            return solve(0);
+            try {
+                return solve(0);
+            } finally {
+                if (localTrialCount > 0) {
+                    globalCpuTrialCount.addAndGet(localTrialCount);
+                    localTrialCount = 0;
+                }
+            }
         }
 
         private boolean solve(int step) {
@@ -1161,11 +1164,11 @@ public class MasterSolverPBP implements Runnable {
 
             localTrialCount++;
             if (localTrialCount >= 100000) {
-                globalCpuTrialCount.addAndGet(localTrialCount); // <-- Opdateret til CPU
+                globalCpuTrialCount.addAndGet(localTrialCount);
                 localTrialCount = 0;
 
                 if (useGpu && currentStrategy == BuildStrategy.TYPEWRITER && absoluteHighScore >= SWISS_CHEESE_LEVEL) {
-                    currentBatchSize.set(activeBatch); // Tvinger arbejderne til at afbryde
+                    currentBatchSize.set(activeBatch);
                     return false;
                 }
             }
@@ -1212,11 +1215,9 @@ public class MasterSolverPBP implements Runnable {
             int eastReq = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ?
                     PieceUtils.getWest(localBoard[boardIdx + 1]) : CompatibilityIndex.WILDCARD);
 
-            // 1. Slå op i BitMask indekset!
             java.util.BitSet candidates = compatIndex.candidatesFor(northReq, eastReq, southReq, westReq);
             compatIndex.andNotUsed(candidates, localUsed);
 
-            // 2. Hvis vi har en ghost-brik (resumeBoard), tvinger vi den til at bruge den
             if (localResumeBoard[boardIdx] != -1) {
                 int resumeP = localResumeBoard[boardIdx];
                 for (int oi = candidates.nextSetBit(0); oi >= 0; oi = candidates.nextSetBit(oi + 1)) {
@@ -1231,7 +1232,6 @@ public class MasterSolverPBP implements Runnable {
                 return false;
             }
 
-            // 3. Konverter de overlevende bits til et randomiseret array
             int[] orientIdxs = new int[candidateCount];
             int k = 0;
             for (int oi = candidates.nextSetBit(0); oi >= 0; oi = candidates.nextSetBit(oi + 1)) {
@@ -1239,7 +1239,6 @@ public class MasterSolverPBP implements Runnable {
             }
             int offset = rnd.nextInt(candidateCount);
 
-            // 4. Test brikkerne
             for (int i = 0; i < candidateCount; i++) {
                 if (currentBatchSize.get() >= activeBatch) {
                     return false;
@@ -1249,7 +1248,6 @@ public class MasterSolverPBP implements Runnable {
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
 
-                // PassesLookahead tjekker "The Future"
                 if (passesLookahead(p, step, row, col, boardIdx)) {
                     localBoard[boardIdx] = p;
                     localUsed[physicalIdx] = true;
@@ -1366,7 +1364,6 @@ public class MasterSolverPBP implements Runnable {
                 int reqS = (row == 14) ? 0 : (localBoard[idx + 32] != -1 ? PieceUtils.getNorth(localBoard[idx + 32])
                                               : CompatibilityIndex.WILDCARD);
 
-                // 1. Hent alle gyldige kandidater til naboen direkte mod syd
                 java.util.BitSet southCandidates = compatIndex.candidatesFor(reqN, reqE, reqS, reqW);
                 compatIndex.andNotUsed(southCandidates, localUsed);
 
@@ -1374,12 +1371,8 @@ public class MasterSolverPBP implements Runnable {
                     return false;
                 }
 
-                // =======================================================
-                // NYT BITMASK SECONDARY LOOKAHEAD (Løser 41-brikkers muren!)
-                // =======================================================
                 if (step > 40 && row < 14 && localBoard[idx + 32] == -1) {
                     boolean secondaryFound = false;
-                    // Tjek om bare én af syd-kandidaterne OGSÅ har en gyldig nabo under sig
                     for (int i = southCandidates.nextSetBit(0); i >= 0; i = southCandidates.nextSetBit(i + 1)) {
                         int testPiece = inventory.allOrientations[i];
                         int nextReqN = PieceUtils.getSouth(testPiece);
@@ -1387,11 +1380,11 @@ public class MasterSolverPBP implements Runnable {
                         if (compatIndex.hasAnyCandidate(nextReqN, CompatibilityIndex.WILDCARD,
                                 CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, localUsed)) {
                             secondaryFound = true;
-                            break; // Vi fandt en vej frem, afbryd søgningen (lynhurtigt!)
+                            break;
                         }
                     }
                     if (!secondaryFound) {
-                        return false; // Død ende opdaget i række 2!
+                        return false;
                     }
                 }
                 // =======================================================
