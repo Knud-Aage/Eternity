@@ -1,42 +1,45 @@
-do javadoc for # Eternity II Solver
+# Eternity II Solver
 
 High-performance Eternity II puzzle solver written in Java with GPU acceleration.
 
 ## Features
 
 ### Solving Strategies
-The solver supports two distinct algorithmic approaches:
+The solver employs a hybrid Piece-By-Piece (PBP) approach that combines CPU exploration with massive GPU parallelization:
 
-1.  **Divide and Conquer (Macro-Tile Strategy)**:
-    *   Splits the 16x16 board into a 4x4 grid of "Macro-Tiles" (each is a 4x4 piece block).
-    *   Solves the perimeter of each macro-tile first, then validates internal matches using the GPU/CPU validator.
-    *   Significantly reduces the branching factor of the search tree.
+1.  **Autonomous PBP Search**:
+    *   Uses the CPU to generate thousands of "seeds" (partial board states) at a specific handoff depth.
+    *   Features adaptive "Extinction Events" and "Evolution Leaps" to navigate around structural dead-ends.
+    *   Supports multiple build orders: **Spiral** (inward-wrapping constraints) and **Typewriter** (linear).
 
-2.  **Piece-by-Piece (Linear DFS)**:
-    *   A classic depth-first search approach that places pieces one by one.
-    *   Useful for testing and smaller sub-puzzles.
+2.  **LNS Repair Mode (The Surgeon)**:
+    *   A Large Neighborhood Search (LNS) variant for the late-game.
+    *   Targets "high-conflict" areas with edge mismatches and "punches holes" in the board.
+    *   Uses the GPU to solve targeted holes (Swiss Cheese boards) to bridge the gap to a 256-piece solution.
 
 ### Hardware Acceleration
-*   **GPU Validation**: Leverages NVIDIA GPUs via **JCuda** to validate millions of 4x4 macro-tile candidates simultaneously.
-*   **CPU Fallback**: If no compatible GPU is detected, the solver automatically switches to a multi-threaded CPU validator using Java Parallel Streams to maximize performance on all available cores.
+*   **CUDA Kernel Integration**: Custom-written CUDA kernels (`SolveEternityKernel.cu`) handle the heavy backtracking and repair logic.
+*   **Radar Leash**: A look-ahead optimization that forces backtracking in GPU threads if a solution isn't found within a certain distance from the handoff point, preventing thread divergence and stagnation.
+*   **Multi-threaded Seed Generation**: Leverages all available CPU cores to explore the wide search space before offloading deep dives to the GPU.
 
 ### Advanced Heuristics
-*   **Color Frequency Scoring**: Prioritizes placing pieces that expose common colors to the unsolved areas of the board.
-*   **Pool Partitioning**: Automatically separates pieces into Corner, Edge, and Interior pools to eliminate illegal search branches.
-*   **Diagonal Wavefront Scan**: Fill order optimized to maximize constraints at every step.
+*   **Lookahead Optimization**: CPU workers check secondary neighbor viability before placing pieces, significantly pruning the search tree.
+*   **Structural Diversity Filter**: Prevents the GPU from processing redundant search paths by hashing board configurations.
+*   **Bit-Masked Inventory**: Rapid piece availability checking using 256-bit masks across GPU registers.
 
 ## Getting Started
 
 ### Prerequisites
 *   Java 17 or higher.
-*   (Optional) NVIDIA GPU with latest drivers and CUDA Toolkit for GPU acceleration.
+*   NVIDIA GPU with latest drivers and CUDA Toolkit for GPU acceleration.
+*   JCuda libraries for Java-CUDA binding.
 
 ### Running
 1.  Ensure `pieces.csv` is in the root directory.
 2.  Compile the project using Maven: `mvn clean install`.
 3.  Run the `Main` class.
-4.  The GUI will open, showing a real-time visualization of the solving process.
+4.  Use the "Director Controls" in the GUI to adjust extinction thresholds, radar limits, and manual overrides in real-time.
 
 ## Output
-*   **solution.txt**: A text-based map of the final 16x16 solution.
-*   **solution.png**: A high-resolution image rendering of the solved puzzle.
+*   **records/**: Strategy-specific folders containing high-score screenshots (.png) and board data (.csv).
+*   **checkpoint.dat**: Automatic serialization of the current working state to allow resumption after a shutdown.

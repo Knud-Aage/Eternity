@@ -2,7 +2,23 @@ package dk.puzzle;
 
 import jcuda.Pointer;
 import jcuda.Sizeof;
-import jcuda.driver.*;
+import jcuda.driver.CUcontext;
+import jcuda.driver.CUdevice;
+import jcuda.driver.CUdeviceptr;
+import jcuda.driver.CUfunction;
+import jcuda.driver.CUmodule;
+import jcuda.driver.JCudaDriver;
+import static jcuda.driver.JCudaDriver.cuCtxCreate;
+import static jcuda.driver.JCudaDriver.cuCtxSynchronize;
+import static jcuda.driver.JCudaDriver.cuDeviceGet;
+import static jcuda.driver.JCudaDriver.cuInit;
+import static jcuda.driver.JCudaDriver.cuLaunchKernel;
+import static jcuda.driver.JCudaDriver.cuMemAlloc;
+import static jcuda.driver.JCudaDriver.cuMemFree;
+import static jcuda.driver.JCudaDriver.cuMemcpyDtoH;
+import static jcuda.driver.JCudaDriver.cuMemcpyHtoD;
+import static jcuda.driver.JCudaDriver.cuModuleGetFunction;
+import static jcuda.driver.JCudaDriver.cuModuleLoad;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -10,15 +26,18 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
-import java.util.concurrent.*;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static jcuda.driver.JCudaDriver.*;
-
 public class MasterSolverPBP implements Runnable {
 
-    public static final int SWISS_CHEESE_LEVEL = 208;
+    public static final int SWISS_CHEESE_LEVEL = 218;
     private final PieceInventory inventory;
     private final int[] flatBoard = new int[256];
     private final int[] bestBoard = new int[256];
@@ -35,7 +54,8 @@ public class MasterSolverPBP implements Runnable {
     private final ConcurrentLinkedQueue<int[]> gpuSeedBoards = new ConcurrentLinkedQueue<>();
     private final AtomicInteger currentBatchSize = new AtomicInteger(0);
     private final java.util.Set<Long> structuralDiversityFilter = java.util.concurrent.ConcurrentHashMap.newKeySet();
-    private final AtomicLong globalTrialCount = new AtomicLong(0);
+    private final AtomicLong globalCpuTrialCount = new AtomicLong(0);
+    private final AtomicLong globalGpuTrialCount = new AtomicLong(0);
     private final int[] buildOrder;
     private final int[][] piecesByNorth = new int[256][];
     private final int[][] piecesByEast = new int[256][];
@@ -409,6 +429,9 @@ public class MasterSolverPBP implements Runnable {
         // ==========================================================
         // 4. RETRIEVE RESULTS FROM THE GPU
         // ==========================================================
+        long[] totalSteps = new long[1];
+        cuMemcpyDtoH(Pointer.to(totalSteps), d_totalSteps, Sizeof.LONG);
+        globalGpuTrialCount.addAndGet(totalSteps[0]);
 
         // Did the surgeon beat the high score?
         int[] resultHighScore = new int[1];
@@ -434,7 +457,8 @@ public class MasterSolverPBP implements Runnable {
                             changedPieces++;
                         }
                     }
-                    System.out.println(timestamp() + ">>> TABU SEARCH: Fredet " + changedPieces + " nyligt flyttede brikker for de næste 100 batches.");
+                    System.out.println(timestamp() + ">>> TABU SEARCH: Fredet " + changedPieces + " nyligt flyttede " +
+                            "brikker for de næste 100 batches.");
                     // =======================================================
 
                     absoluteHighScore = resultHighScore[0];
@@ -443,7 +467,8 @@ public class MasterSolverPBP implements Runnable {
                     updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
 
                     RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
-                    CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                    CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore,
+                            saveProfile);
 
                     System.out.println("\n" + timestamp() + ">>> KIRURGEN SLOG REKORDEN! NY HIGH SCORE: " + absoluteHighScore + " <<<");
                 }
@@ -488,7 +513,7 @@ public class MasterSolverPBP implements Runnable {
 
     private void processGpuResults(long timeMs, long steps, int[] depths, int start, int n) {
         double speed = steps / Math.max(timeMs / 1000.0, 0.001);
-        globalTrialCount.addAndGet(steps);
+        globalGpuTrialCount.addAndGet(steps);
         long sum = 0;
         int max = 0, dead = 0;
         for (int d : depths) {
@@ -534,14 +559,19 @@ public class MasterSolverPBP implements Runnable {
             while (true) {
                 handleGlobalStagnation();
 
-                // --- Throughput Reporting ---
                 long now = System.currentTimeMillis();
                 long elapsed = now - lastThroughputReportTime;
-                if (elapsed >= 5000) { // Report every 5 seconds
-                    long trials = globalTrialCount.getAndSet(0);
-                    double tps = trials / (elapsed / 1000.0);
-                    System.out.printf("%s[STATS] Throughput: %,.0f trials/sec (Total in window: %,d)\n",
-                            timestamp(), tps, trials);
+                if (elapsed >= 5000) { // Rapportér hvert 5. sekund
+                    long cpuTrials = globalCpuTrialCount.getAndSet(0);
+                    long gpuTrials = globalGpuTrialCount.getAndSet(0);
+
+                    double cpuTps = cpuTrials / (elapsed / 1000.0);
+                    double gpuTps = gpuTrials / (elapsed / 1000.0);
+
+                    if (cpuTrials > 0 || gpuTrials > 0) {
+                        System.out.printf("%s[HASTIGHED] CPU: %,.0f træk/sek  |  GPU: %,.0f træk/sek\n",
+                                timestamp(), cpuTps, gpuTps);
+                    }
                     lastThroughputReportTime = now;
                 }
 
@@ -586,7 +616,9 @@ public class MasterSolverPBP implements Runnable {
     }
 
     private void handleGlobalStagnation() {
-        if (currentStrategy == BuildStrategy.TYPEWRITER) return;
+        if (currentStrategy == BuildStrategy.TYPEWRITER) {
+            return;
+        }
         long minutesSinceProgress = (System.currentTimeMillis() - lastProgressTimestamp) / 60000;
         if (minutesSinceProgress >= stagnationLimitMinutes && deepestStep > 0 && deepestStep <= SWISS_CHEESE_LEVEL) {
             int deepRetreat = 40 + new Random().nextInt(41);
@@ -674,7 +706,9 @@ public class MasterSolverPBP implements Runnable {
         if (currentStrategy == BuildStrategy.TYPEWRITER) {
 
             if (useGpu && absoluteHighScore >= SWISS_CHEESE_LEVEL) {
-                if (repairStartTime == 0) repairStartTime = System.currentTimeMillis();
+                if (repairStartTime == 0) {
+                    repairStartTime = System.currentTimeMillis();
+                }
                 totalRepairVariationsTested += numClones;
                 repairLoopsCounter++;
 
@@ -684,16 +718,20 @@ public class MasterSolverPBP implements Runnable {
 
                 if (now - lastRepairPrintTime > 2000) {
                     long secondsRunning = (now - repairStartTime) / 1000;
-                    String timeFormatted = String.format("%02d:%02d:%02d", secondsRunning / 3600, (secondsRunning % 3600) / 60, secondsRunning % 60);
+                    String timeFormatted = String.format("%02d:%02d:%02d", secondsRunning / 3600,
+                            (secondsRunning % 3600) / 60, secondsRunning % 60);
 
-                    System.out.println(String.format("%s >>> [REPAIR MODE] Uptime: %s | Speed: %d batches/sec | Total variations: %,d",
-                            timestamp(), timeFormatted, (repairLoopsCounter / 2), totalRepairVariationsTested));
+                    System.out.printf("%s >>> [REPAIR MODE] Uptime: %s | Speed: %d batches/sec | Total" +
+                                    " variations: %,d%n",
+                            timestamp(), timeFormatted, (repairLoopsCounter / 2), totalRepairVariationsTested);
 
                     // Visuel opdatering af Kirurgens huller
                     int[] visualBoard = new int[256];
                     System.arraycopy(swissCheeseBoards.get(0), 0, visualBoard, 0, 256);
                     for (int i = 0; i < 256; i++) {
-                        if (visualBoard[i] == -2) visualBoard[i] = -1;
+                        if (visualBoard[i] == -2) {
+                            visualBoard[i] = -1;
+                        }
                     }
                     updateDisplay(countPieces(visualBoard), buildDisplayBoard(visualBoard));
 
@@ -713,8 +751,7 @@ public class MasterSolverPBP implements Runnable {
                 return false;
             } else {
                 currentBatchSize.set(0);
-                if (foundSeeds == 0) return true; // Hvis CPU'en kører helt fast, tillad retreat
-                return false;
+                return foundSeeds == 0; // Hvis CPU'en kører helt fast, tillad retreat
             }
         }
 
@@ -749,7 +786,8 @@ public class MasterSolverPBP implements Runnable {
 
                 System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END SIGNAL DETECTED [!!!]");
                 System.out.println(timestamp() + ">>> Kirurgen har ramt et lokalt optimum ved " + absoluteHighScore + " brikker.");
-                System.out.println(timestamp() + ">>> Udfører 'State Kick': River " + kickSize + " brikker ned for at bygge en ny gren...");
+                System.out.println(timestamp() + ">>> Udfører 'State Kick': River " + kickSize + " brikker ned for at" +
+                        " bygge en ny gren...");
 
                 consecutiveExtinctions = 0;
                 retreat(targetStep, timestamp() + ">>> Rebuilding foundation from piece " + targetStep);
@@ -762,7 +800,8 @@ public class MasterSolverPBP implements Runnable {
 
         if (lockedPieces > 0) {
             int retreat = 50;
-            System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Retreating " + retreat + " steps.");
+            System.out.println("\n" + timestamp() + ">>> [!!!] TYPEWRITER EXHAUSTION [!!!] Retreating " + retreat +
+                    " steps.");
             retreat(deepestStep - retreat, timestamp() + ">>> Base camp exhausted. Bulldozing new path...");
         } else {
             System.out.println(timestamp() + "Total search space exhausted.");
@@ -774,7 +813,8 @@ public class MasterSolverPBP implements Runnable {
         if (cause instanceof ManualOverrideException) {
             manualOverrideRequested = false;
 
-            retreat(manualBaseCampTarget, "\n" + timestamp() + "[!] MANUAL OVERRIDE! Base Camp reset to " + manualBaseCampTarget);
+            retreat(manualBaseCampTarget,
+                    "\n" + timestamp() + "[!] MANUAL OVERRIDE! Base Camp reset to " + manualBaseCampTarget);
 
             absoluteHighScore = manualBaseCampTarget;
             deepestStep = manualBaseCampTarget;
@@ -794,7 +834,8 @@ public class MasterSolverPBP implements Runnable {
         if (currentStrategy == BuildStrategy.TYPEWRITER) {
             if (consecutiveExhaustions >= 15) {
                 int retreatAmount = 5 + new Random().nextInt(30);
-                retreat(deepestStep - retreatAmount, timestamp() + ">>> [RECOVERY] Zero seeds found repeatedly. Retreating " + retreatAmount + " pieces to find a healthy branch...");
+                retreat(deepestStep - retreatAmount, timestamp() + ">>> [RECOVERY] Zero seeds found repeatedly. " +
+                        "Retreating " + retreatAmount + " pieces to find a healthy branch...");
                 consecutiveExhaustions = 0;
             } else {
                 deepestStep = absoluteHighScore;
@@ -831,7 +872,10 @@ public class MasterSolverPBP implements Runnable {
 
     private int countPieces(int[] board) {
         int count = 0;
-        for (int p : board) if (p != -1 && p != -2) count++;
+        for (int p : board)
+            if (p != -1 && p != -2) {
+                count++;
+            }
         return count;
     }
 
@@ -928,7 +972,9 @@ public class MasterSolverPBP implements Runnable {
 
         for (int i = 0; i < 256; i++) {
             if (sourceBoard[i] != -1 && sourceBoard[i] != -2) {
-                if (lockCenter && i == 135) continue;
+                if (lockCenter && i == 135) {
+                    continue;
+                }
 
                 // ========================================================
                 // TABU SEARCH FILTER: Må vi røre denne brik?
@@ -1114,8 +1160,8 @@ public class MasterSolverPBP implements Runnable {
             }
 
             localTrialCount++;
-            if (localTrialCount >= 100000) { // Batch updates to avoid memory contention
-                globalTrialCount.addAndGet(localTrialCount);
+            if (localTrialCount >= 100000) {
+                globalCpuTrialCount.addAndGet(localTrialCount); // <-- Opdateret til CPU
                 localTrialCount = 0;
 
                 if (useGpu && currentStrategy == BuildStrategy.TYPEWRITER && absoluteHighScore >= SWISS_CHEESE_LEVEL) {
@@ -1157,10 +1203,14 @@ public class MasterSolverPBP implements Runnable {
             int e = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(localBoard[boardIdx + 1])
                                        : PieceUtils.WILDCARD);
 
-            int northReq = (row == 0) ? 0 : (localBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(localBoard[boardIdx - 16]) : CompatibilityIndex.WILDCARD);
-            int southReq = (row == 15) ? 0 : (localBoard[boardIdx + 16] != -1 ? PieceUtils.getNorth(localBoard[boardIdx + 16]) : CompatibilityIndex.WILDCARD);
-            int westReq  = (col == 0) ? 0 : (localBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(localBoard[boardIdx - 1])  : CompatibilityIndex.WILDCARD);
-            int eastReq  = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(localBoard[boardIdx + 1]) : CompatibilityIndex.WILDCARD);
+            int northReq = (row == 0) ? 0 : (localBoard[boardIdx - 16] != -1 ?
+                    PieceUtils.getSouth(localBoard[boardIdx - 16]) : CompatibilityIndex.WILDCARD);
+            int southReq = (row == 15) ? 0 : (localBoard[boardIdx + 16] != -1 ?
+                    PieceUtils.getNorth(localBoard[boardIdx + 16]) : CompatibilityIndex.WILDCARD);
+            int westReq = (col == 0) ? 0 : (localBoard[boardIdx - 1] != -1 ?
+                    PieceUtils.getEast(localBoard[boardIdx - 1]) : CompatibilityIndex.WILDCARD);
+            int eastReq = (col == 15) ? 0 : (localBoard[boardIdx + 1] != -1 ?
+                    PieceUtils.getWest(localBoard[boardIdx + 1]) : CompatibilityIndex.WILDCARD);
 
             // 1. Slå op i BitMask indekset!
             java.util.BitSet candidates = compatIndex.candidatesFor(northReq, eastReq, southReq, westReq);
@@ -1170,12 +1220,16 @@ public class MasterSolverPBP implements Runnable {
             if (localResumeBoard[boardIdx] != -1) {
                 int resumeP = localResumeBoard[boardIdx];
                 for (int oi = candidates.nextSetBit(0); oi >= 0; oi = candidates.nextSetBit(oi + 1)) {
-                    if (inventory.allOrientations[oi] != resumeP) candidates.clear(oi);
+                    if (inventory.allOrientations[oi] != resumeP) {
+                        candidates.clear(oi);
+                    }
                 }
             }
 
             int candidateCount = candidates.cardinality();
-            if (candidateCount == 0) return false;
+            if (candidateCount == 0) {
+                return false;
+            }
 
             // 3. Konverter de overlevende bits til et randomiseret array
             int[] orientIdxs = new int[candidateCount];
@@ -1187,7 +1241,9 @@ public class MasterSolverPBP implements Runnable {
 
             // 4. Test brikkerne
             for (int i = 0; i < candidateCount; i++) {
-                if (currentBatchSize.get() >= activeBatch) return false;
+                if (currentBatchSize.get() >= activeBatch) {
+                    return false;
+                }
 
                 int orientationIdx = orientIdxs[(i + offset) % candidateCount];
                 int p = inventory.allOrientations[orientationIdx];
@@ -1200,7 +1256,9 @@ public class MasterSolverPBP implements Runnable {
                     int ghost = localResumeBoard[boardIdx];
                     localResumeBoard[boardIdx] = -1;
 
-                    if (solve(step + 1)) return true;
+                    if (solve(step + 1)) {
+                        return true;
+                    }
 
                     // Backtrack
                     localBoard[boardIdx] = -1;
@@ -1301,9 +1359,12 @@ public class MasterSolverPBP implements Runnable {
             // --- Check south neighbor ---
             if (row < 15 && localBoard[idx + 16] == -1) {
                 int reqN = PieceUtils.getSouth(p);
-                int reqE = (col == 15) ? 0 : (localBoard[idx + 17] != -1 ? PieceUtils.getWest(localBoard[idx + 17]) : CompatibilityIndex.WILDCARD);
-                int reqW = (col == 0)  ? 0 : (localBoard[idx + 15] != -1 ? PieceUtils.getEast(localBoard[idx + 15]) : CompatibilityIndex.WILDCARD);
-                int reqS = (row == 14) ? 0 : (localBoard[idx + 32] != -1 ? PieceUtils.getNorth(localBoard[idx + 32]) : CompatibilityIndex.WILDCARD);
+                int reqE = (col == 15) ? 0 : (localBoard[idx + 17] != -1 ? PieceUtils.getWest(localBoard[idx + 17]) :
+                                              CompatibilityIndex.WILDCARD);
+                int reqW = (col == 0) ? 0 : (localBoard[idx + 15] != -1 ? PieceUtils.getEast(localBoard[idx + 15]) :
+                                             CompatibilityIndex.WILDCARD);
+                int reqS = (row == 14) ? 0 : (localBoard[idx + 32] != -1 ? PieceUtils.getNorth(localBoard[idx + 32])
+                                              : CompatibilityIndex.WILDCARD);
 
                 // 1. Hent alle gyldige kandidater til naboen direkte mod syd
                 java.util.BitSet southCandidates = compatIndex.candidatesFor(reqN, reqE, reqS, reqW);
@@ -1323,7 +1384,8 @@ public class MasterSolverPBP implements Runnable {
                         int testPiece = inventory.allOrientations[i];
                         int nextReqN = PieceUtils.getSouth(testPiece);
 
-                        if (compatIndex.hasAnyCandidate(nextReqN, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, localUsed)) {
+                        if (compatIndex.hasAnyCandidate(nextReqN, CompatibilityIndex.WILDCARD,
+                                CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, localUsed)) {
                             secondaryFound = true;
                             break; // Vi fandt en vej frem, afbryd søgningen (lynhurtigt!)
                         }
@@ -1338,13 +1400,14 @@ public class MasterSolverPBP implements Runnable {
             // --- Check east neighbor ---
             if (col < 15 && localBoard[idx + 1] == -1) {
                 int reqW = PieceUtils.getEast(p);
-                int reqN = (row == 0)  ? 0 : (localBoard[idx - 15] != -1 ? PieceUtils.getSouth(localBoard[idx - 15]) : CompatibilityIndex.WILDCARD);
-                int reqE = (col == 14) ? 0 : (localBoard[idx + 2]  != -1 ? PieceUtils.getWest(localBoard[idx + 2])   : CompatibilityIndex.WILDCARD);
-                int reqS = (row == 15) ? 0 : (localBoard[idx + 17] != -1 ? PieceUtils.getNorth(localBoard[idx + 17]) : CompatibilityIndex.WILDCARD);
+                int reqN = (row == 0) ? 0 : (localBoard[idx - 15] != -1 ? PieceUtils.getSouth(localBoard[idx - 15]) :
+                                             CompatibilityIndex.WILDCARD);
+                int reqE = (col == 14) ? 0 : (localBoard[idx + 2] != -1 ? PieceUtils.getWest(localBoard[idx + 2]) :
+                                              CompatibilityIndex.WILDCARD);
+                int reqS = (row == 15) ? 0 : (localBoard[idx + 17] != -1 ? PieceUtils.getNorth(localBoard[idx + 17])
+                                              : CompatibilityIndex.WILDCARD);
 
-                if (!compatIndex.hasAnyCandidate(reqN, reqE, reqS, reqW, localUsed)) {
-                    return false;
-                }
+                return compatIndex.hasAnyCandidate(reqN, reqE, reqS, reqW, localUsed);
             }
             return true;
         }
