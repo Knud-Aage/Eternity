@@ -51,6 +51,36 @@ public class RecordManager {
         return rotated;
     }
 
+    /**
+     * Scans the records directory for the given strategy and returns the highest piece count found.
+     */
+    public static int getHighScore(String strategyName) {
+        String folderPath = "records" + File.separator + strategyName;
+        File folder = new File(folderPath);
+
+        if (!folder.exists() || !folder.isDirectory()) {
+            return 0;
+        }
+
+        File[] files = folder.listFiles((dir, name) -> name.startsWith("Record_") && name.endsWith(".csv"));
+        if (files == null || files.length == 0) {
+            return 0;
+        }
+
+        int maxScore = 0;
+        for (File f : files) {
+            try {
+                String name = f.getName();
+                // Extracts "135" from "Record_135Pieces.csv"
+                String scoreStr = name.substring("Record_".length(), name.indexOf("Pieces"));
+                maxScore = Math.max(maxScore, Integer.parseInt(scoreStr));
+            } catch (Exception e) {
+                // Skip files that don't match the expected naming convention
+            }
+        }
+        return maxScore;
+    }
+
     // <--- NEW: Added strategyName parameter --->
     public static synchronized void saveRecord(int[][] mainBoard, int piecesPlaced, String strategyName) {
         // Create a specific subfolder for the strategy

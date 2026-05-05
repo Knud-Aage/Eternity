@@ -315,4 +315,5 @@ extern "C" __global__ void solveRepairMode(
             }
         }
     }
+    atomicAdd(d_totalSteps, stepCounter);
 }
