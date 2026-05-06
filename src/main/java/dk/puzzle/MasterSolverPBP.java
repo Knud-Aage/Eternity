@@ -12,9 +12,6 @@ import java.util.concurrent.atomic.AtomicLong;
 
 public class MasterSolverPBP implements Runnable {
 
-    // ==========================================================
-    // THE 3-PHASE CLAUDE ARCHITECTURE SETTINGS
-    // ==========================================================
     public static final int SEED_DEPTH = 40;
     public static final int LNS_THRESHOLD = 200;
     ConcurrentLinkedQueue<int[]> seedPool = new ConcurrentLinkedQueue<>();
@@ -78,7 +75,6 @@ public class MasterSolverPBP implements Runnable {
         this.currentStrategy = strategy;
         this.lockCenter = lockCenter;
 
-        // Opretter mappenavnet: f.eks. "TYPEWRITER_LOCKED"
         this.saveProfile = strategy.name() + (lockCenter ? "_LOCKED" : "_UNLOCKED");
         this.useGpu = useGpu;
 
@@ -106,9 +102,9 @@ public class MasterSolverPBP implements Runnable {
                 if (loaded[r] == null) continue;
                 for (int c = 0; c < 16; c++) {
                     int p = loaded[r][c];
-                    if (p != -1 && p != 0) { // Fjernet p!=0 kravet, hvis brikkenamnet er 0
+                    if (p != -1 && p != 0) {
                         bestBoard[r * 16 + c] = p;
-                        globalBestBoard[r * 16 + c] = p; // Klon over i bankboksen!
+                        globalBestBoard[r * 16 + c] = p;
                         loadedCount++;
                     }
                 }
@@ -153,7 +149,6 @@ public class MasterSolverPBP implements Runnable {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\n" + timestamp() + ">>> Shutdown hook: Saving final checkpoint...");
             synchronized (displayLock) {
-                // NYT: Gemmer fra BANKBOKSEN i stedet for det svajende arbejdsbord
                 CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
             }
         }));
@@ -191,7 +186,6 @@ public class MasterSolverPBP implements Runnable {
 
                 if (System.currentTimeMillis() - lastPeriodicSave > 300_000) {
                     synchronized (displayLock) {
-                        // NYT: Gemmer fra BANKBOKSEN periodisk
                         CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                     }
                     lastPeriodicSave = System.currentTimeMillis();
@@ -333,7 +327,7 @@ public class MasterSolverPBP implements Runnable {
             for (int step = 0; step < lockedPieces; step++) {
                 int idx = buildOrder[step];
                 if (lockCenter && idx == 135) continue;
-                flatResumeBoard[idx] = globalBestBoard[idx]; // <-- Forankret til sikker havn!
+                flatResumeBoard[idx] = globalBestBoard[idx];
             }
         }
     }
