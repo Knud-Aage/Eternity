@@ -22,7 +22,7 @@ public class MasterSolverPBP implements Runnable {
     private final PieceInventory inventory;
     private final CompatibilityIndex compatIndex;
     private final SurgeonHeuristics surgeon;
-    private GpuEngine gpuEngine;
+    private GpuEngine gpuEngine; // Changed to private, but not initialized in constructor
     private final boolean useGpu;
 
     // Threading
@@ -139,7 +139,7 @@ public class MasterSolverPBP implements Runnable {
     @Override
     public void run() {
         if (this.useGpu) {
-            this.gpuEngine = new GpuEngine(inventory, lockCenter);
+            this.gpuEngine = new GpuEngine(inventory, lockCenter); // <-- Moved instantiation here
         }
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
