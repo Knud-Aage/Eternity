@@ -15,14 +15,14 @@ public class MasterSolverPBP implements Runnable {
     // ==========================================================
     // THE 3-PHASE CLAUDE ARCHITECTURE SETTINGS
     // ==========================================================
-    public static final int SEED_DEPTH = 40;        // CPU bygger frø op til 40 brikker
-    public static final int LNS_THRESHOLD = 200;    // Kirurgen aktiveres ved 200 brikker
+    public static final int SEED_DEPTH = 40;
+    public static final int LNS_THRESHOLD = 200;
     ConcurrentLinkedQueue<int[]> seedPool = new ConcurrentLinkedQueue<>();
 
     private final PieceInventory inventory;
     private final CompatibilityIndex compatIndex;
     private final SurgeonHeuristics surgeon;
-    private GpuEngine gpuEngine; // Changed to private, but not initialized in constructor
+    private GpuEngine gpuEngine;
     private final boolean useGpu;
 
     // Threading
@@ -34,7 +34,8 @@ public class MasterSolverPBP implements Runnable {
 
     // Board State
     private final int[] flatBoard = new int[256];
-    int[] bestBoard = new int[256];
+    int[] bestBoard = new int[256];                         // Arbejdsbordet
+    private final int[] globalBestBoard = new int[256];     // NYT: BANKBOKSEN (holder kun High Score)
     final int[] flatResumeBoard = new int[256];
     final boolean[] usedPhysicalPieces = new boolean[256];
     final int[] tabuTenure = new int[256];
@@ -64,17 +65,20 @@ public class MasterSolverPBP implements Runnable {
     private volatile int stagnationLimitMinutes = 20;
     volatile boolean manualOverrideRequested = false;
     private volatile int manualBaseCampTarget = 0;
-    private volatile double extinctionThreshold = 0.98; // GUI Bridge
+    private volatile double extinctionThreshold = 0.98;
 
     public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
         Arrays.fill(flatBoard, -1);
         Arrays.fill(bestBoard, -1);
+        Arrays.fill(globalBestBoard, -1);
         Arrays.fill(flatResumeBoard, -1);
 
         this.inventory = inventory;
         this.targetPiece = trueCenterPiece;
         this.currentStrategy = strategy;
         this.lockCenter = lockCenter;
+
+        // Opretter mappenavnet: f.eks. "TYPEWRITER_LOCKED"
         this.saveProfile = strategy.name() + (lockCenter ? "_LOCKED" : "_UNLOCKED");
         this.useGpu = useGpu;
 
@@ -102,8 +106,9 @@ public class MasterSolverPBP implements Runnable {
                 if (loaded[r] == null) continue;
                 for (int c = 0; c < 16; c++) {
                     int p = loaded[r][c];
-                    if (p != -1 && p != 0) {
+                    if (p != -1 && p != 0) { // Fjernet p!=0 kravet, hvis brikkenamnet er 0
                         bestBoard[r * 16 + c] = p;
+                        globalBestBoard[r * 16 + c] = p; // Klon over i bankboksen!
                         loadedCount++;
                     }
                 }
@@ -111,10 +116,13 @@ public class MasterSolverPBP implements Runnable {
             if (loadedCount > 0) {
                 this.absoluteHighScore = loadedCount;
                 this.deepestStep = loadedCount;
-                if (lockCenter) bestBoard[135] = targetPiece;
+                if (lockCenter) {
+                    bestBoard[135] = targetPiece;
+                    globalBestBoard[135] = targetPiece;
+                }
                 System.arraycopy(bestBoard, 0, flatBoard, 0, 256);
                 System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
-                updateDisplay(absoluteHighScore, buildDisplayBoard(bestBoard));
+                updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
                 System.out.println(timestamp() + ">>> Loaded checkpoint: " + absoluteHighScore + " pieces.");
             }
         }
@@ -139,13 +147,14 @@ public class MasterSolverPBP implements Runnable {
     @Override
     public void run() {
         if (this.useGpu) {
-            this.gpuEngine = new GpuEngine(inventory, lockCenter); // <-- Moved instantiation here
+            this.gpuEngine = new GpuEngine(inventory, lockCenter);
         }
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\n" + timestamp() + ">>> Shutdown hook: Saving final checkpoint...");
             synchronized (displayLock) {
-                CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                // NYT: Gemmer fra BANKBOKSEN i stedet for det svajende arbejdsbord
+                CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
             }
         }));
 
@@ -162,7 +171,7 @@ public class MasterSolverPBP implements Runnable {
         long lastPeriodicSave = System.currentTimeMillis();
 
         while (true) {
-            try { // <--- NYT: Grib alle fejl!
+            try {
                 if (manualOverrideRequested) {
                     manualOverrideRequested = false;
                     absoluteHighScore = manualBaseCampTarget;
@@ -170,7 +179,6 @@ public class MasterSolverPBP implements Runnable {
                     try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
                 }
 
-                // THE HOLY GRAIL PIPELINE ROUTING
                 if (gpuEngine != null && deepestStep >= LNS_THRESHOLD) {
                     runPhase3_GpuSurgeon();
                 }
@@ -183,12 +191,12 @@ public class MasterSolverPBP implements Runnable {
 
                 if (System.currentTimeMillis() - lastPeriodicSave > 300_000) {
                     synchronized (displayLock) {
-                        CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                        // NYT: Gemmer fra BANKBOKSEN periodisk
+                        CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                     }
                     lastPeriodicSave = System.currentTimeMillis();
                 }
             } catch (Exception e) {
-                // NYT: Hvis noget crasher, får vi det at vide i loggen!
                 System.out.println("\n" + timestamp() + ">>> [FATAL ERROR] PIPELINE CRASHED: ");
                 e.printStackTrace();
                 try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
@@ -196,11 +204,7 @@ public class MasterSolverPBP implements Runnable {
         }
     }
 
-    // ==========================================================
-    // PHASE 1: CPU SEED GENERATOR
-    // ==========================================================
     void runPhase1_CpuSeedGen() {
-        // FIX: Vi bygger friske frø fra bunden for at sikre maksimal diversitet!
         Arrays.fill(flatResumeBoard, -1);
         Arrays.fill(usedPhysicalPieces, false);
 
@@ -217,9 +221,6 @@ public class MasterSolverPBP implements Runnable {
         }
     }
 
-    // ==========================================================
-    // PHASE 2: GPU DEEP DFS EXPLORER
-    // ==========================================================
     void runPhase2_GpuDeepDfs() {
         List<int[]> seeds = new ArrayList<>();
         for (int i = 0; i < targetBatchSize; i++) {
@@ -247,7 +248,6 @@ public class MasterSolverPBP implements Runnable {
             handleVictory(bestBoardOut);
         }
 
-        // KUN opdater brættet, hvis GPU'en faktisk returnerede et bræt, der var bedre end startpunktet
         if (result.newHighScore > scoreBefore) {
             deepestStep = result.newHighScore;
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
@@ -255,7 +255,9 @@ public class MasterSolverPBP implements Runnable {
 
             if (deepestStep > absoluteHighScore) {
                 absoluteHighScore = deepestStep;
-                RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                // REKORD! Lås fast i Bankboksen
+                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                 System.out.println("\n" + timestamp() + ">>> PHASE 2 (GPU) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
             } else {
                 System.out.println(timestamp() + ">>> PHASE 2 (GPU) Pushed seed to: " + deepestStep + " pieces.");
@@ -263,9 +265,6 @@ public class MasterSolverPBP implements Runnable {
         }
     }
 
-    // ==========================================================
-    // PHASE 3: GPU SURGEON (LNS)
-    // ==========================================================
     void runPhase3_GpuSurgeon() {
         int numClones = 50000;
         int holesToPunch = 40;
@@ -298,7 +297,9 @@ public class MasterSolverPBP implements Runnable {
 
             if (deepestStep > absoluteHighScore) {
                 absoluteHighScore = deepestStep;
-                RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                // REKORD! Lås fast i Bankboksen
+                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                 System.out.println("\n" + timestamp() + ">>> PHASE 3 (SURGEON) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
             }
             consecutiveExtinctions = 0;
@@ -322,22 +323,19 @@ public class MasterSolverPBP implements Runnable {
         System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END AT PHASE 3 [!!!]");
         System.out.println(timestamp() + ">>> Scrapping this branch, pulling new Phase 2 seeds...");
 
-        // Nulstil for at falde tilbage til Phase 2 / Phase 1
         deepestStep = SEED_DEPTH;
         consecutiveExtinctions = 0;
 
-        // Re-anchor the resume board to the best known board so Phase 1
-        // generates seeds that are diverse variations of the best known state,
-        // not from scratch.
-//        int lockedPieces = absoluteHighScore - 40;
-//        if (lockedPieces > 0) {
-//            Arrays.fill(flatResumeBoard, -1);
-//            for (int step = 0; step < lockedPieces; step++) {
-//                int idx = buildOrder[step];
-//                if (lockCenter && idx == 135) continue;
-//                flatResumeBoard[idx] = bestBoard[idx];
-//            }
-//        }
+        // Genopbyg fundamentet fra Bankboksen!
+        int lockedPieces = absoluteHighScore - 40;
+        if (lockedPieces > 0) {
+            Arrays.fill(flatResumeBoard, -1);
+            for (int step = 0; step < lockedPieces; step++) {
+                int idx = buildOrder[step];
+                if (lockCenter && idx == 135) continue;
+                flatResumeBoard[idx] = globalBestBoard[idx]; // <-- Forankret til sikker havn!
+            }
+        }
     }
 
     private void handleVictory(int[] winningBoard) {
@@ -347,9 +345,6 @@ public class MasterSolverPBP implements Runnable {
         System.exit(0);
     }
 
-    // ==========================================================
-    // HELPER METHODS
-    // ==========================================================
     private void reportSpeed() {
         if (isGpuBusy) {
             System.out.println(timestamp() + "[STATUS] GPU Phase 2 is processing millions of moves per second...");
@@ -403,16 +398,13 @@ public class MasterSolverPBP implements Runnable {
 
     public enum BuildStrategy { TYPEWRITER, SPIRAL }
 
-    // ==========================================================
-    // CPU SEARCH WORKER (PHASE 1 SEED GENERATOR)
-    // ==========================================================
     class CpuSearchWorker implements Callable<Boolean> {
         private final int[] localBoard = new int[256];
         private final int[] localResumeBoard = new int[256];
         private final boolean[] localUsed = new boolean[256];
         private final Random rnd = new Random();
         private final int activeBatch;
-        private long localTrialCount = 0; // NY: Tilbagefører Trial-speedometeret!
+        private long localTrialCount = 0;
 
         public CpuSearchWorker(int activeBatch) {
             this.activeBatch = activeBatch;
@@ -440,7 +432,6 @@ public class MasterSolverPBP implements Runnable {
         @Override
         public Boolean call() {
             boolean result = solve(0);
-            // Tøm resterne til speedometeret, inden tråden dør!
             globalCpuTrialCount.addAndGet(localTrialCount);
             return result;
         }
@@ -469,10 +460,8 @@ public class MasterSolverPBP implements Runnable {
                 int[] seed = new int[256];
                 System.arraycopy(localBoard, 0, seed, 0, 256);
                 seedPool.add(seed);
-
                 currentBatchSize.incrementAndGet();
-
-                return false; // Returner FALSE for at tvinge CPU'en til at finde et NYT frø!
+                return false;
             }
 
             int boardIdx = buildOrder[step];

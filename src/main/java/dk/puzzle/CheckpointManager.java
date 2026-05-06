@@ -5,12 +5,12 @@ import java.io.*;
 public class CheckpointManager {
 
     // ==========================================================
-    // 1. SMART LOAD: Finder automatisk filen med det højeste tal i den valgte mappe
+    // 1. SMART LOAD: Kigger i den valgte mappe og finder største tal
     // ==========================================================
     public static int[][] loadSmartCheckpoint(String profileFolder) {
         File folder = new File(profileFolder);
 
-        // Tjek om mappen overhovedet findes (f.eks. "TYPEWRITER_LOCKED")
+        // Tjek om mappen findes (f.eks. "TYPEWRITER_LOCKED")
         if (!folder.exists() || !folder.isDirectory()) {
             System.out.println(">>> [SMART LOAD] Mappen '" + profileFolder + "' findes ikke endnu. Starter med et tomt bræt.");
             return null;
@@ -19,7 +19,7 @@ public class CheckpointManager {
         // Find alle .dat filer i mappen
         File[] files = folder.listFiles((dir, name) -> name.toLowerCase().endsWith(".dat"));
         if (files == null || files.length == 0) {
-            System.out.println(">>> [SMART LOAD] Ingen .dat checkpoints fundet i '" + profileFolder + "'.");
+            System.out.println(">>> [SMART LOAD] Ingen .dat checkpoints fundet i mappen '" + profileFolder + "'.");
             return null;
         }
 
@@ -30,8 +30,7 @@ public class CheckpointManager {
         for (File f : files) {
             String name = f.getName();
 
-            // MAGIC TRICK: Fjerner alle bogstaver og tegn, så kun tallene er tilbage
-            // F.eks. "checkpoint_214.dat" -> "214"
+            // Fjerner alt der ikke er tal (f.eks. "checkpoint_214.dat" -> "214")
             String numbersOnly = name.replaceAll("[^0-9]", "");
 
             if (!numbersOnly.isEmpty()) {
@@ -41,15 +40,12 @@ public class CheckpointManager {
                         maxScore = score;
                         bestFile = f;
                     }
-                } catch (NumberFormatException ignored) {
-                    // Ignorer filer, hvor tallet er for stort/mærkeligt
-                }
+                } catch (NumberFormatException ignored) {}
             }
         }
 
-        // Hvis vi fandt en fil med et tal, så indlæs den!
         if (bestFile != null) {
-            System.out.println(">>> [SMART LOAD] Indlæser det største checkpoint: " + bestFile.getName() + " fra mappen " + profileFolder);
+            System.out.println(">>> [SMART LOAD] Indlæser det største checkpoint: " + bestFile.getName() + " fra mappen: " + profileFolder);
             return loadBoardFromFile(bestFile);
         }
 
@@ -57,12 +53,12 @@ public class CheckpointManager {
     }
 
     // ==========================================================
-    // 2. GEM-FUNKTION: Opretter mappen automatisk og gemmer med scoren i navnet
+    // 2. GEM-FUNKTION: Gemmer rekorden i den korrekte mappe
     // ==========================================================
     public static void saveRecordCheckpoint(int[][] board, int score, String profileFolder) {
         File folder = new File(profileFolder);
         if (!folder.exists()) {
-            folder.mkdirs(); // Opret mappen (f.eks. TYPEWRITER_LOCKED), hvis den mangler
+            folder.mkdirs(); // Opret mappen automatisk
         }
 
         File file = new File(folder, "checkpoint_" + score + ".dat");
@@ -75,7 +71,7 @@ public class CheckpointManager {
     }
 
     // ==========================================================
-    // 3. HJÆLPEFUNKTION: Læser den fysiske fil ind i et 2D array
+    // 3. HJÆLPEFUNKTION: Læser filen ind i et 2D array
     // ==========================================================
     private static int[][] loadBoardFromFile(File file) {
         try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
