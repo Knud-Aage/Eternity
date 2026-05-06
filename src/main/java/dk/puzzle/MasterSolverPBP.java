@@ -200,18 +200,9 @@ public class MasterSolverPBP implements Runnable {
     // PHASE 1: CPU SEED GENERATOR
     // ==========================================================
     private void runPhase1_CpuSeedGen() {
-        // Only recompute lockedPieces / resumeBoard if deepestStep actually changed
-        int lockedPieces = Math.max(0, absoluteHighScore - 40); // use absoluteHighScore, not deepestStep
+        // FIX: Vi bygger friske frø fra bunden for at sikre maksimal diversitet!
         Arrays.fill(flatResumeBoard, -1);
         Arrays.fill(usedPhysicalPieces, false);
-
-        if (lockedPieces > 0) {
-            for (int step = 0; step < lockedPieces; step++) {
-                int idx = buildOrder[step];
-                if (lockCenter && idx == 135) continue;
-                flatResumeBoard[idx] = bestBoard[idx];
-            }
-        }
 
         currentBatchSize.set(seedPool.size());
 
@@ -221,10 +212,6 @@ public class MasterSolverPBP implements Runnable {
             for (int i = 0; i < numCores; i++) workers.add(new CpuSearchWorker(activeBatch));
 
             executor.invokeAll(workers);
-            // Hvis puljen ikke blev fuld, betyder det at CPU'en udtømte rummet.
-            if (seedPool.size() < activeBatch && deepestStep > 0) {
-                deepestStep = Math.max(0, deepestStep - 10); // Backtrack
-            }
         } catch (InterruptedException e) {
             return;
         }
@@ -244,25 +231,23 @@ public class MasterSolverPBP implements Runnable {
         int scoreBefore = deepestStep;
         int[] bestBoardOut = new int[256];
 
-        // ==========================================
-        // NYT: Fortæl systemet at GPU'en dykker!
-        // ==========================================
         isGpuBusy = true;
-        System.out.println(timestamp() + ">>> GPU Phase 2 diving deep with 50.000 seeds. This may take 10-40 seconds...");
+        System.out.println(timestamp() + ">>> GPU Phase 2 diving deep with 50.000 seeds...");
 
+        // FIX: Send 'deepestStep' i stedet for 'absoluteHighScore', så GPU'en rapporterer fremgang!
         GpuEngine.GpuResult result = gpuEngine.runDeepDfs(
-                seeds, SEED_DEPTH, absoluteHighScore, bestBoardOut, buildOrder);
+                seeds, SEED_DEPTH, deepestStep, bestBoardOut, buildOrder);
+
         globalGpuTrialCount.addAndGet(result.stepsTaken);
         isGpuBusy = false;
-        // ==========================================
-        System.out.printf("%s>>> GPU Phase 2 complete. Steps taken: %,d across %d seeds (avg %,.0f/seed)%n",
-                timestamp(), result.stepsTaken, seeds.size(),
-                (double) result.stepsTaken / seeds.size());
+
+        System.out.printf("%s>>> GPU Phase 2 complete. Steps taken: %,d%n", timestamp(), result.stepsTaken);
 
         if (result.solved) {
             handleVictory(bestBoardOut);
         }
 
+        // KUN opdater brættet, hvis GPU'en faktisk returnerede et bræt, der var bedre end startpunktet
         if (result.newHighScore > scoreBefore) {
             deepestStep = result.newHighScore;
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
@@ -335,25 +320,24 @@ public class MasterSolverPBP implements Runnable {
 
     private void triggerBranchScrap() {
         System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END AT PHASE 3 [!!!]");
-        System.out.println(timestamp() + ">>> Scrapping this branch, pulling new Phase 2 seeds from absoluteHighScore base...");
+        System.out.println(timestamp() + ">>> Scrapping this branch, pulling new Phase 2 seeds...");
 
-        // Reset deepestStep to seed depth to re-enter Phase 2,
-        // but keep bestBoard and absoluteHighScore intact!
+        // Nulstil for at falde tilbage til Phase 2 / Phase 1
         deepestStep = SEED_DEPTH;
         consecutiveExtinctions = 0;
 
         // Re-anchor the resume board to the best known board so Phase 1
         // generates seeds that are diverse variations of the best known state,
         // not from scratch.
-        int lockedPieces = absoluteHighScore - 40;
-        if (lockedPieces > 0) {
-            Arrays.fill(flatResumeBoard, -1);
-            for (int step = 0; step < lockedPieces; step++) {
-                int idx = buildOrder[step];
-                if (lockCenter && idx == 135) continue;
-                flatResumeBoard[idx] = bestBoard[idx];
-            }
-        }
+//        int lockedPieces = absoluteHighScore - 40;
+//        if (lockedPieces > 0) {
+//            Arrays.fill(flatResumeBoard, -1);
+//            for (int step = 0; step < lockedPieces; step++) {
+//                int idx = buildOrder[step];
+//                if (lockCenter && idx == 135) continue;
+//                flatResumeBoard[idx] = bestBoard[idx];
+//            }
+//        }
     }
 
     private void handleVictory(int[] winningBoard) {
