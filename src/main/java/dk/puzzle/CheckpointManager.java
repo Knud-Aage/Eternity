@@ -4,78 +4,84 @@ import java.io.*;
 
 public class CheckpointManager {
 
-    // 1. Save a High Score Record (Goes into the Strategy Folder)
-    public static void saveRecordCheckpoint(int[][] board, int score, String profile) {
-        File dir = new File(profile);
-        if (!dir.exists()) {
-            dir.mkdirs(); // Create the folder (e.g., "TYPEWRITER_LOCKED") if it doesn't exist
+    // ==========================================================
+    // 1. SMART LOAD: Finder automatisk filen med det højeste tal i den valgte mappe
+    // ==========================================================
+    public static int[][] loadSmartCheckpoint(String profileFolder) {
+        File folder = new File(profileFolder);
+
+        // Tjek om mappen overhovedet findes (f.eks. "TYPEWRITER_LOCKED")
+        if (!folder.exists() || !folder.isDirectory()) {
+            System.out.println(">>> [SMART LOAD] Mappen '" + profileFolder + "' findes ikke endnu. Starter med et tomt bræt.");
+            return null;
         }
-        File file = new File(dir, "checkpoint_" + score + ".dat");
-        saveToFile(board, file);
-    }
 
-    // 2. Save the ongoing Working State (Goes into the Main root folder)
-    public static void saveWorkingState(int[][] board) {
-        File file = new File("checkpoint.dat");
-        saveToFile(board, file);
-    }
+        // Find alle .dat filer i mappen
+        File[] files = folder.listFiles((dir, name) -> name.toLowerCase().endsWith(".dat"));
+        if (files == null || files.length == 0) {
+            System.out.println(">>> [SMART LOAD] Ingen .dat checkpoints fundet i '" + profileFolder + "'.");
+            return null;
+        }
 
-    // 3. The Smart Loader (Checks Strategy folder first, then Main folder)
-    public static int[][] loadSmartCheckpoint(String profile) {
-        File dir = new File(profile);
-        int highestScore = -1;
         File bestFile = null;
+        int maxScore = -1;
 
-        // Step A: Scan the profile folder for any checkpoint > 209
-        if (dir.exists() && dir.isDirectory()) {
-            File[] files = dir.listFiles((d, name) -> name.startsWith("checkpoint_") && name.endsWith(".dat"));
-            if (files != null) {
-                for (File f : files) {
-                    try {
-                        String numStr = f.getName().replace("checkpoint_", "").replace(".dat", "");
-                        int score = Integer.parseInt(numStr);
-                        if (score > highestScore) {
-                            highestScore = score;
-                            bestFile = f;
-                        }
-                    } catch (NumberFormatException e) {
-                        // Ignore files that don't match the exact naming convention
+        // Scan filnavnene for at finde det højeste tal
+        for (File f : files) {
+            String name = f.getName();
+
+            // MAGIC TRICK: Fjerner alle bogstaver og tegn, så kun tallene er tilbage
+            // F.eks. "checkpoint_214.dat" -> "214"
+            String numbersOnly = name.replaceAll("[^0-9]", "");
+
+            if (!numbersOnly.isEmpty()) {
+                try {
+                    int score = Integer.parseInt(numbersOnly);
+                    if (score > maxScore) {
+                        maxScore = score;
+                        bestFile = f;
                     }
+                } catch (NumberFormatException ignored) {
+                    // Ignorer filer, hvor tallet er for stort/mærkeligt
                 }
             }
         }
 
-        // Step B: Decide which file to load based on the > 209 rule
-        if (highestScore > 209 && bestFile != null) {
-            System.out.println(">>> [SMART LOAD] Found High-Score Checkpoint in '" + profile + "/' with " + highestScore + " pieces.");
-            return loadFromFile(bestFile);
+        // Hvis vi fandt en fil med et tal, så indlæs den!
+        if (bestFile != null) {
+            System.out.println(">>> [SMART LOAD] Indlæser det største checkpoint: " + bestFile.getName() + " fra mappen " + profileFolder);
+            return loadBoardFromFile(bestFile);
         }
 
-        System.out.println(">>> [SMART LOAD] No checkpoint > 209 found in '" + profile + "/'. Falling back to main working state...");
-        File mainFile = new File("checkpoint.dat");
-        if (mainFile.exists()) {
-            return loadFromFile(mainFile);
-        }
-
-        System.out.println(">>> [SMART LOAD] No checkpoints found at all. Starting from a blank slate.");
         return null;
     }
 
-    // Helper: Standard Java Serialization writer
-    private static void saveToFile(int[][] board, File file) {
+    // ==========================================================
+    // 2. GEM-FUNKTION: Opretter mappen automatisk og gemmer med scoren i navnet
+    // ==========================================================
+    public static void saveRecordCheckpoint(int[][] board, int score, String profileFolder) {
+        File folder = new File(profileFolder);
+        if (!folder.exists()) {
+            folder.mkdirs(); // Opret mappen (f.eks. TYPEWRITER_LOCKED), hvis den mangler
+        }
+
+        File file = new File(folder, "checkpoint_" + score + ".dat");
+
         try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
             oos.writeObject(board);
         } catch (IOException e) {
-            System.err.println("Failed to save checkpoint: " + e.getMessage());
+            System.err.println(">>> [FEJL] Kunne ikke gemme checkpoint: " + e.getMessage());
         }
     }
 
-    // Helper: Standard Java Serialization reader
-    private static int[][] loadFromFile(File file) {
+    // ==========================================================
+    // 3. HJÆLPEFUNKTION: Læser den fysiske fil ind i et 2D array
+    // ==========================================================
+    private static int[][] loadBoardFromFile(File file) {
         try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
             return (int[][]) ois.readObject();
         } catch (Exception e) {
-            System.err.println("Failed to load checkpoint " + file.getName() + ": " + e.getMessage());
+            System.err.println(">>> [FEJL] Kunne ikke læse filen " + file.getName() + ": " + e.getMessage());
             return null;
         }
     }

@@ -176,7 +176,7 @@ extern "C" __global__ void solvePBP(
 
     // Budget: generous but finite to avoid indefinite hangs.
     // 200M steps ~= a few seconds on GPU; adjust as needed.
-    const unsigned long long STEP_BUDGET = 200000000ULL;
+    const unsigned long long STEP_BUDGET = 100000ULL;
 
     while (step >= startingStep && step < 256) {
 

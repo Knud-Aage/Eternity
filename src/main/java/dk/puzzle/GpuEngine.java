@@ -169,7 +169,7 @@ public class GpuEngine {
         cuMemAlloc(d_totalSteps, Sizeof.LONG);
         cuMemcpyHtoD(d_totalSteps, Pointer.to(new long[]{0L}), Sizeof.LONG);
 
-        int maxStepsPerThread = 5_000_000;
+        int maxStepsPerThread = 100_000;
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards), Pointer.to(new int[]{numBoards}),
                 Pointer.to(d_allOrientations), Pointer.to(d_physicalMapping),

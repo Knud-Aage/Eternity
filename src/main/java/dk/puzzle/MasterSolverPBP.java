@@ -17,7 +17,7 @@ public class MasterSolverPBP implements Runnable {
     // ==========================================================
     public static final int SEED_DEPTH = 40;        // CPU bygger frø op til 40 brikker
     public static final int LNS_THRESHOLD = 200;    // Kirurgen aktiveres ved 200 brikker
-    private final ConcurrentLinkedQueue<int[]> seedPool = new ConcurrentLinkedQueue<>();
+    ConcurrentLinkedQueue<int[]> seedPool = new ConcurrentLinkedQueue<>();
 
     private final PieceInventory inventory;
     private final CompatibilityIndex compatIndex;
@@ -30,23 +30,23 @@ public class MasterSolverPBP implements Runnable {
     private final int numCores;
     private final int targetBatchSize = 50000;
     private volatile int userBatchSizeOverride = -1;
-    private final AtomicInteger currentBatchSize = new AtomicInteger(0);
+    AtomicInteger currentBatchSize = new AtomicInteger(0);
 
     // Board State
     private final int[] flatBoard = new int[256];
-    private final int[] bestBoard = new int[256];
-    private final int[] flatResumeBoard = new int[256];
-    private final boolean[] usedPhysicalPieces = new boolean[256];
-    private final int[] tabuTenure = new int[256];
-    private final int[] buildOrder = new int[256];
+    int[] bestBoard = new int[256];
+    final int[] flatResumeBoard = new int[256];
+    final boolean[] usedPhysicalPieces = new boolean[256];
+    final int[] tabuTenure = new int[256];
+    final int[] buildOrder = new int[256];
 
-    private volatile int absoluteHighScore = 0;
-    private volatile int deepestStep = 0;
-    private int currentRepairIteration = 0;
-    private int consecutiveExtinctions = 0;
+    volatile int absoluteHighScore = 0;
+    volatile int deepestStep = 0;
+    int currentRepairIteration = 0;
+    int consecutiveExtinctions = 0;
 
     private final boolean lockCenter;
-    private final int targetPiece;
+    final int targetPiece;
     private int centerPhysicalIdx = -1;
     private final String saveProfile;
     private final BuildStrategy currentStrategy;
@@ -62,7 +62,7 @@ public class MasterSolverPBP implements Runnable {
     private volatile boolean isGpuBusy = false;
 
     private volatile int stagnationLimitMinutes = 20;
-    private volatile boolean manualOverrideRequested = false;
+    volatile boolean manualOverrideRequested = false;
     private volatile int manualBaseCampTarget = 0;
     private volatile double extinctionThreshold = 0.98; // GUI Bridge
 
@@ -199,7 +199,7 @@ public class MasterSolverPBP implements Runnable {
     // ==========================================================
     // PHASE 1: CPU SEED GENERATOR
     // ==========================================================
-    private void runPhase1_CpuSeedGen() {
+    void runPhase1_CpuSeedGen() {
         // FIX: Vi bygger friske frø fra bunden for at sikre maksimal diversitet!
         Arrays.fill(flatResumeBoard, -1);
         Arrays.fill(usedPhysicalPieces, false);
@@ -220,7 +220,7 @@ public class MasterSolverPBP implements Runnable {
     // ==========================================================
     // PHASE 2: GPU DEEP DFS EXPLORER
     // ==========================================================
-    private void runPhase2_GpuDeepDfs() {
+    void runPhase2_GpuDeepDfs() {
         List<int[]> seeds = new ArrayList<>();
         for (int i = 0; i < targetBatchSize; i++) {
             int[] s = seedPool.poll();
@@ -234,14 +234,14 @@ public class MasterSolverPBP implements Runnable {
         isGpuBusy = true;
         System.out.println(timestamp() + ">>> GPU Phase 2 diving deep with 50.000 seeds...");
 
-        // FIX: Send 'deepestStep' i stedet for 'absoluteHighScore', så GPU'en rapporterer fremgang!
+        long start = System.currentTimeMillis();
         GpuEngine.GpuResult result = gpuEngine.runDeepDfs(
                 seeds, SEED_DEPTH, deepestStep, bestBoardOut, buildOrder);
 
         globalGpuTrialCount.addAndGet(result.stepsTaken);
         isGpuBusy = false;
 
-        System.out.printf("%s>>> GPU Phase 2 complete. Steps taken: %,d%n", timestamp(), result.stepsTaken);
+        System.out.printf("%s>>> GPU Phase 2 complete. Steps taken per second: %,d%n", timestamp(), Math.round((double)result.stepsTaken * 1000) / (System.currentTimeMillis() - start));
 
         if (result.solved) {
             handleVictory(bestBoardOut);
@@ -266,7 +266,7 @@ public class MasterSolverPBP implements Runnable {
     // ==========================================================
     // PHASE 3: GPU SURGEON (LNS)
     // ==========================================================
-    private void runPhase3_GpuSurgeon() {
+    void runPhase3_GpuSurgeon() {
         int numClones = 50000;
         int holesToPunch = 40;
 
@@ -310,7 +310,7 @@ public class MasterSolverPBP implements Runnable {
         }
     }
 
-    private void updateTabuList(int[] newBoard) {
+    void updateTabuList(int[] newBoard) {
         for (int i = 0; i < 256; i++) {
             if (newBoard[i] != bestBoard[i] && newBoard[i] != -1) {
                 tabuTenure[i] = currentRepairIteration + 25;
@@ -318,7 +318,7 @@ public class MasterSolverPBP implements Runnable {
         }
     }
 
-    private void triggerBranchScrap() {
+    void triggerBranchScrap() {
         System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END AT PHASE 3 [!!!]");
         System.out.println(timestamp() + ">>> Scrapping this branch, pulling new Phase 2 seeds...");
 
@@ -352,7 +352,7 @@ public class MasterSolverPBP implements Runnable {
     // ==========================================================
     private void reportSpeed() {
         if (isGpuBusy) {
-            System.out.println(timestamp() + "[STATUS] GPU Phase 2 er under vandet! Kværner millioner af træk i dybden...");
+            System.out.println(timestamp() + "[STATUS] GPU Phase 2 is processing millions of moves per second...");
             return;
         }
 
@@ -373,7 +373,7 @@ public class MasterSolverPBP implements Runnable {
         lastThroughputReportTime = now;
     }
 
-    private void retreat(int targetStep, String logMessage) {
+    void retreat(int targetStep, String logMessage) {
         deepestStep = Math.max(0, targetStep);
         for (int s = deepestStep; s < 256; s++) bestBoard[buildOrder[s]] = -1;
         if (lockCenter) bestBoard[135] = targetPiece;
@@ -381,13 +381,13 @@ public class MasterSolverPBP implements Runnable {
         if (logMessage != null) System.out.println(logMessage);
     }
 
-    private int countPieces(int[] board) {
+    int countPieces(int[] board) {
         int count = 0;
         for (int p : board) if (p != -1 && p != -2) count++;
         return count;
     }
 
-    private int[][] buildDisplayBoard(int[] sourceArray) {
+    int[][] buildDisplayBoard(int[] sourceArray) {
         int[][] displayBoard = new int[16][16];
         for (int i = 0; i < 16; i++) Arrays.fill(displayBoard[i], -1);
         for (int i = 0; i < 256; i++) {
@@ -397,7 +397,7 @@ public class MasterSolverPBP implements Runnable {
         return displayBoard;
     }
 
-    private void updateDisplay(int score, int[][] displayBoard) {
+    void updateDisplay(int score, int[][] displayBoard) {
         Main.updateDisplay(score, this.absoluteHighScore, displayBoard);
     }
 
@@ -406,7 +406,7 @@ public class MasterSolverPBP implements Runnable {
     // ==========================================================
     // CPU SEARCH WORKER (PHASE 1 SEED GENERATOR)
     // ==========================================================
-    private class CpuSearchWorker implements Callable<Boolean> {
+    class CpuSearchWorker implements Callable<Boolean> {
         private final int[] localBoard = new int[256];
         private final int[] localResumeBoard = new int[256];
         private final boolean[] localUsed = new boolean[256];
