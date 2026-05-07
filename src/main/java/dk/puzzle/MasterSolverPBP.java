@@ -227,7 +227,7 @@ public class MasterSolverPBP implements Runnable {
         int[] bestBoardOut = new int[256];
 
         isGpuBusy = true;
-        System.out.println(timestamp() + ">>> GPU Phase 2 diving deep with 50.000 seeds...");
+        System.out.println(timestamp() + ">>> GPU Phase 2 diving deep with 50.000 seeds and processing millions of moves per second...");
 
         long start = System.currentTimeMillis();
         GpuEngine.GpuResult result = gpuEngine.runDeepDfs(
@@ -341,7 +341,7 @@ public class MasterSolverPBP implements Runnable {
 
     private void reportSpeed() {
         if (isGpuBusy) {
-            System.out.println(timestamp() + "[STATUS] GPU Phase 2 is processing millions of moves per second...");
+//            System.out.println(timestamp() + "[STATUS] GPU Phase 2 is processing millions of moves per second...");
             return;
         }
 
