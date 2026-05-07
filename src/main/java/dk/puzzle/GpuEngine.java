@@ -33,18 +33,19 @@ public class GpuEngine {
 
         repairFunction = new CUfunction();
         cuModuleGetFunction(repairFunction, cuModule, "solveRepairMode");
-
     }
 
     // ==========================================================
     // PHASE 2: DEEP DFS (GPU EXPLORER)
     // ==========================================================
-    public GpuResult runDeepDfs(List<int[]> seeds, int startingStep, int currentHighScore, int[] bestBoardOut, int[] buildOrder) {
+    public GpuResult runDeepDfs(List<int[]> seeds, int startingStep, int currentHighScore,
+                                 int[] bestBoardOut, int[] buildOrder) {
         int numBoards = seeds.size();
-        if (numBoards == 0) return new GpuResult(currentHighScore, false, 0);
+        if (numBoards == 0) return new GpuResult(currentHighScore, false, 0, new int[0]);
 
         int[] flatBoards = new int[numBoards * 256];
-        for (int i = 0; i < numBoards; i++) System.arraycopy(seeds.get(i), 0, flatBoards, i * 256, 256);
+        for (int i = 0; i < numBoards; i++)
+            System.arraycopy(seeds.get(i), 0, flatBoards, i * 256, 256);
 
         CUdeviceptr d_partialBoards = new CUdeviceptr();
         cuMemAlloc(d_partialBoards, (long) numBoards * 256 * Sizeof.INT);
@@ -82,6 +83,7 @@ public class GpuEngine {
 
         CUdeviceptr d_threadDepths = new CUdeviceptr();
         cuMemAlloc(d_threadDepths, (long) numBoards * Sizeof.INT);
+        cuMemcpyHtoD(d_threadDepths, Pointer.to(new int[numBoards]), (long) numBoards * Sizeof.INT);
 
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards),
@@ -97,7 +99,7 @@ public class GpuEngine {
                 Pointer.to(d_totalSteps),
                 Pointer.to(new int[]{lockCenter ? 1 : 0}),
                 Pointer.to(d_threadDepths),
-                Pointer.to(new int[]{0}) // Radar Leash slået fra = Uendelig dybde!
+                Pointer.to(new int[]{0})
         );
 
         int blockSizeX = 256;
@@ -105,7 +107,6 @@ public class GpuEngine {
         cuLaunchKernel(dfsFunction, gridSizeX, 1, 1, blockSizeX, 1, 1, 0, null, kernelParameters, null);
         cuCtxSynchronize();
 
-        // Hent resultater
         int[] resultHighScore = new int[1];
         cuMemcpyDtoH(Pointer.to(resultHighScore), d_gpuHighScore, Sizeof.INT);
 
@@ -114,6 +115,9 @@ public class GpuEngine {
 
         int[] solved = new int[1];
         cuMemcpyDtoH(Pointer.to(solved), d_solvedFlag, Sizeof.INT);
+
+        int[] threadDepths = new int[numBoards];
+        cuMemcpyDtoH(Pointer.to(threadDepths), d_threadDepths, (long) numBoards * Sizeof.INT);
 
         if (resultHighScore[0] > currentHighScore) {
             cuMemcpyDtoH(Pointer.to(bestBoardOut), d_bestBoardOut, 256L * Sizeof.INT);
@@ -128,16 +132,19 @@ public class GpuEngine {
         cuMemFree(d_gpuHighScore); cuMemFree(d_bestBoardOut); cuMemFree(d_totalSteps);
         cuMemFree(d_threadDepths);
 
-        return new GpuResult(resultHighScore[0], solved[0] == 1, totalSteps[0]);
+        return new GpuResult(resultHighScore[0], solved[0] == 1, totalSteps[0], threadDepths);
     }
 
-    // Returnerer et array: [0] = Ny HighScore (eller gl. hvis ikke slået), [1] = Er løst? (1/0), [2] = Antal skridt talt
+    // ==========================================================
+    // PHASE 3: REPAIR MODE (LNS hole-filling)
+    // ==========================================================
     public GpuResult runRepairMode(List<int[]> swissCheeseBoards, int currentHighScore, int[] bestBoardOut) {
         int numBoards = swissCheeseBoards.size();
-        if (numBoards == 0) return new GpuResult(currentHighScore, false, 0);
+        if (numBoards == 0) return new GpuResult(currentHighScore, false, 0, new int[0]);
 
         int[] flatBoards = new int[numBoards * 256];
-        for (int i = 0; i < numBoards; i++) System.arraycopy(swissCheeseBoards.get(i), 0, flatBoards, i * 256, 256);
+        for (int i = 0; i < numBoards; i++)
+            System.arraycopy(swissCheeseBoards.get(i), 0, flatBoards, i * 256, 256);
 
         CUdeviceptr d_partialBoards = new CUdeviceptr();
         cuMemAlloc(d_partialBoards, (long) numBoards * 256 * Sizeof.INT);
@@ -183,17 +190,13 @@ public class GpuEngine {
         cuLaunchKernel(repairFunction, gridSizeX, 1, 1, blockSizeX, 1, 1, 0, null, kernelParameters, null);
         cuCtxSynchronize();
 
-        // Hent resultater
         int[] resultHighScore = new int[1];
         cuMemcpyDtoH(Pointer.to(resultHighScore), d_gpuHighScore, Sizeof.INT);
 
         long[] totalSteps = new long[1];
         cuMemcpyDtoH(Pointer.to(totalSteps), d_totalSteps, Sizeof.LONG);
-
         long steps = totalSteps[0];
-        if (steps == 0) {
-            steps = (long) numBoards * 150000;
-        }
+        if (steps == 0) steps = (long) numBoards * 150000;
 
         int[] solved = new int[1];
         cuMemcpyDtoH(Pointer.to(solved), d_solvedFlag, Sizeof.INT);
@@ -202,7 +205,7 @@ public class GpuEngine {
             cuMemcpyDtoH(Pointer.to(bestBoardOut), d_bestBoardOut, 256L * Sizeof.INT);
         }
         if (solved[0] == 1) {
-            cuMemcpyDtoH(Pointer.to(bestBoardOut), d_solution, 256L * Sizeof.INT); // Gem vinderbrættet
+            cuMemcpyDtoH(Pointer.to(bestBoardOut), d_solution, 256L * Sizeof.INT);
         }
 
         // Ryd op
@@ -210,13 +213,20 @@ public class GpuEngine {
         cuMemFree(d_solution); cuMemFree(d_solvedFlag); cuMemFree(d_gpuHighScore);
         cuMemFree(d_bestBoardOut); cuMemFree(d_totalSteps);
 
-        return new GpuResult(resultHighScore[0], solved[0] == 1, steps);
+        return new GpuResult(resultHighScore[0], solved[0] == 1, steps, new int[0]);
     }
 
     public static class GpuResult {
         public final int newHighScore;
         public final boolean solved;
         public final long stepsTaken;
-        public GpuResult(int h, boolean s, long st) { newHighScore = h; solved = s; stepsTaken = st; }
+        public final int[] threadDepths;
+
+        public GpuResult(int h, boolean s, long st, int[] td) {
+            newHighScore = h;
+            solved = s;
+            stepsTaken = st;
+            threadDepths = td;
+        }
     }
 }

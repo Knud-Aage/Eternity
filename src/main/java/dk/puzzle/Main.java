@@ -17,9 +17,7 @@ public class Main {
 
     private static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
-//    private static final AtomicInteger currentScore = new AtomicInteger(0);
-    private static final AtomicInteger highScore = new AtomicInteger(0); // <-- NY TILFØJELSE
-//    private static final int[][] currentDisplayBoard = new int[16][];
+    private static final AtomicInteger highScore = new AtomicInteger(0);
 
     public static void main(String[] args) {
         initLogging();
@@ -216,10 +214,10 @@ public class Main {
                 int current = currentScore.get();
                 int record = highScore.get();
 
-                String status = current == 0 ? " [SØGER...]" : (current == 256 ? " [LØST!]" : " [ARBEJDER...]");
-                // Her bygger vi den nye, detaljerede titelbar!
-                frame.setTitle(String.format("Eternity II - Aktuel: %d | Rekord: %d | Total: 256 brikker%s", current, record, status));
-            }).start();        });
+                String status = current == 0 ? " [SEARCHING...]" : (current == 256 ? " [SOLVED!]" : " [WORKING...]");
+                frame.setTitle(String.format("Eternity II - Current: %d | Record: %d | Total: 256 pieces %s", current, record, status));
+            }).start();
+        });
     }
 
     private static void initLogging() {
@@ -244,17 +242,6 @@ public class Main {
             }
         }
     }
-
-//    public static synchronized void updateDisplay(int score, int[][] board) {
-//        currentScore.set(score);
-//        for (int i = 0; i < 16; i++) {
-//            if (board[i] != null) {
-//                currentDisplayBoard[i] = board[i].clone();
-//            } else {
-//                currentDisplayBoard[i] = null;
-//            }
-//        }
-//    }
 
     private static int[] loadPieces() {
         try (BufferedReader br = new BufferedReader(new FileReader("pieces.csv"))) {

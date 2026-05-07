@@ -7,7 +7,7 @@ import java.util.Random;
 
 public class SurgeonHeuristics {
     private final boolean lockCenter;
-    private double targetedHolesPercentage; // Fjernet 'final' her!
+    private double targetedHolesPercentage;
 
     public SurgeonHeuristics(boolean lockCenter, double targetedHolesPercentage) {
         this.lockCenter = lockCenter;
@@ -24,11 +24,10 @@ public class SurgeonHeuristics {
         int[] placedIndices = new int[256];
         int placedCount = 0;
 
-        // 1. Find alle gyldige felter (undgå tomme felter og tabu-brikker)
         for (int i = 0; i < 256; i++) {
             if (bestBoard[i] != -1 && bestBoard[i] != -2) {
                 if (lockCenter && i == 135) continue;
-                if (tabuTenure[i] > currentIteration) continue; // Tabu tjek
+                if (tabuTenure[i] > currentIteration) continue;
                 placedIndices[placedCount++] = i;
             }
         }
@@ -36,7 +35,6 @@ public class SurgeonHeuristics {
         int actualHoles = Math.min(numHoles, placedCount);
         int[] conflicts = scoreConflicts(bestBoard);
 
-        // 2. Sorter efter konflikt (High-conflict hot zone)
         Integer[] sortedByConflict = new Integer[placedCount];
         for (int i = 0; i < placedCount; i++) sortedByConflict[i] = placedIndices[i];
         Arrays.sort(sortedByConflict, (a, b) -> Integer.compare(conflicts[b], conflicts[a]));
@@ -48,13 +46,11 @@ public class SurgeonHeuristics {
         int targetedHoles = (int) Math.round(actualHoles * targetedHolesPercentage);
         int randomHoles = actualHoles - targetedHoles;
 
-        // 3. Generer kloner
         for (int clone = 0; clone < numClones; clone++) {
             int[] clonedBoard = new int[256];
             System.arraycopy(bestBoard, 0, clonedBoard, 0, 256);
             boolean[] punched = new boolean[256];
 
-            // Fase A: Hot zone huller
             int hotPicked = 0;
             int[] hotShuffled = hotZone.clone();
             for (int i = 0; i < hotShuffled.length && hotPicked < targetedHoles; i++) {
@@ -70,7 +66,6 @@ public class SurgeonHeuristics {
                 }
             }
 
-            // Fase B: Random huller
             int randPicked = 0;
             int[] allShuffled = Arrays.copyOf(placedIndices, placedCount);
             for (int i = 0; i < allShuffled.length && randPicked < randomHoles; i++) {
@@ -86,7 +81,6 @@ public class SurgeonHeuristics {
                 }
             }
 
-            // Slå altid frontier-feltet ud
             if (currentHighScore < 256) clonedBoard[buildOrder[currentHighScore]] = -2;
             swissCheeseBoards.add(clonedBoard);
         }

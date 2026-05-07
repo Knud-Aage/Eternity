@@ -81,9 +81,7 @@ public class RecordManager {
         return maxScore;
     }
 
-    // <--- NEW: Added strategyName parameter --->
     public static synchronized void saveRecord(int[][] mainBoard, int piecesPlaced, String strategyName) {
-        // Create a specific subfolder for the strategy
         String folderPath = "records" + File.separator + strategyName;
         new File(folderPath).mkdirs();
 

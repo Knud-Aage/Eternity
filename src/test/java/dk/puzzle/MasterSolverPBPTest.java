@@ -174,10 +174,10 @@ class MasterSolverPBPTest {
     void runPhase1_CpuSeedGen_invokesWorkers() throws Exception {
         // Given
         solverSpy.setBatchSizeOverride(10);
-        
+
         // When
         solverSpy.runPhase1_CpuSeedGen();
-        
+
         // Then
         // Verify that the batch size was updated (even if seeds aren't found in mock environment immediately)
         assertNotNull(solverSpy.seedPool);
@@ -190,11 +190,11 @@ class MasterSolverPBPTest {
         Arrays.fill(seed, 1);
         solverSpy.seedPool.add(seed);
         for(int i=1; i<50000; i++) solverSpy.seedPool.add(new int[256]); // Fill to targetBatchSize
-        
+
         int[] gpuResultBoard = new int[256];
         Arrays.fill(gpuResultBoard, 5);
-        GpuEngine.GpuResult mockResult = new GpuEngine.GpuResult(100, false, 1000000L);
-        
+        GpuEngine.GpuResult mockResult = new GpuEngine.GpuResult(100, false, 1000000L, new int[0]);
+
         when(mockGpuEngine.runDeepDfs(anyList(), anyInt(), anyInt(), any(int[].class), any(int[].class)))
                 .thenAnswer(invocation -> {
                     System.arraycopy(gpuResultBoard, 0, (int[])invocation.getArguments()[3], 0, 256);
@@ -219,12 +219,12 @@ class MasterSolverPBPTest {
         solverSpy.deepestStep = 210;
         solverSpy.absoluteHighScore = 210;
         solverSpy.consecutiveExtinctions = 9; // One away from trigger
-        
+
         List<int[]> emptyList = new ArrayList<>();
         when(mockSurgeon.punchHoles(any(), anyInt(), anyInt(), any(), anyInt(), anyInt(), any()))
                 .thenReturn(emptyList);
-        
-        GpuEngine.GpuResult stagnantResult = new GpuEngine.GpuResult(210, false, 500000L);
+
+        GpuEngine.GpuResult stagnantResult = new GpuEngine.GpuResult(210, false, 500000L, new int[0]);
         when(mockGpuEngine.runRepairMode(anyList(), anyInt(), any(int[].class)))
                 .thenReturn(stagnantResult);
 

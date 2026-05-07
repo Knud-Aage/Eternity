@@ -31,8 +31,8 @@ public class MasterSolverPBP implements Runnable {
 
     // Board State
     private final int[] flatBoard = new int[256];
-    int[] bestBoard = new int[256];                         // Arbejdsbordet
-    private final int[] globalBestBoard = new int[256];     // NYT: BANKBOKSEN (holder kun High Score)
+    int[] bestBoard = new int[256];
+    private final int[] globalBestBoard = new int[256];
     final int[] flatResumeBoard = new int[256];
     final boolean[] usedPhysicalPieces = new boolean[256];
     final int[] tabuTenure = new int[256];
@@ -42,6 +42,7 @@ public class MasterSolverPBP implements Runnable {
     volatile int deepestStep = 0;
     int currentRepairIteration = 0;
     int consecutiveExtinctions = 0;
+    private int consecutiveGpuStagnation = 0;
 
     private final boolean lockCenter;
     final int targetPiece;
@@ -227,7 +228,6 @@ public class MasterSolverPBP implements Runnable {
         int[] bestBoardOut = new int[256];
 
         isGpuBusy = true;
-        System.out.println(timestamp() + ">>> GPU Phase 2 diving deep with 50.000 seeds and processing millions of moves per second...");
 
         long start = System.currentTimeMillis();
         GpuEngine.GpuResult result = gpuEngine.runDeepDfs(
@@ -236,7 +236,9 @@ public class MasterSolverPBP implements Runnable {
         globalGpuTrialCount.addAndGet(result.stepsTaken);
         isGpuBusy = false;
 
-        System.out.printf("%s>>> GPU Phase 2 complete. Steps taken per second: %,d%n", timestamp(), Math.round((double)result.stepsTaken * 1000) / (System.currentTimeMillis() - start));
+        long elapsed = System.currentTimeMillis() - start;
+        System.out.printf("%s>>> GPU Phase 2 complete. Steps taken per second: %,d%n",
+                timestamp(), Math.round((double)result.stepsTaken * 1000) / Math.max(1, elapsed));
 
         if (result.solved) {
             handleVictory(bestBoardOut);
@@ -244,18 +246,40 @@ public class MasterSolverPBP implements Runnable {
 
         if (result.newHighScore > scoreBefore) {
             deepestStep = result.newHighScore;
+            consecutiveGpuStagnation = 0;
+
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
             if (deepestStep > absoluteHighScore) {
                 absoluteHighScore = deepestStep;
-                // REKORD! Lås fast i Bankboksen
-                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
-                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
+                RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
                 System.out.println("\n" + timestamp() + ">>> PHASE 2 (GPU) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
             } else {
                 System.out.println(timestamp() + ">>> PHASE 2 (GPU) Pushed seed to: " + deepestStep + " pieces.");
             }
+        } else {
+            consecutiveGpuStagnation++;
+            System.out.printf("%s>>> PHASE 2 (GPU) No progress. Stagnation counter: %d/10%n", timestamp(), consecutiveGpuStagnation);
+        }
+
+        if (consecutiveGpuStagnation < 10) {
+            List<int[]> nextSeeds = SeedSelector.selectBest(
+                    seeds,
+                    result.threadDepths,
+                    targetBatchSize,
+                    new Random()
+            );
+
+            System.out.printf("%s>>> Phase 2 Evolution: Bred %d new seeds (Elite + Mutated) for next round!%n", timestamp(), nextSeeds.size());
+
+            seedPool.addAll(nextSeeds);
+            currentBatchSize.set(seedPool.size());
+        } else {
+            System.out.println("\n" + timestamp() + ">>> [!!!] Seed gene pool stagnated. Flushing for fresh CPU seeds...");
+            seedPool.clear();
+            currentBatchSize.set(0);
+            consecutiveGpuStagnation = 0;
         }
     }
 
@@ -291,7 +315,6 @@ public class MasterSolverPBP implements Runnable {
 
             if (deepestStep > absoluteHighScore) {
                 absoluteHighScore = deepestStep;
-                // REKORD! Lås fast i Bankboksen
                 System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
                 RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                 System.out.println("\n" + timestamp() + ">>> PHASE 3 (SURGEON) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
@@ -315,22 +338,15 @@ public class MasterSolverPBP implements Runnable {
 
     void triggerBranchScrap() {
         System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END AT PHASE 3 [!!!]");
-        System.out.println(timestamp() + ">>> Scrapping this branch, pulling new Phase 2 seeds...");
+        System.out.println(timestamp() + ">>> Scrapping this branch, pulling new Phase 1 seeds...");
 
         deepestStep = SEED_DEPTH;
         consecutiveExtinctions = 0;
 
-        // Genopbyg fundamentet fra Bankboksen!
-        int lockedPieces = absoluteHighScore - 40;
-        if (lockedPieces > 0) {
-            Arrays.fill(flatResumeBoard, -1);
-            for (int step = 0; step < lockedPieces; step++) {
-                int idx = buildOrder[step];
-                if (lockCenter && idx == 135) continue;
-                flatResumeBoard[idx] = globalBestBoard[idx];
-            }
-        }
-    }
+        seedPool.clear();
+        currentBatchSize.set(0);
+        consecutiveGpuStagnation = 0;
+   }
 
     private void handleVictory(int[] winningBoard) {
         System.out.println("\n" + timestamp() + ">>> ETERNITY II SOLVED BY GPU PIPELINE!!! <<<");
@@ -356,8 +372,10 @@ public class MasterSolverPBP implements Runnable {
         double cpuTps = cpuTrials / (elapsed / 1000.0);
         double gpuTps = gpuTrials / (elapsed / 1000.0);
 
-        System.out.printf("%s[SPEED] CPU Phase 1: %,.0f/s  |  GPU Phase 2/3: %,.0f/s\n",
-                timestamp(), cpuTps, gpuTps);
+        if (cpuTps != 0 || gpuTps != 0) {
+            System.out.printf("%s[SPEED] CPU Phase 1: %,.0f/s  |  GPU Phase 2/3: %,.0f/s\n",
+                    timestamp(), cpuTps, gpuTps);
+        }
 
         lastThroughputReportTime = now;
     }
