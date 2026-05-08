@@ -1,27 +1,31 @@
 package dk.puzzle;
 
 import java.io.*;
+import com.google.api.client.http.FileContent;
+import com.google.api.services.drive.Drive;
+import com.google.api.services.drive.model.File;
+
 
 public class CheckpointManager {
 
     public static int[][] loadSmartCheckpoint(String profileFolder) {
-        File folder = new File(profileFolder);
+        java.io.File folder = new java.io.File(profileFolder);
 
         if (!folder.exists() || !folder.isDirectory()) {
             System.out.println(">>> [SMART LOAD] Folder '" + profileFolder + "' doesn't exist yet. Start with an empty board.");
             return null;
         }
 
-        File[] files = folder.listFiles((dir, name) -> name.toLowerCase().endsWith(".dat"));
+        java.io.File[] files = folder.listFiles((dir, name) -> name.toLowerCase().endsWith(".dat"));
         if (files == null || files.length == 0) {
             System.out.println(">>> [SMART LOAD] No .dat checkpoints found in the folder '" + profileFolder + "'.");
             return null;
         }
 
-        File bestFile = null;
+        java.io.File bestFile = null;
         int maxScore = -1;
 
-        for (File f : files) {
+        for (java.io.File f : files) {
             String name = f.getName();
 
             String numbersOnly = name.replaceAll("[^0-9]", "");
@@ -46,25 +50,28 @@ public class CheckpointManager {
     }
 
     public static void saveRecordCheckpoint(int[][] board, int score, String profileFolder) {
-        File folder = new File(profileFolder);
+        java.io.File folder = new java.io.File(profileFolder);
         if (!folder.exists()) {
             folder.mkdirs();
         }
 
-        File file = new File(folder, "checkpoint_" + score + ".dat");
+        java.io.File file = new java.io.File(folder, "checkpoint_" + score + ".dat");
 
         try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
             oos.writeObject(board);
         } catch (IOException e) {
-            System.err.println(">>> [FEJL] Couldn't save the checkpoint: " + e.getMessage());
+            System.err.println(">>> [FEJL] Cou: " + e.getMessage());
         }
     }
 
-    private static int[][] loadBoardFromFile(File file) {
+    // ==========================================================
+    // 3. HJÆLPEFUNKTION: Læser filen ind i et 2D array
+    // ==========================================================
+    private static int[][] loadBoardFromFile(java.io.File file) {
         try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
             return (int[][]) ois.readObject();
         } catch (Exception e) {
-            System.err.println(">>> [FEJL] Couldn't read the file " + file.getName() + ": " + e.getMessage());
+            System.err.println(">>> Error: Couldn't read the file " + file.getName() + ": " + e.getMessage());
             return null;
         }
     }

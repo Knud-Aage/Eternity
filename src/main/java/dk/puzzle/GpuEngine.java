@@ -216,17 +216,6 @@ public class GpuEngine {
         return new GpuResult(resultHighScore[0], solved[0] == 1, steps, new int[0]);
     }
 
-    public static class GpuResult {
-        public final int newHighScore;
-        public final boolean solved;
-        public final long stepsTaken;
-        public final int[] threadDepths;
-
-        public GpuResult(int h, boolean s, long st, int[] td) {
-            newHighScore = h;
-            solved = s;
-            stepsTaken = st;
-            threadDepths = td;
-        }
+    public record GpuResult(int newHighScore, boolean solved, long stepsTaken, int[] threadDepths) {
     }
 }

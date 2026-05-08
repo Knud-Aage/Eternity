@@ -53,38 +53,31 @@ public class SurgeonHeuristics {
 
             int hotPicked = 0;
             int[] hotShuffled = hotZone.clone();
-            for (int i = 0; i < hotShuffled.length && hotPicked < targetedHoles; i++) {
-                int swapIdx = i + rnd.nextInt(hotShuffled.length - i);
-                int tmp = hotShuffled[i];
-                hotShuffled[i] = hotShuffled[swapIdx];
-                hotShuffled[swapIdx] = tmp;
-                int holeIdx = hotShuffled[i];
-                if (!punched[holeIdx]) {
-                    clonedBoard[holeIdx] = -2;
-                    punched[holeIdx] = true;
-                    hotPicked++;
-                }
-            }
+            hotStuffled(rnd, targetedHoles, clonedBoard, punched, hotPicked, hotShuffled);
 
             int randPicked = 0;
             int[] allShuffled = Arrays.copyOf(placedIndices, placedCount);
-            for (int i = 0; i < allShuffled.length && randPicked < randomHoles; i++) {
-                int swapIdx = i + rnd.nextInt(allShuffled.length - i);
-                int tmp = allShuffled[i];
-                allShuffled[i] = allShuffled[swapIdx];
-                allShuffled[swapIdx] = tmp;
-                int holeIdx = allShuffled[i];
-                if (!punched[holeIdx]) {
-                    clonedBoard[holeIdx] = -2;
-                    punched[holeIdx] = true;
-                    randPicked++;
-                }
-            }
+            hotStuffled(rnd, randomHoles, clonedBoard, punched, randPicked, allShuffled);
 
             if (currentHighScore < 256) clonedBoard[buildOrder[currentHighScore]] = -2;
             swissCheeseBoards.add(clonedBoard);
         }
         return swissCheeseBoards;
+    }
+
+    private void hotStuffled(Random rnd, int targetedHoles, int[] clonedBoard, boolean[] punched, int hotPicked, int[] hotShuffled) {
+        for (int i = 0; i < hotShuffled.length && hotPicked < targetedHoles; i++) {
+            int swapIdx = i + rnd.nextInt(hotShuffled.length - i);
+            int tmp = hotShuffled[i];
+            hotShuffled[i] = hotShuffled[swapIdx];
+            hotShuffled[swapIdx] = tmp;
+            int holeIdx = hotShuffled[i];
+            if (!punched[holeIdx]) {
+                clonedBoard[holeIdx] = -2;
+                punched[holeIdx] = true;
+                hotPicked++;
+            }
+        }
     }
 
     private int[] scoreConflicts(int[] sourceBoard) {

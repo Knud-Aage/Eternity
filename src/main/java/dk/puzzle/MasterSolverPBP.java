@@ -170,7 +170,6 @@ public class MasterSolverPBP implements Runnable {
             try {
                 if (manualOverrideRequested) {
                     manualOverrideRequested = false;
-                    absoluteHighScore = manualBaseCampTarget;
                     retreat(manualBaseCampTarget, timestamp() + ">>> User Override...");
                     try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
                 }
@@ -233,19 +232,19 @@ public class MasterSolverPBP implements Runnable {
         GpuEngine.GpuResult result = gpuEngine.runDeepDfs(
                 seeds, SEED_DEPTH, deepestStep, bestBoardOut, buildOrder);
 
-        globalGpuTrialCount.addAndGet(result.stepsTaken);
+        globalGpuTrialCount.addAndGet(result.stepsTaken());
         isGpuBusy = false;
 
         long elapsed = System.currentTimeMillis() - start;
         System.out.printf("%s>>> GPU Phase 2 complete. Steps taken per second: %,d%n",
-                timestamp(), Math.round((double)result.stepsTaken * 1000) / Math.max(1, elapsed));
+                timestamp(), Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
 
-        if (result.solved) {
+        if (result.solved()) {
             handleVictory(bestBoardOut);
         }
 
-        if (result.newHighScore > scoreBefore) {
-            deepestStep = result.newHighScore;
+        if (result.newHighScore() > scoreBefore) {
+            deepestStep = result.newHighScore();
             consecutiveGpuStagnation = 0;
 
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
@@ -266,7 +265,7 @@ public class MasterSolverPBP implements Runnable {
         if (consecutiveGpuStagnation < 10) {
             List<int[]> nextSeeds = SeedSelector.selectBest(
                     seeds,
-                    result.threadDepths,
+                    result.threadDepths(),
                     targetBatchSize,
                     new Random()
             );
@@ -303,12 +302,12 @@ public class MasterSolverPBP implements Runnable {
         int[] bestBoardOut = new int[256];
         GpuEngine.GpuResult result = gpuEngine.runRepairMode(swissCheeseBoards, deepestStep, bestBoardOut);
 
-        globalGpuTrialCount.addAndGet(result.stepsTaken);
+        globalGpuTrialCount.addAndGet(result.stepsTaken());
 
-        if (result.solved) handleVictory(bestBoardOut);
+        if (result.solved()) handleVictory(bestBoardOut);
 
-        if (result.newHighScore > scoreBefore) {
-            deepestStep = result.newHighScore;
+        if (result.newHighScore() > scoreBefore) {
+            deepestStep = result.newHighScore();
             updateTabuList(bestBoardOut);
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));

@@ -1,5 +1,8 @@
 package dk.puzzle;
 
+import com.google.api.client.http.FileContent;
+import com.google.api.services.drive.Drive;
+
 import javax.imageio.ImageIO;
 import java.awt.*;
 import java.awt.geom.AffineTransform;
@@ -15,6 +18,27 @@ public class RecordManager {
 
     static {
         loadImages();
+    }
+
+    public static void uploadToDrive(java.io.File localFile, String mimeType) {
+        try {
+            System.out.println(">>> [GOOGLE DRIVE] Connected to the cloud...");
+
+            Drive driveService = GoogleDriveConfig.getDriveService();
+
+            com.google.api.services.drive.model.File fileMetadata = new com.google.api.services.drive.model.File();
+            fileMetadata.setName(localFile.getName());
+
+            FileContent mediaContent = new FileContent(mimeType, localFile);
+
+            com.google.api.services.drive.model.File file = driveService.files().create(fileMetadata, mediaContent)
+                    .setFields("id")
+                    .execute();
+
+            System.out.println(">>> [GOOGLE DRIVE] Succes! File uploaded med ID: " + file.getId());
+        } catch (Exception e) {
+            System.err.println(">>> [GOOGLE DRIVE ERROR] Upload failed: " + e.getMessage());
+        }
     }
 
     private static void loadImages() {
@@ -51,36 +75,6 @@ public class RecordManager {
         return rotated;
     }
 
-    /**
-     * Scans the records directory for the given strategy and returns the highest piece count found.
-     */
-    public static int getHighScore(String strategyName) {
-        String folderPath = "records" + File.separator + strategyName;
-        File folder = new File(folderPath);
-
-        if (!folder.exists() || !folder.isDirectory()) {
-            return 0;
-        }
-
-        File[] files = folder.listFiles((dir, name) -> name.startsWith("Record_") && name.endsWith(".csv"));
-        if (files == null || files.length == 0) {
-            return 0;
-        }
-
-        int maxScore = 0;
-        for (File f : files) {
-            try {
-                String name = f.getName();
-                // Extracts "135" from "Record_135Pieces.csv"
-                String scoreStr = name.substring("Record_".length(), name.indexOf("Pieces"));
-                maxScore = Math.max(maxScore, Integer.parseInt(scoreStr));
-            } catch (Exception e) {
-                // Skip files that don't match the expected naming convention
-            }
-        }
-        return maxScore;
-    }
-
     public static synchronized void saveRecord(int[][] mainBoard, int piecesPlaced, String strategyName) {
         String folderPath = "records" + File.separator + strategyName;
         new File(folderPath).mkdirs();
@@ -89,6 +83,9 @@ public class RecordManager {
 
         saveImage(mainBoard, baseName + ".png");
         saveText(mainBoard, baseName + ".csv");
+        uploadToDrive(new File(baseName + ".png"), "image/png");
+        uploadToDrive(new File(baseName + ".csv"), "text/csv");
+
 
         String now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         System.out.println(now + " >>> NEW RECORD (" + strategyName + ")! Saved for " + piecesPlaced + " pieces.");
@@ -199,43 +196,19 @@ public class RecordManager {
     }
 
     private static Color getFallbackColor(int val) {
-        switch (val) {
-            case 0:
-                return new Color(100, 105, 110);
-            case 1:
-            case 17:
-                return new Color(100, 200, 230);
-            case 2:
-            case 6:
-            case 13:
-                return new Color(230, 130, 180);
-            case 3:
-            case 9:
-            case 15:
-                return new Color(80, 180, 100);
-            case 4:
-            case 12:
-            case 20:
-                return new Color(40, 60, 120);
-            case 5:
-            case 19:
-                return new Color(240, 150, 50);
-            case 7:
-            case 8:
-                return new Color(130, 80, 160);
-            case 10:
-                return new Color(80, 100, 200);
-            case 11:
-            case 14:
-            case 18:
-                return new Color(240, 220, 80);
-            case 16:
-            case 22:
-                return new Color(160, 100, 80);
-            case 21:
-                return new Color(180, 60, 100);
-            default:
-                return new Color(40, 40, 40);
-        }
+        return switch (val) {
+            case 0 -> new Color(100, 105, 110);
+            case 1, 17 -> new Color(100, 200, 230);
+            case 2, 6, 13 -> new Color(230, 130, 180);
+            case 3, 9, 15 -> new Color(80, 180, 100);
+            case 4, 12, 20 -> new Color(40, 60, 120);
+            case 5, 19 -> new Color(240, 150, 50);
+            case 7, 8 -> new Color(130, 80, 160);
+            case 10 -> new Color(80, 100, 200);
+            case 11, 14, 18 -> new Color(240, 220, 80);
+            case 16, 22 -> new Color(160, 100, 80);
+            case 21 -> new Color(180, 60, 100);
+            default -> new Color(40, 40, 40);
+        };
     }
 }
