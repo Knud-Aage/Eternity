@@ -1,4 +1,6 @@
-package dk.puzzle;
+package dk.puzzle.ui;
+
+import dk.puzzle.util.PieceUtils;
 
 import javax.imageio.ImageIO;
 import javax.swing.*;
@@ -9,10 +11,17 @@ import java.io.File;
 
 /**
  * A graphical component responsible for rendering the Eternity II puzzle board.
- * This panel manages a 16x16 grid of puzzle pieces, handling the rendering of
+ * 
+ * <p>This panel manages a 16x16 grid of puzzle pieces, handling the rendering of
  * piece patterns through loaded image assets or fallback geometric shapes.
  * It supports dynamic updates to the board state and provides a visual
- * representation of the solver's progress.
+ * representation of the solver's progress.</p>
+ * 
+ * <p>Pieces are rendered as four distinct triangles (North, East, South, West). 
+ * Each triangle displays a specific pattern image or a fallback color if assets 
+ * are missing. The piece data is expected to be bit-packed via {@link PieceUtils}.</p>
+ * 
+ * @see PieceUtils
  */
 public class BoardVisualizer extends JPanel {
     private final int[][] board;
@@ -20,12 +29,15 @@ public class BoardVisualizer extends JPanel {
     private final BufferedImage[][] rotatedImages = new BufferedImage[23][4];
 
     /**
-     * Constructs a new BoardVisualizer with a reference to the puzzle board.
-     * This constructor sets up the initial UI environment, including the background
-     * color, and triggers the loading and rotation of pattern images from disk.
+     * Constructs a new {@code BoardVisualizer} with a reference to the puzzle board.
+     * 
+     * <p>This constructor initializes the UI environment, sets the dark background
+     * theme, and triggers the pre-loading and rotation of pattern images from the 
+     * "Assets" directory to ensure efficient rendering.</p>
      *
      * @param board A 16x16 integer array representing the shared state of the puzzle board.
-     *              Each integer represents a bit-packed puzzle piece.
+     *              The array should be indexed as [row][column], where each integer
+     *              is a bit-packed representation of a piece's four sides.
      */
     public BoardVisualizer(int[][] board) {
         this.board = board;
@@ -73,6 +85,16 @@ public class BoardVisualizer extends JPanel {
         return rotated;
     }
 
+    /**
+     * Paints the puzzle board and its constituent pieces.
+     * 
+     * <p>This method calculates the optimal tile size to fit the 16x16 grid within
+     * the current component bounds while maintaining centering. It iterates through
+     * the board state, skipping empty slots, and delegates the rendering of individual
+     * pieces to the specialized drawing methods.</p>
+     * 
+     * @param g The {@code Graphics} context used for drawing.
+     */
     @Override
     protected void paintComponent(Graphics g) {
         super.paintComponent(g);

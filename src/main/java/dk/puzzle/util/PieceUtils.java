@@ -1,4 +1,4 @@
-package dk.puzzle;
+package dk.puzzle.util;
 
 /**
  * Utility class for manipulating Eternity II puzzle pieces using bitwise operations.

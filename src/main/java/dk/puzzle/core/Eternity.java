@@ -1,4 +1,9 @@
-package dk.puzzle;
+package dk.puzzle.core;
+
+import dk.puzzle.ui.BoardVisualizer;
+import dk.puzzle.model.PieceInventory;
+import dk.puzzle.util.PieceUtils;
+import dk.puzzle.ui.StartupDialog;
 
 import javax.swing.*;
 import java.awt.*;
@@ -11,7 +16,15 @@ import java.time.LocalDateTime;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class Main {
+/**
+ * The primary entry point and coordinator for the Eternity II solver application.
+ * 
+ * <p>This class is responsible for initializing the application environment,
+ * loading puzzle piece data, launching the graphical user interface, and
+ * managing the lifecycle of the solver threads. It also provides the control
+ * interface (Swing) for real-time adjustment of solver parameters.</p>
+ */
+public class Eternity {
     private static final int CENTER_PIECE_INDEX = 138;
     private static final int CENTER_PIECE_ROTATION = 2;
 
@@ -19,6 +32,15 @@ public class Main {
     private static final int[][] currentDisplayBoard = new int[16][];
     private static final AtomicInteger highScore = new AtomicInteger(0);
 
+    /**
+     * Orchestrates the startup sequence of the application.
+     * 
+     * <p>This method initializes logging, displays the {@link StartupDialog}, 
+     * loads the piece inventory, configures the center piece, starts the 
+     * requested {@link EternitySolver} strategy, and constructs the main GUI frame.</p>
+     * 
+     * @param args Command-line arguments (currently unused).
+     */
     public static void main(String[] args) {
         initLogging();
         
@@ -51,11 +73,11 @@ public class Main {
         Runnable solverTask = null;
 
         if (usePbp) {
-            MasterSolver.BuildStrategy strategy = useSpiral ?
-                    MasterSolver.BuildStrategy.SPIRAL :
-                    MasterSolver.BuildStrategy.TYPEWRITER;
+            EternitySolver.BuildStrategy strategy = useSpiral ?
+                    EternitySolver.BuildStrategy.SPIRAL :
+                    EternitySolver.BuildStrategy.TYPEWRITER;
 
-            solverTask = new MasterSolver(inventory, targetPiece, useGpu, strategy, lockCenter);
+            solverTask = new EternitySolver(inventory, targetPiece, useGpu, strategy, lockCenter);
         } else {
             System.out.println("Macro solver not implemented in this main.");
         }
@@ -76,7 +98,7 @@ public class Main {
             BoardVisualizer viz = new BoardVisualizer(currentDisplayBoard);
             frame.add(viz, BorderLayout.CENTER);
 
-            if (finalSolverTask instanceof MasterSolver pbpSolver) {
+            if (finalSolverTask instanceof EternitySolver pbpSolver) {
 
                 JPanel controlPanel = new JPanel();
                 controlPanel.setLayout(new BoxLayout(controlPanel, BoxLayout.Y_AXIS));
@@ -231,6 +253,16 @@ public class Main {
         }
     }
 
+    /**
+     * Updates the shared state used for real-time visualization of the puzzle board.
+     * 
+     * <p>This method is thread-safe, allowing solver threads to push updates to the 
+     * UI without causing race conditions on the display board data.</p>
+     * 
+     * @param current The number of pieces placed in the current iteration.
+     * @param record The highest number of pieces successfully placed during this session.
+     * @param board A 2D array representing the 16x16 board state to be rendered.
+     */
     public static synchronized void updateDisplay(int current, int record, int[][] board) {
         currentScore.set(current);
         highScore.set(record);

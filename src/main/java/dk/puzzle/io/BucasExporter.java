@@ -1,10 +1,36 @@
-package dk.puzzle;
+package dk.puzzle.io;
 
 import java.io.BufferedReader;
 import java.io.FileReader;
 
+/**
+ * <p>A utility class designed to convert Eternity II puzzle solution records
+ * from a CSV file format into a URL compatible with the <a href="https://e2.bucas.name/">Bucas Eternity II solver/viewer</a>.</p>
+ *
+ * <p>This exporter reads a CSV file, which can be in one of two formats:
+ * a standard 16x16 grid format or a "macro" format (representing a 4x4 grid of 4x4 sub-grids).
+ * It then processes each line to extract piece information (position and side patterns)
+ * and constructs a 256-character string representing the entire 16x16 board.
+ * Each piece's four sides (North, East, South, West) are encoded as lowercase
+ * letters ('a' through 'w') based on their pattern ID.</p>
+ *
+ * <p>The generated URL allows users to visualize their puzzle solutions directly
+ * in the Bucas online tool.</p>
+ */
 public class BucasExporter {
 
+    /**
+     * The main entry point for the BucasExporter application.
+     *
+     * <p>This method reads a specified CSV file containing Eternity II puzzle piece data,
+     * processes it to determine piece positions and patterns, and then generates
+     * a Bucas-compatible URL that can be used to view the puzzle solution online.</p>
+     *
+     * <p>It supports two input CSV formats: a standard 16x16 grid format and a "macro" format.
+     * The format is detected by checking if the first line of the CSV contains "macro".</p>
+     *
+     * @param args Command line arguments (not used in this application).
+     */
     public static void main(String[] args) {
 //        String filename = "records/SPIRAL/Record_209Pieces.csv";
         String filename = "records/TYPEWRITER_LOCKED/Record_210Pieces.csv";

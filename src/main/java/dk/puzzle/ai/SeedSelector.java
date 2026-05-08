@@ -1,10 +1,17 @@
-package dk.puzzle;
+package dk.puzzle.ai;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Random;
 
+/**
+ * Selects and evolves board configurations (seeds) to be used by the puzzle solver.
+ * 
+ * <p>This class implements a heuristic scoring system and a selection mechanism 
+ * resembling a genetic algorithm, prioritizing boards with more pieces, better 
+ * placement distribution, and fewer "trapped" empty slots.</p>
+ */
 public class SeedSelector {
 
     private static final int[] POSITION_WEIGHT = buildPositionWeights();
@@ -20,6 +27,20 @@ public class SeedSelector {
         return w;
     }
 
+    /**
+     * Evaluates the "fitness" of a given board state.
+     * 
+     * <p>The score is calculated based on:
+     * <ul>
+     *     <li><b>Depth:</b> The number of pieces successfully placed (heavily weighted).</li>
+     *     <li><b>Position:</b> Favoring pieces placed further from the edges.</li>
+     *     <li><b>Danger Penalty:</b> Penalizing empty slots that have 3 or more neighbors, as these are difficult to fill.</li>
+     * </ul></p>
+     *
+     * @param board An array of 256 integers representing the current board state.
+     * @param depthReached The number of pieces placed or the search depth attained for this specific board.
+     * @return A heuristic score where higher values indicate a more promising board state.
+     */
     public static int scoreBoard(int[] board, int depthReached) {
         int placed = 0;
         int posScore = 0;
@@ -48,6 +69,20 @@ public class SeedSelector {
         return depthReached * 100 + posScore * 2 - dangerPenalty;
     }
 
+    /**
+     * Selects a subset of boards from a population, applying elitism and mutation.
+     * 
+     * <p>The selection strategy produces the {@code targetCount} by:
+     * 1. Selecting the top 10% (Elites) as exact copies.
+     * 2. Selecting and heavily mutating the top 40% (Exploration).
+     * 3. Filling the remainder with lightly mutated versions of the top 50% (Refinement).</p>
+     *
+     * @param allBoards A list of board configurations to choose from.
+     * @param threadDepths An array where each index corresponds to the depth reached by the board at the same index in {@code allBoards}.
+     * @param targetCount The desired number of boards to return.
+     * @param random A {@link Random} instance for mutation and selection.
+     * @return A new list of selected and potentially mutated board configurations.
+     */
     public static List<int[]> selectBest(
             List<int[]> allBoards,
             int[] threadDepths,

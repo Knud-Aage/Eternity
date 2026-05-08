@@ -1,4 +1,6 @@
-package dk.puzzle;
+package dk.puzzle.model;
+
+import dk.puzzle.util.PieceUtils;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -18,15 +20,14 @@ public class PieceInventory {
     public final List<Integer> edges = new ArrayList<>();
     public final List<Integer> interior = new ArrayList<>();
 
-    // New: Precomputed maps for fast lookup of orientations by edge pattern
     public final Map<Integer, List<Integer>> northEdgeToOrientations = new HashMap<>();
     public final Map<Integer, List<Integer>> eastEdgeToOrientations = new HashMap<>();
     public final Map<Integer, List<Integer>> southEdgeToOrientations = new HashMap<>();
     public final Map<Integer, List<Integer>> westEdgeToOrientations = new HashMap<>();
 
 
-    public List<Integer>[][] compatibility; // This seems unused in MasterSolver, but keeping it for now
-    public int[] colorFrequency; // This seems unused in MasterSolver, but keeping it for now
+    public List<Integer>[][] compatibility;
+    public int[] colorFrequency;
 
     /**
      * Initializes the inventory from base physical pieces.

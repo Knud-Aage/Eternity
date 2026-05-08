@@ -1,17 +1,34 @@
-package dk.puzzle;
+package dk.puzzle.gpu;
 
+import dk.puzzle.model.PieceInventory;
 import jcuda.Pointer;
 import jcuda.Sizeof;
 import jcuda.driver.*;
 import java.util.List;
 import static jcuda.driver.JCudaDriver.*;
 
+/**
+ * The GPU-accelerated engine for the Eternity II solver, interface via JCuda.
+ * 
+ * <p>This class manages the lifecycle of CUDA resources, including context 
+ * initialization, PTX module loading, and the synchronization of board data 
+ * between Host (CPU) and Device (GPU) memory. It provides entry points for 
+ * both the Phase 2 exploratory DFS and the Phase 3 repair-based LNS.</p>
+ */
 public class GpuEngine {
     private CUfunction dfsFunction;
     private CUfunction repairFunction;
     private final PieceInventory inventory;
     private final boolean lockCenter;
 
+    /**
+     * Constructs a new {@code GpuEngine} and initializes the CUDA driver.
+     * 
+     * @param inventory The piece inventory used to populate orientation and 
+     *                  physical mapping tables on the GPU.
+     * @param lockCenter Whether to enforce the fixed center piece constraint 
+     *                   within the GPU kernels.
+     */
     public GpuEngine(PieceInventory inventory, boolean lockCenter) {
         this.inventory = inventory;
         this.lockCenter = lockCenter;
@@ -38,6 +55,24 @@ public class GpuEngine {
     // ==========================================================
     // PHASE 2: DEEP DFS (GPU EXPLORER)
     // ==========================================================
+    /**
+     * Executes a massively parallel Deep DFS on the GPU using a list of seed boards.
+     * 
+     * <p>This method performs the following:
+     * 1. Flattens and uploads a batch of seed boards to device memory.
+     * 2. Configures the kernel with build orders and piece metadata.
+     * 3. Launches the 'solvePBP' kernel to explore the search space from each seed.
+     * 4. Retrieves the highest achieved depth and corresponding board state.</p>
+     * 
+     * @param seeds A list of partial board configurations (seeds) to be expanded.
+     * @param startingStep The depth index (0-255) where the GPU should begin placing pieces.
+     * @param currentHighScore The current global high score, used by the GPU to prune 
+     *                         underperforming branches or report progress.
+     * @param bestBoardOut An output array that will be populated with the best board 
+     *                     found during this execution.
+     * @param buildOrder The sequence of board indices to be filled.
+     * @return A {@link GpuResult} containing the new high score and execution metrics.
+     */
     public GpuResult runDeepDfs(List<int[]> seeds, int startingStep, int currentHighScore,
                                  int[] bestBoardOut, int[] buildOrder) {
         int numBoards = seeds.size();
@@ -138,6 +173,19 @@ public class GpuEngine {
     // ==========================================================
     // PHASE 3: REPAIR MODE (LNS hole-filling)
     // ==========================================================
+    /**
+     * Executes the Phase 3 "Surgeon" repair mode on the GPU.
+     * 
+     * <p>Takes multiple "swiss cheese" boards (boards with targeted holes) and 
+     * attempts to fill the holes and extend the solution using the 'solveRepairMode' 
+     * kernel. This is specifically used to resolve conflicts found in high-depth boards.</p>
+     * 
+     * @param swissCheeseBoards A list of boards with removed pieces (represented by -2).
+     * @param currentHighScore The current record depth used for thresholding progress.
+     * @param bestBoardOut An output array to receive the best modified board state 
+     *                     recovered from the GPU.
+     * @return A {@link GpuResult} containing the new high score and execution metrics.
+     */
     public GpuResult runRepairMode(List<int[]> swissCheeseBoards, int currentHighScore, int[] bestBoardOut) {
         int numBoards = swissCheeseBoards.size();
         if (numBoards == 0) return new GpuResult(currentHighScore, false, 0, new int[0]);
@@ -216,6 +264,14 @@ public class GpuEngine {
         return new GpuResult(resultHighScore[0], solved[0] == 1, steps, new int[0]);
     }
 
+    /**
+     * Represents the outcome of a GPU execution cycle.
+     * 
+     * @param newHighScore The highest depth reached by any thread during the run.
+     * @param solved Whether a complete 256-piece solution was discovered.
+     * @param stepsTaken Total number of placement attempts made across all threads.
+     * @param threadDepths An array containing the final depth reached by each individual thread.
+     */
     public record GpuResult(int newHighScore, boolean solved, long stepsTaken, int[] threadDepths) {
     }
 }

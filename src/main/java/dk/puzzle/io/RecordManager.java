@@ -1,7 +1,8 @@
-package dk.puzzle;
+package dk.puzzle.io;
 
 import com.google.api.client.http.FileContent;
 import com.google.api.services.drive.Drive;
+import dk.puzzle.util.PieceUtils;
 
 import javax.imageio.ImageIO;
 import java.awt.*;
@@ -11,7 +12,16 @@ import java.io.File;
 import java.io.PrintWriter;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.Collections;
 
+/**
+ * Manages the generation and synchronization of puzzle solution records.
+ *
+ * <p>This class is responsible for capturing the current state of the puzzle board
+ * when significant progress is made. it generates high-resolution PNG visualizations 
+ * and CSV data exports, and coordinates their storage both on the local filesystem 
+ * and in the cloud via Google Drive integration.</p>
+ */
 public class RecordManager {
     private static final int PIECE_SIZE = 50;
     private static final BufferedImage[][] rotatedImages = new BufferedImage[23][4];
@@ -20,24 +30,39 @@ public class RecordManager {
         loadImages();
     }
 
-    public static void uploadToDrive(java.io.File localFile, String mimeType) {
+    /**
+     * Uploads a local file to a specific profile folder on Google Drive.
+     *
+     * <p>This method leverages {@link GoogleDriveConfig} to obtain an authorized 
+     * service instance, ensures the target directory exists in the cloud, and 
+     * performs a multipart upload of the provided file.</p>
+     *
+     * @param localFile     The file on the local machine to be uploaded.
+     * @param mimeType      The standard MIME type string (e.g., "image/png" or "text/csv").
+     * @param profileFolder The name of the destination folder in Google Drive.
+     */
+    public static void uploadToDrive(java.io.File localFile, String mimeType, String profileFolder) {
         try {
-            System.out.println(">>> [GOOGLE DRIVE] Connected to the cloud...");
+            System.out.println(">>> [GOOGLE DRIVE] Connects to the cloud...");
 
             Drive driveService = GoogleDriveConfig.getDriveService();
+
+            String folderId = GoogleDriveConfig.getOrCreateFolder(driveService, profileFolder);
 
             com.google.api.services.drive.model.File fileMetadata = new com.google.api.services.drive.model.File();
             fileMetadata.setName(localFile.getName());
 
-            FileContent mediaContent = new FileContent(mimeType, localFile);
+            fileMetadata.setParents(Collections.singletonList(folderId));
+
+            com.google.api.client.http.FileContent mediaContent = new com.google.api.client.http.FileContent(mimeType, localFile);
 
             com.google.api.services.drive.model.File file = driveService.files().create(fileMetadata, mediaContent)
                     .setFields("id")
                     .execute();
 
-            System.out.println(">>> [GOOGLE DRIVE] Success! File uploaded med ID: " + file.getId());
+            System.out.println(">>> [GOOGLE DRIVE] Succes! Fil gemt i mappen '" + profileFolder + "' med ID: " + file.getId());
         } catch (Exception e) {
-            System.err.println(">>> [GOOGLE DRIVE ERROR] Upload failed: " + e.getMessage());
+            System.err.println(">>> [GOOGLE DRIVE FEJL] Upload fejlede: " + e.getMessage());
         }
     }
 
@@ -75,6 +100,23 @@ public class RecordManager {
         return rotated;
     }
 
+    /**
+     * Saves a complete record of the current board state locally and to the cloud.
+     *
+     * <p>This method is synchronized to prevent concurrent file access during record 
+     * generation. It performs the following sequence:
+     * <ol>
+     *     <li>Initializes a strategy-specific local directory structure.</li>
+     *     <li>Renders a PNG image of the board state.</li>
+     *     <li>Exports the board data to a CSV file.</li>
+     *     <li>Initiates background uploads of both files to Google Drive.</li>
+     * </ol></p>
+     *
+     * @param mainBoard    A 16x16 integer array representing the current piece configuration.
+     * @param piecesPlaced The number of pieces currently placed, used for naming the record.
+     * @param strategyName The search strategy identifier (e.g., "SPIRAL" or "TYPEWRITER"), 
+     *                     used to categorize the records.
+     */
     public static synchronized void saveRecord(int[][] mainBoard, int piecesPlaced, String strategyName) {
         String folderPath = "records" + File.separator + strategyName;
         new File(folderPath).mkdirs();
@@ -83,9 +125,8 @@ public class RecordManager {
 
         saveImage(mainBoard, baseName + ".png");
         saveText(mainBoard, baseName + ".csv");
-        uploadToDrive(new File(baseName + ".png"), "image/png");
-        uploadToDrive(new File(baseName + ".csv"), "text/csv");
-
+        uploadToDrive(new File(baseName + ".png"), "image/png", strategyName);
+        uploadToDrive(new File(baseName + ".csv"), "text/csv", strategyName);
 
         String now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
         System.out.println(now + " >>> NEW RECORD (" + strategyName + ")! Saved for " + piecesPlaced + " pieces.");

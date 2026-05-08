@@ -1,4 +1,4 @@
-package dk.puzzle;
+package dk.puzzle.model;
 
 import java.util.List;
 

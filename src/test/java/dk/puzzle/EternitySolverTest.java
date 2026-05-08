@@ -1,5 +1,11 @@
 package dk.puzzle;
 
+import dk.puzzle.ai.SurgeonHeuristics;
+import dk.puzzle.core.EternitySolver;
+import dk.puzzle.gpu.GpuEngine;
+import dk.puzzle.model.CompatibilityIndex;
+import dk.puzzle.model.PieceInventory;
+import dk.puzzle.util.PieceUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
@@ -16,11 +22,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-class MasterSolverTest {
+class EternitySolverTest {
 
-    // We will use a spy on MasterSolver to override its internal dependencies
+    // We will use a spy on EternitySolver to override its internal dependencies
     // and methods that interact with external systems (like static methods).
-    private MasterSolver solverSpy;
+    private EternitySolver solverSpy;
 
     private PieceInventory inventory;
     @Mock
@@ -58,25 +64,25 @@ class MasterSolverTest {
         inventory = new PieceInventory(MOCK_ALL_ORIENTATIONS); // Assuming PieceInventory now takes allOrientations in its constructor
         inventory.physicalMapping = MOCK_PHYSICAL_MAPPING; // physicalMapping might still be a public field or set separately
 
-        // Initialize the spy manually because MasterSolver has no no-args constructor
-        MasterSolver realSolver = new MasterSolver(inventory, MOCK_ALL_ORIENTATIONS[0], false, MasterSolver.BuildStrategy.TYPEWRITER, false);
+        // Initialize the spy manually because EternitySolver has no no-args constructor
+        EternitySolver realSolver = new EternitySolver(inventory, MOCK_ALL_ORIENTATIONS[0], false, EternitySolver.BuildStrategy.TYPEWRITER, false);
         solverSpy = spy(realSolver);
 
         // Use reflection to inject mocks for internal fields that are not passed via constructor
-        java.lang.reflect.Field compatIndexField = MasterSolver.class.getDeclaredField("compatIndex");
+        java.lang.reflect.Field compatIndexField = EternitySolver.class.getDeclaredField("compatIndex");
         compatIndexField.setAccessible(true);
         compatIndexField.set(solverSpy, mockCompatIndex);
 
-        java.lang.reflect.Field surgeonField = MasterSolver.class.getDeclaredField("surgeon");
+        java.lang.reflect.Field surgeonField = EternitySolver.class.getDeclaredField("surgeon");
         surgeonField.setAccessible(true);
         surgeonField.set(solverSpy, mockSurgeon);
 
-        java.lang.reflect.Field gpuEngineField = MasterSolver.class.getDeclaredField("gpuEngine");
+        java.lang.reflect.Field gpuEngineField = EternitySolver.class.getDeclaredField("gpuEngine");
         gpuEngineField.setAccessible(true);
         gpuEngineField.set(solverSpy, mockGpuEngine); // Inject mockGpuEngine if needed for other tests
 
         // Mock static methods or methods that interact with external systems
-        // For Main.updateDisplay, we can mock its behavior or just let it be called and ignore.
+        // For Eternity.updateDisplay, we can mock its behavior or just let it be called and ignore.
         // For CheckpointManager and RecordManager, we need to ensure they don't cause side effects.
         // For this test, we'll assume CheckpointManager.loadSmartCheckpoint returns null (default behavior if no file).
         // And we'll mock the updateDisplay method of the solverSpy.
@@ -101,7 +107,7 @@ class MasterSolverTest {
         // Given
         // We need to access the inner class constructor.
         // This is a bit tricky with reflection, but Mockito's spy on the outer class helps.
-        MasterSolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
+        EternitySolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
 
         // Mock behavior for compatIndex
         BitSet mockCandidates = new BitSet();
@@ -116,7 +122,7 @@ class MasterSolverTest {
         // Then
         assertFalse(result, "CpuSearchWorker should return false after adding a seed at SEED_DEPTH to force backtracking");
         assertEquals(1, solverSpy.seedPool.size(), "One seed should be added to the seedPool");
-        assertEquals(MasterSolver.SEED_DEPTH, solverSpy.deepestStep, "deepestStep should be updated to SEED_DEPTH");
+        assertEquals(EternitySolver.SEED_DEPTH, solverSpy.deepestStep, "deepestStep should be updated to SEED_DEPTH");
 
         // Verify that compatIndex methods were called
         verify(mockCompatIndex, atLeastOnce()).candidatesFor(anyInt(), anyInt(), anyInt(), anyInt());
@@ -127,7 +133,7 @@ class MasterSolverTest {
     @Test
     void cpuSearchWorker_respectsManualOverride() throws Exception {
         // Given
-        MasterSolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
+        EternitySolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
         solverSpy.manualOverrideRequested = true; // Simulate manual override
 
         // When
@@ -141,7 +147,7 @@ class MasterSolverTest {
     @Test
     void cpuSearchWorker_respectsBatchSizeLimit() throws Exception {
         // Given
-        MasterSolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(1); // Max 1 seed
+        EternitySolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(1); // Max 1 seed
         solverSpy.seedPool.add(new int[256]); // Add one seed to reach the limit
         solverSpy.currentBatchSize.set(1);
 
@@ -156,7 +162,7 @@ class MasterSolverTest {
     @Test
     void cpuSearchWorker_handlesNoCandidates() throws Exception {
         // Given
-        MasterSolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
+        EternitySolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
         when(mockCompatIndex.candidatesFor(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(new BitSet()); // No candidates
 
         // When
@@ -232,7 +238,7 @@ class MasterSolverTest {
 
         // Then
         assertEquals(10, solverSpy.consecutiveExtinctions);
-        assertEquals(MasterSolver.SEED_DEPTH, solverSpy.deepestStep, "Should have triggered branch scrap/extinction");
+        assertEquals(EternitySolver.SEED_DEPTH, solverSpy.deepestStep, "Should have triggered branch scrap/extinction");
     }
 
     // --- Unit tests for helper methods ---
@@ -303,14 +309,14 @@ class MasterSolverTest {
     @Test
     void retreat_preservesLockedCenterPiece() throws Exception {
         // Re-initialize solverSpy with lockCenter = true
-        MasterSolver realSolverLocked = new MasterSolver(inventory, MOCK_ALL_ORIENTATIONS[0], false, MasterSolver.BuildStrategy.TYPEWRITER, true);
+        EternitySolver realSolverLocked = new EternitySolver(inventory, MOCK_ALL_ORIENTATIONS[0], false, EternitySolver.BuildStrategy.TYPEWRITER, true);
         solverSpy = spy(realSolverLocked);
 
-        java.lang.reflect.Field compatIndexField = MasterSolver.class.getDeclaredField("compatIndex");
+        java.lang.reflect.Field compatIndexField = EternitySolver.class.getDeclaredField("compatIndex");
         compatIndexField.setAccessible(true);
         compatIndexField.set(solverSpy, mockCompatIndex);
 
-        java.lang.reflect.Field surgeonField = MasterSolver.class.getDeclaredField("surgeon");
+        java.lang.reflect.Field surgeonField = EternitySolver.class.getDeclaredField("surgeon");
         surgeonField.setAccessible(true);
         surgeonField.set(solverSpy, mockSurgeon);
 
@@ -370,7 +376,7 @@ class MasterSolverTest {
         solverSpy.triggerBranchScrap();
 
         // Then
-        assertEquals(MasterSolver.SEED_DEPTH, solverSpy.deepestStep, "deepestStep should reset to SEED_DEPTH");
+        assertEquals(EternitySolver.SEED_DEPTH, solverSpy.deepestStep, "deepestStep should reset to SEED_DEPTH");
         assertEquals(0, solverSpy.consecutiveExtinctions, "consecutiveExtinctions should be reset");
         // absoluteHighScore should remain the same, as we are scrapping a branch, not the overall best.
         assertEquals(220, solverSpy.absoluteHighScore);

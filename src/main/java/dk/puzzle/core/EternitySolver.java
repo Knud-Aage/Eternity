@@ -1,4 +1,13 @@
-package dk.puzzle;
+package dk.puzzle.core;
+
+import dk.puzzle.ai.SeedSelector;
+import dk.puzzle.ai.SurgeonHeuristics;
+import dk.puzzle.gpu.GpuEngine;
+import dk.puzzle.io.CheckpointManager;
+import dk.puzzle.model.CompatibilityIndex;
+import dk.puzzle.model.PieceInventory;
+import dk.puzzle.io.RecordManager;
+import dk.puzzle.util.PieceUtils;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -10,10 +19,32 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class MasterSolver implements Runnable {
+/**
+ * The central orchestrator for the Eternity II puzzle solver, managing a multi-phase 
+ * hybrid search strategy involving CPU-based seed generation and GPU-accelerated 
+ * deep search and repair.
+ * 
+ * <p>The solver operates in three distinct phases:
+ * <ul>
+ *     <li><b>Phase 1:</b> Parallel CPU workers generate "seeds" (partial boards) 
+ *     using a randomized depth-first search (DFS) with lookahead.</li>
+ *     <li><b>Phase 2:</b> The GPU consumes these seeds and performs a massively 
+ *     parallel Deep DFS to reach higher placement depths.</li>
+ *     <li><b>Phase 3:</b> Upon reaching a high-depth threshold, the solver enters 
+ *     "Surgeon" mode (Large Neighborhood Search), strategically removing pieces 
+ *     to resolve conflicts and push toward a complete 256-piece solution.</li>
+ * </ul></p>
+ * 
+ * <p>This class also handles state persistence via checkpoints, real-time metrics 
+ * reporting, and dynamic parameter updates from the user interface.</p>
+ */
+public class EternitySolver implements Runnable {
 
+    /** The target depth for Phase 1 CPU seed generation. */
     public static final int SEED_DEPTH = 40;
+    /** The piece count threshold that triggers Phase 3 Large Neighborhood Search (LNS). */
     public static final int LNS_THRESHOLD = 200;
+
     ConcurrentLinkedQueue<int[]> seedPool = new ConcurrentLinkedQueue<>();
 
     private final PieceInventory inventory;
@@ -65,7 +96,20 @@ public class MasterSolver implements Runnable {
     private volatile int manualBaseCampTarget = 0;
     private volatile double extinctionThreshold = 0.98;
 
-    public MasterSolver(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
+    /**
+     * Constructs a new {@code EternitySolver} and initializes the search environment.
+     * 
+     * <p>Initializes the build order based on the selected strategy, configures 
+     * the compatibility index, and attempts to resume search from the latest 
+     * persistent checkpoint matching the strategy profile.</p>
+     * 
+     * @param inventory The inventory containing all physical pieces and their orientations.
+     * @param trueCenterPiece The bit-packed representation of the mandatory center piece.
+     * @param useGpu Whether to enable OpenCL/GPU acceleration for Phase 2 and 3.
+     * @param strategy The board-filling pattern (e.g., SPIRAL or TYPEWRITER).
+     * @param lockCenter If true, ensures the center piece remains fixed at index 135.
+     */
+    public EternitySolver(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
         Arrays.fill(flatBoard, -1);
         Arrays.fill(bestBoard, -1);
         Arrays.fill(globalBestBoard, -1);
@@ -90,7 +134,13 @@ public class MasterSolver implements Runnable {
             }
         }
 
-        for (int i = 0; i < 256; i++) buildOrder[i] = i;
+        if (strategy == BuildStrategy.SPIRAL) {
+            generateSpiralOrder();
+            System.out.println(timestamp() + ">>> Build Strategy: SPIRAL (Indrammer yderkanterne først)");
+        } else {
+            for (int i = 0; i < 256; i++) buildOrder[i] = i;
+            System.out.println(timestamp() + ">>> Build Strategy: TYPEWRITER (Linje for linje)");
+        }
 
         this.compatIndex = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
         this.surgeon = new SurgeonHeuristics(lockCenter, 0.70);
@@ -126,12 +176,39 @@ public class MasterSolver implements Runnable {
     }
 
     // GUI BRIDGES
+    /**
+     * Sets the duration the solver is allowed to stagnate at a high score before 
+     * triggering automated recovery actions.
+     * @param minutes Stagnation limit in minutes.
+     */
     public void setStagnationLimit(int minutes) { this.stagnationLimitMinutes = minutes; }
+
+    /**
+     * Manually overrides the target seed pool size.
+     * @param size Number of seeds to generate in Phase 1, or -1 for automatic scaling.
+     */
     public void setBatchSizeOverride(int size) { this.userBatchSizeOverride = size; }
+
+    /**
+     * Configures the population "extinction" threshold used during search phases.
+     * @param threshold A ratio between 0.0 and 1.0.
+     */
     public void setExtinctionThreshold(double threshold) { this.extinctionThreshold = threshold; }
+
+    /**
+     * Adjusts the percentage of holes targeted at identified conflict zones 
+     * during Phase 3 Surgeon operations.
+     * @param percentage Ratio of targeted vs. random holes (0.0 to 1.0).
+     */
     public void setTargetedHolesPercentage(double percentage) {
         if (this.surgeon != null) this.surgeon.setTargetedHolesPercentage(percentage);
     }
+
+    /**
+     * Forces the solver to discard current progress and "retreat" to a 
+     * specific piece count (base camp).
+     * @param targetBaseCamp The piece count (depth) to roll back to.
+     */
     public void triggerManualOverride(int targetBaseCamp) {
         this.manualBaseCampTarget = targetBaseCamp;
         this.manualOverrideRequested = true;
@@ -141,6 +218,12 @@ public class MasterSolver implements Runnable {
         return "[" + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "] ";
     }
 
+    /**
+     * The main execution loop of the solver.
+     * 
+     * <p>Cycles through search phases, processes manual overrides, manages 
+     * periodic checkpoints, and monitors the health of the GPU pipelines.</p>
+     */
     @Override
     public void run() {
         if (this.useGpu) {
@@ -404,10 +487,51 @@ public class MasterSolver implements Runnable {
     }
 
     void updateDisplay(int score, int[][] displayBoard) {
-        Main.updateDisplay(score, this.absoluteHighScore, displayBoard);
+        Eternity.updateDisplay(score, this.absoluteHighScore, displayBoard);
     }
 
-    public enum BuildStrategy { TYPEWRITER, SPIRAL }
+    /**
+     * Enumeration of board construction strategies which define the order 
+     * in which grid positions are filled.
+     */
+    public enum BuildStrategy { 
+        /** Standard left-to-right, top-to-bottom placement. */
+        TYPEWRITER, 
+        /** Inward-moving spiral, prioritizing the completion of board edges first. */
+        SPIRAL 
+    }
+
+    private void generateSpiralOrder() {
+        int top = 0, bottom = 15;
+        int left = 0, right = 15;
+        int idx = 0;
+
+        while (top <= bottom && left <= right) {
+            for (int j = left; j <= right; j++) {
+                buildOrder[idx++] = top * 16 + j;
+            }
+            top++;
+
+            for (int i = top; i <= bottom; i++) {
+                buildOrder[idx++] = i * 16 + right;
+            }
+            right--;
+
+            if (top <= bottom) {
+                for (int j = right; j >= left; j--) {
+                    buildOrder[idx++] = bottom * 16 + j;
+                }
+                bottom--;
+            }
+
+            if (left <= right) {
+                for (int i = bottom; i >= top; i--) {
+                    buildOrder[idx++] = i * 16 + left;
+                }
+                left++;
+            }
+        }
+    }
 
     class CpuSearchWorker implements Callable<Boolean> {
         private final int[] localBoard = new int[256];

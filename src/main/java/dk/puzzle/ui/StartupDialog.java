@@ -1,4 +1,4 @@
-package dk.puzzle;
+package dk.puzzle.ui;
 
 import javax.swing.*;
 import java.awt.*;
@@ -6,8 +6,10 @@ import java.awt.event.ActionEvent;
 
 /**
  * A modal configuration dialog presented at application startup.
- * This dialog allows the user to configure the solving strategy (e.g., Piece-by-Piece or Macro-tiles),
- * the specific build order, and select the hardware validator (e.g., GPU-accelerated CUDA or CPU-only).
+ * 
+ * <p>This dialog allows the user to configure the solving strategy, the specific 
+ * grid build order (e.g., Spiral vs. Typewriter), and select the hardware 
+ * validator (e.g., GPU-accelerated CUDA or CPU-only).</p>
  */
 public class StartupDialog extends JDialog {
     private final JComboBox<String> strategyBox;
@@ -22,9 +24,10 @@ public class StartupDialog extends JDialog {
     private boolean useSpiral = false; // <--- NEW: Stores the build order choice
 
     /**
-     * Constructs a new StartupDialog.
+     * Constructs a new {@code StartupDialog} instance.
      *
-     * @param parent The parent JFrame to which this modal dialog is attached.
+     * @param parent The parent {@link JFrame} to which this modal dialog is attached,
+     *               providing a reference for centering and modality.
      */
     public StartupDialog(JFrame parent) {
         super(parent, "Eternity II Engine Setup", true);
@@ -40,8 +43,7 @@ public class StartupDialog extends JDialog {
         // 1. Solving Strategy
         panel.add(new JLabel("Solving Strategy:"));
         strategyBox = new JComboBox<>(new String[]{
-                "Piece-by-Piece",
-                "Divide & Conquer (4x4 Macros)"
+                "Piece-by-Piece"
         });
         panel.add(strategyBox);
 
@@ -85,6 +87,8 @@ public class StartupDialog extends JDialog {
 
     /**
      * Checks if the user confirmed the settings by clicking the "Start Engine" button.
+     * 
+     * @return {@code true} if the user clicked "Start Engine"; {@code false} otherwise.
      */
     public boolean isStartClicked() {
         return startClicked;
@@ -92,6 +96,8 @@ public class StartupDialog extends JDialog {
 
     /**
      * Determines whether the Piece-by-Piece strategy was selected.
+     * 
+     * @return {@code true} if Piece-by-Piece is selected; {@code false} otherwise.
      */
     public boolean isUsePbp() {
         return usePbp;
@@ -99,6 +105,8 @@ public class StartupDialog extends JDialog {
 
     /**
      * Determines whether GPU acceleration (CUDA) was selected.
+     * 
+     * @return {@code true} if GPU (CUDA) is selected; {@code false} if CPU-only is selected.
      */
     public boolean isUseGpu() {
         return useGpu;
@@ -106,12 +114,18 @@ public class StartupDialog extends JDialog {
 
     /**
      * Determines whether the Spiral build order was selected.
-     * * @return true if Spiral is selected; false if Layered (Typewriter) is selected.
+     * 
+     * @return {@code true} if Spiral is selected; {@code false} if Layered (Typewriter) is selected.
      */
     public boolean isUseSpiral() {
         return useSpiral;
     }
 
+    /**
+     * Determines whether the official center piece should be locked in its predefined position.
+     * 
+     * @return {@code true} if the center piece is locked; {@code false} if it can move.
+     */
     public boolean isLockCenter() {
         return lockCenter;
     }
