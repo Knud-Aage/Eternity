@@ -25,8 +25,8 @@ public class PieceInventory {
     public final Map<Integer, List<Integer>> westEdgeToOrientations = new HashMap<>();
 
 
-    public List<Integer>[][] compatibility; // This seems unused in MasterSolverPBP, but keeping it for now
-    public int[] colorFrequency; // This seems unused in MasterSolverPBP, but keeping it for now
+    public List<Integer>[][] compatibility; // This seems unused in MasterSolver, but keeping it for now
+    public int[] colorFrequency; // This seems unused in MasterSolver, but keeping it for now
 
     /**
      * Initializes the inventory from base physical pieces.

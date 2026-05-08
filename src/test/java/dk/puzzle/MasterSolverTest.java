@@ -4,7 +4,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
-import org.mockito.Spy;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -17,11 +16,11 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-class MasterSolverPBPTest {
+class MasterSolverTest {
 
-    // We will use a spy on MasterSolverPBP to override its internal dependencies
+    // We will use a spy on MasterSolver to override its internal dependencies
     // and methods that interact with external systems (like static methods).
-    private MasterSolverPBP solverSpy;
+    private MasterSolver solverSpy;
 
     private PieceInventory inventory;
     @Mock
@@ -59,20 +58,20 @@ class MasterSolverPBPTest {
         inventory = new PieceInventory(MOCK_ALL_ORIENTATIONS); // Assuming PieceInventory now takes allOrientations in its constructor
         inventory.physicalMapping = MOCK_PHYSICAL_MAPPING; // physicalMapping might still be a public field or set separately
 
-        // Initialize the spy manually because MasterSolverPBP has no no-args constructor
-        MasterSolverPBP realSolver = new MasterSolverPBP(inventory, MOCK_ALL_ORIENTATIONS[0], false, MasterSolverPBP.BuildStrategy.TYPEWRITER, false);
+        // Initialize the spy manually because MasterSolver has no no-args constructor
+        MasterSolver realSolver = new MasterSolver(inventory, MOCK_ALL_ORIENTATIONS[0], false, MasterSolver.BuildStrategy.TYPEWRITER, false);
         solverSpy = spy(realSolver);
 
         // Use reflection to inject mocks for internal fields that are not passed via constructor
-        java.lang.reflect.Field compatIndexField = MasterSolverPBP.class.getDeclaredField("compatIndex");
+        java.lang.reflect.Field compatIndexField = MasterSolver.class.getDeclaredField("compatIndex");
         compatIndexField.setAccessible(true);
         compatIndexField.set(solverSpy, mockCompatIndex);
 
-        java.lang.reflect.Field surgeonField = MasterSolverPBP.class.getDeclaredField("surgeon");
+        java.lang.reflect.Field surgeonField = MasterSolver.class.getDeclaredField("surgeon");
         surgeonField.setAccessible(true);
         surgeonField.set(solverSpy, mockSurgeon);
 
-        java.lang.reflect.Field gpuEngineField = MasterSolverPBP.class.getDeclaredField("gpuEngine");
+        java.lang.reflect.Field gpuEngineField = MasterSolver.class.getDeclaredField("gpuEngine");
         gpuEngineField.setAccessible(true);
         gpuEngineField.set(solverSpy, mockGpuEngine); // Inject mockGpuEngine if needed for other tests
 
@@ -102,7 +101,7 @@ class MasterSolverPBPTest {
         // Given
         // We need to access the inner class constructor.
         // This is a bit tricky with reflection, but Mockito's spy on the outer class helps.
-        MasterSolverPBP.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
+        MasterSolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
 
         // Mock behavior for compatIndex
         BitSet mockCandidates = new BitSet();
@@ -117,7 +116,7 @@ class MasterSolverPBPTest {
         // Then
         assertFalse(result, "CpuSearchWorker should return false after adding a seed at SEED_DEPTH to force backtracking");
         assertEquals(1, solverSpy.seedPool.size(), "One seed should be added to the seedPool");
-        assertEquals(MasterSolverPBP.SEED_DEPTH, solverSpy.deepestStep, "deepestStep should be updated to SEED_DEPTH");
+        assertEquals(MasterSolver.SEED_DEPTH, solverSpy.deepestStep, "deepestStep should be updated to SEED_DEPTH");
 
         // Verify that compatIndex methods were called
         verify(mockCompatIndex, atLeastOnce()).candidatesFor(anyInt(), anyInt(), anyInt(), anyInt());
@@ -128,7 +127,7 @@ class MasterSolverPBPTest {
     @Test
     void cpuSearchWorker_respectsManualOverride() throws Exception {
         // Given
-        MasterSolverPBP.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
+        MasterSolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
         solverSpy.manualOverrideRequested = true; // Simulate manual override
 
         // When
@@ -142,7 +141,7 @@ class MasterSolverPBPTest {
     @Test
     void cpuSearchWorker_respectsBatchSizeLimit() throws Exception {
         // Given
-        MasterSolverPBP.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(1); // Max 1 seed
+        MasterSolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(1); // Max 1 seed
         solverSpy.seedPool.add(new int[256]); // Add one seed to reach the limit
         solverSpy.currentBatchSize.set(1);
 
@@ -157,7 +156,7 @@ class MasterSolverPBPTest {
     @Test
     void cpuSearchWorker_handlesNoCandidates() throws Exception {
         // Given
-        MasterSolverPBP.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
+        MasterSolver.CpuSearchWorker worker = solverSpy.new CpuSearchWorker(50000);
         when(mockCompatIndex.candidatesFor(anyInt(), anyInt(), anyInt(), anyInt())).thenReturn(new BitSet()); // No candidates
 
         // When
@@ -233,7 +232,7 @@ class MasterSolverPBPTest {
 
         // Then
         assertEquals(10, solverSpy.consecutiveExtinctions);
-        assertEquals(MasterSolverPBP.SEED_DEPTH, solverSpy.deepestStep, "Should have triggered branch scrap/extinction");
+        assertEquals(MasterSolver.SEED_DEPTH, solverSpy.deepestStep, "Should have triggered branch scrap/extinction");
     }
 
     // --- Unit tests for helper methods ---
@@ -304,14 +303,14 @@ class MasterSolverPBPTest {
     @Test
     void retreat_preservesLockedCenterPiece() throws Exception {
         // Re-initialize solverSpy with lockCenter = true
-        MasterSolverPBP realSolverLocked = new MasterSolverPBP(inventory, MOCK_ALL_ORIENTATIONS[0], false, MasterSolverPBP.BuildStrategy.TYPEWRITER, true);
+        MasterSolver realSolverLocked = new MasterSolver(inventory, MOCK_ALL_ORIENTATIONS[0], false, MasterSolver.BuildStrategy.TYPEWRITER, true);
         solverSpy = spy(realSolverLocked);
 
-        java.lang.reflect.Field compatIndexField = MasterSolverPBP.class.getDeclaredField("compatIndex");
+        java.lang.reflect.Field compatIndexField = MasterSolver.class.getDeclaredField("compatIndex");
         compatIndexField.setAccessible(true);
         compatIndexField.set(solverSpy, mockCompatIndex);
 
-        java.lang.reflect.Field surgeonField = MasterSolverPBP.class.getDeclaredField("surgeon");
+        java.lang.reflect.Field surgeonField = MasterSolver.class.getDeclaredField("surgeon");
         surgeonField.setAccessible(true);
         surgeonField.set(solverSpy, mockSurgeon);
 
@@ -371,7 +370,7 @@ class MasterSolverPBPTest {
         solverSpy.triggerBranchScrap();
 
         // Then
-        assertEquals(MasterSolverPBP.SEED_DEPTH, solverSpy.deepestStep, "deepestStep should reset to SEED_DEPTH");
+        assertEquals(MasterSolver.SEED_DEPTH, solverSpy.deepestStep, "deepestStep should reset to SEED_DEPTH");
         assertEquals(0, solverSpy.consecutiveExtinctions, "consecutiveExtinctions should be reset");
         // absoluteHighScore should remain the same, as we are scrapping a branch, not the overall best.
         assertEquals(220, solverSpy.absoluteHighScore);

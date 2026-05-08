@@ -35,7 +35,7 @@ public class RecordManager {
                     .setFields("id")
                     .execute();
 
-            System.out.println(">>> [GOOGLE DRIVE] Succes! File uploaded med ID: " + file.getId());
+            System.out.println(">>> [GOOGLE DRIVE] Success! File uploaded med ID: " + file.getId());
         } catch (Exception e) {
             System.err.println(">>> [GOOGLE DRIVE ERROR] Upload failed: " + e.getMessage());
         }

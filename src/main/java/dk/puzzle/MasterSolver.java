@@ -10,7 +10,7 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
-public class MasterSolverPBP implements Runnable {
+public class MasterSolver implements Runnable {
 
     public static final int SEED_DEPTH = 40;
     public static final int LNS_THRESHOLD = 200;
@@ -65,7 +65,7 @@ public class MasterSolverPBP implements Runnable {
     private volatile int manualBaseCampTarget = 0;
     private volatile double extinctionThreshold = 0.98;
 
-    public MasterSolverPBP(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
+    public MasterSolver(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
         Arrays.fill(flatBoard, -1);
         Arrays.fill(bestBoard, -1);
         Arrays.fill(globalBestBoard, -1);

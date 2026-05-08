@@ -1,10 +1,6 @@
 package dk.puzzle;
 
 import java.io.*;
-import com.google.api.client.http.FileContent;
-import com.google.api.services.drive.Drive;
-import com.google.api.services.drive.model.File;
-
 
 public class CheckpointManager {
 
@@ -64,9 +60,6 @@ public class CheckpointManager {
         }
     }
 
-    // ==========================================================
-    // 3. HJÆLPEFUNKTION: Læser filen ind i et 2D array
-    // ==========================================================
     private static int[][] loadBoardFromFile(java.io.File file) {
         try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
             return (int[][]) ois.readObject();

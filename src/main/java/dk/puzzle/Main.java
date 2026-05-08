@@ -51,11 +51,11 @@ public class Main {
         Runnable solverTask = null;
 
         if (usePbp) {
-            MasterSolverPBP.BuildStrategy strategy = useSpiral ?
-                    MasterSolverPBP.BuildStrategy.SPIRAL :
-                    MasterSolverPBP.BuildStrategy.TYPEWRITER;
+            MasterSolver.BuildStrategy strategy = useSpiral ?
+                    MasterSolver.BuildStrategy.SPIRAL :
+                    MasterSolver.BuildStrategy.TYPEWRITER;
 
-            solverTask = new MasterSolverPBP(inventory, targetPiece, useGpu, strategy, lockCenter);
+            solverTask = new MasterSolver(inventory, targetPiece, useGpu, strategy, lockCenter);
         } else {
             System.out.println("Macro solver not implemented in this main.");
         }
@@ -76,7 +76,7 @@ public class Main {
             BoardVisualizer viz = new BoardVisualizer(currentDisplayBoard);
             frame.add(viz, BorderLayout.CENTER);
 
-            if (finalSolverTask instanceof MasterSolverPBP pbpSolver) {
+            if (finalSolverTask instanceof MasterSolver pbpSolver) {
 
                 JPanel controlPanel = new JPanel();
                 controlPanel.setLayout(new BoxLayout(controlPanel, BoxLayout.Y_AXIS));
