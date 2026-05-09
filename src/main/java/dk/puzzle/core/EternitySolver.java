@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static dk.puzzle.io.RecordManager.uploadToDrive;
 
 /**
- * The central orchestrator for the Eternity II puzzle solver, managing a multi-phase 
+ * The central orchestrator for the Eternity II puzzle solver, managing a multiphase
  * hybrid search strategy involving CPU-based seed generation and GPU-accelerated 
  * deep search and repair.
  * 
@@ -108,10 +108,10 @@ public class EternitySolver implements Runnable {
      * persistent checkpoint matching the strategy profile.</p>
      * 
      * @param inventory The inventory containing all physical pieces and their orientations.
-     * @param trueCenterPiece The bit-packed representation of the mandatory center piece.
+     * @param trueCenterPiece The bit-packed representation of the mandatory centerpiece.
      * @param useGpu Whether to enable OpenCL/GPU acceleration for Phase 2 and 3.
      * @param strategy The board-filling pattern (e.g., SPIRAL or TYPEWRITER).
-     * @param lockCenter If true, ensures the center piece remains fixed at index 135.
+     * @param lockCenter If true, ensures the centerpiece remains fixed at index 135.
      */
     public EternitySolver(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
         Arrays.fill(flatBoard, -1);
@@ -140,10 +140,8 @@ public class EternitySolver implements Runnable {
 
         if (strategy == BuildStrategy.SPIRAL) {
             generateSpiralOrder();
-            System.out.println(timestamp() + ">>> Build Strategy: SPIRAL (Indrammer yderkanterne først)");
         } else {
             for (int i = 0; i < 256; i++) buildOrder[i] = i;
-            System.out.println(timestamp() + ">>> Build Strategy: TYPEWRITER (Linje for linje)");
         }
 
         this.compatIndex = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
@@ -468,21 +466,27 @@ public class EternitySolver implements Runnable {
      * already close to the record depth.</p>
      */
     void triggerBranchScrap() {
-//        System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END AT PHASE 3 [!!!]");
-//        System.out.printf("%s>>> Preserving top-%d boards. Generating fresh CPU seeds...%n",
-//                timestamp(), topBoards.size());
+        System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END AT PHASE 3 [!!!]");
+        System.out.printf("%s>>> Preserving top-%d boards. Generating fresh CPU seeds...%n",
+                timestamp(), topBoards.size());
 
-        // Retreat to just 5 below the record rather than all the way to SEED_DEPTH=40,
-        // so Phase 1 seeds start from a more informed position.
-        deepestStep = Math.max(absoluteHighScore - 5, SEED_DEPTH);
+        deepestStep = SEED_DEPTH;
         consecutiveExtinctions = 0;
 
         seedPool.clear();
         currentBatchSize.set(0);
         consecutiveGpuStagnation = 0;
 
-        // topBoards is NOT cleared — the best boards found so far are retained
-        // for the next Phase 3 cycle.
+        int lockedPieces = Math.max(0, absoluteHighScore - 30);
+        if (lockedPieces > 0) {
+            Arrays.fill(flatResumeBoard, -1);
+            for (int step = 0; step < lockedPieces; step++) {
+                int idx = buildOrder[step];
+                if (lockCenter && idx == 135) continue;
+
+                flatResumeBoard[idx] = globalBestBoard[idx];
+            }
+        }
     }
     private void handleVictory(int[] winningBoard) {
         System.out.println("\n" + timestamp() + ">>> ETERNITY II SOLVED BY GPU PIPELINE!!! <<<");
@@ -588,7 +592,7 @@ public class EternitySolver implements Runnable {
     }
 
     private void printPhysicalBoard(int[] board, int score) {
-        System.out.println("\n" + timestamp() + ">>> PHYSICAL PIECE-NUMBERS FOR RECORD (" + score + " brikker):");
+        System.out.println("\n" + timestamp() + ">>> PHYSICAL PIECE-NUMBERS FOR RECORD (" + score + " PIECES):");
         System.out.println("------------------------------------------------------------------");
         for (int row = 0; row < 16; row++) {
             StringBuilder sb = new StringBuilder();
