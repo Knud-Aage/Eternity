@@ -1,5 +1,6 @@
 package dk.puzzle.io;
 
+import dk.puzzle.util.PieceUtils; // Sørg for at denne sti passer til din mappestruktur!
 import java.io.BufferedReader;
 import java.io.FileReader;
 
@@ -31,6 +32,38 @@ public class BucasExporter {
      *
      * @param args Command line arguments (not used in this application).
      */
+    public static String exportBoard(int[] board) {
+        StringBuilder bucasString = new StringBuilder();
+
+        for (int i = 0; i < 256; i++) {
+            int p = board[i];
+
+            // Hvis feltet er tomt, indsætter vi "0000"
+            if (p == -1 || p == -2) {
+                bucasString.append("0000");
+            } else {
+                // Hent farverne for Nord, Øst, Syd, Vest
+                int n = PieceUtils.getNorth(p);
+                int e = PieceUtils.getEast(p);
+                int s = PieceUtils.getSouth(p);
+                int w = PieceUtils.getWest(p);
+
+                // Oversæt farvekoderne (0-22) til bogstaver ('a'-'w')
+                bucasString.append((char) ('a' + Math.max(0, n)));
+                bucasString.append((char) ('a' + Math.max(0, e)));
+                bucasString.append((char) ('a' + Math.max(0, s)));
+                bucasString.append((char) ('a' + Math.max(0, w)));
+            }
+        }
+
+        return "https://e2.bucas.name/#puzzle=Joshua_Blackwood_470&board_w=16&board_h=16&board_edges="
+                + bucasString.toString()
+                + "&motifs_order=jblackwood";
+    }
+
+    // ==========================================================
+    // DIN OPRINDELIGE METODE (Til CSV-filer)
+    // ==========================================================
     public static void main(String[] args) {
 //        String filename = "records/SPIRAL/Record_209Pieces.csv";
         String filename = "records/TYPEWRITER_LOCKED/Record_210Pieces.csv";
