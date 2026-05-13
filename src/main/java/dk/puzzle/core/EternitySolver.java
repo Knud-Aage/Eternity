@@ -9,13 +9,12 @@ import dk.puzzle.model.PieceInventory;
 import dk.puzzle.io.RecordManager;
 import dk.puzzle.util.PieceUtils;
 import dk.puzzle.io.BucasExporter;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Random;
+import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -101,6 +100,8 @@ public class EternitySolver implements Runnable {
     private volatile double extinctionThreshold = 0.98;
 
     private ScheduledExecutorService repairReporterScheduler;
+    // Using getFormatterLogger allows for printf-style formatting (%,d, %s, etc.)
+    private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
     /**
      * Constructs a new {@code EternitySolver} and initializes the search environment.
      *
@@ -130,7 +131,7 @@ public class EternitySolver implements Runnable {
 
         this.numCores = Runtime.getRuntime().availableProcessors();
         this.executor = Executors.newFixedThreadPool(numCores);
-        System.out.println(timestamp() + ">>> Multithreading active with " + numCores + " cores.");
+        logger.info(">>> Multithreading active with " + numCores + " cores.");
 
         for (int i = 0; i < 1024; i++) {
             if (inventory.allOrientations[i] == targetPiece) {
@@ -156,7 +157,7 @@ public class EternitySolver implements Runnable {
                 if (loaded[r] == null) continue;
                 for (int c = 0; c < 16; c++) {
                     int p = loaded[r][c];
-                    if (p != -1 && p != 0 && p != -2) { // Sikrer at kun ægte brikker tælles
+                    if (p != -1 && p != 0 && p != -2) {
                         bestBoard[r * 16 + c] = p;
                         globalBestBoard[r * 16 + c] = p;
                         loadedCount++;
@@ -173,12 +174,12 @@ public class EternitySolver implements Runnable {
                 System.arraycopy(bestBoard, 0, flatBoard, 0, 256);
                 System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
                 updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
-                System.out.println(timestamp() + ">>> SUCCESS: Loaded checkpoint fully! Engine locked at " + absoluteHighScore + " pieces.");
+                logger.info(">>> SUCCESS: Loaded checkpoint fully! Engine locked at " + absoluteHighScore + " pieces.");
             } else {
-                System.out.println(timestamp() + ">>> [WARNING] Smart Load found the file, but it was EMPTY or CORRUPTED inside!");
+                logger.info(">>> [WARNING] Smart Load found the file, but it was EMPTY or CORRUPTED inside!");
             }
         } else {
-            System.out.println(timestamp() + ">>> [WARNING] Smart Load failed and returned null. Starting from scratch.");
+            logger.info(">>> [WARNING] Smart Load failed and returned null. Starting from scratch.");
         }
     }
 
@@ -221,10 +222,6 @@ public class EternitySolver implements Runnable {
         this.manualOverrideRequested = true;
     }
 
-    private String timestamp() {
-        return "[" + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "] ";
-    }
-
     /**
      * The main execution loop of the solver.
      *
@@ -238,7 +235,7 @@ public class EternitySolver implements Runnable {
         }
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            System.out.println("\n" + timestamp() + ">>> Shutdown hook: Saving final checkpoint...");
+            logger.info(">>> Shutdown hook: Saving final checkpoint...");
             synchronized (displayLock) {
                 if (repairReporterScheduler != null) repairReporterScheduler.shutdownNow(); // Ensure scheduler is stopped
                 CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
@@ -254,14 +251,14 @@ public class EternitySolver implements Runnable {
         reporterThread.setDaemon(true);
         reporterThread.start();
 
-        System.out.println(timestamp() + "Starting 3-Phase Pipeline Orchestrator...");
+        logger.info("Starting 3-Phase Pipeline Orchestrator...");
         long lastPeriodicSave = System.currentTimeMillis();
 
         while (true) {
             try {
                 if (manualOverrideRequested) {
                     manualOverrideRequested = false;
-                    retreat(manualBaseCampTarget, timestamp() + ">>> User Override...");
+                    retreat(manualBaseCampTarget, ">>> User Override...");
                     try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
                 }
 
@@ -282,7 +279,7 @@ public class EternitySolver implements Runnable {
                     lastPeriodicSave = System.currentTimeMillis();
                 }
             } catch (Exception e) {
-                System.out.println("\n" + timestamp() + ">>> [FATAL ERROR] PIPELINE CRASHED: ");
+                logger.info(">>> [FATAL ERROR] PIPELINE CRASHED: ");
                 if (repairReporterScheduler != null) repairReporterScheduler.shutdownNow(); // Ensure scheduler is stopped on crash
                 e.printStackTrace();
                 try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
@@ -340,8 +337,8 @@ public class EternitySolver implements Runnable {
         isGpuBusy = false;
 
         long elapsed = System.currentTimeMillis() - start;
-        System.out.printf("%s>>> GPU Phase 2 complete. Steps taken per second: %,d%n",
-                timestamp(), Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
+        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d", 
+                Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
 
         if (result.solved()) {
             handleVictory(bestBoardOut);
@@ -363,13 +360,14 @@ public class EternitySolver implements Runnable {
                 RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
                 consecutiveExtinctions = 0;
                 saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
-                System.out.println("\n" + timestamp() + ">>> PHASE 2 (GPU) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
+                logger.info(">>> PHASE 2 (GPU) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
+                analyzeFullBoardPotential(globalBestBoard);
             } else {
-                System.out.println(timestamp() + ">>> PHASE 2 (GPU) Pushed seed to: " + deepestStep + " pieces.");
+                logger.info(">>> PHASE 2 (GPU) Pushed seed to: " + deepestStep + " pieces.");
             }
         } else {
             consecutiveGpuStagnation++;
-            System.out.printf("%s>>> PHASE 2 (GPU) No progress. Stagnation counter: %d/10%n", timestamp(), consecutiveGpuStagnation);
+            System.out.printf(">>> PHASE 2 (GPU) No progress. Stagnation counter: %d/10%n", consecutiveGpuStagnation);
         }
 
         if (consecutiveGpuStagnation < 10) {
@@ -380,12 +378,12 @@ public class EternitySolver implements Runnable {
                     new Random()
             );
 
-            System.out.printf("%s>>> Phase 2 Evolution: Bred %d new seeds (Elite + Mutated) for next round!%n", timestamp(), nextSeeds.size());
+            logger.info(">>> Phase 2 Evolution: Bred %d new seeds (Elite + Mutated) for next round!%n", nextSeeds.size());
 
             seedPool.addAll(nextSeeds);
             currentBatchSize.set(seedPool.size());
         } else {
-            System.out.println("\n" + timestamp() + ">>> [!!!] Seed gene pool stagnated. Flushing for fresh CPU seeds...");
+            logger.info(">>> [!!!] Seed gene pool stagnated. Flushing for fresh CPU seeds...");
             seedPool.clear();
             currentBatchSize.set(0);
             consecutiveGpuStagnation = 0;
@@ -448,7 +446,8 @@ public class EternitySolver implements Runnable {
 
                 saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
 
-                System.out.println("\n" + timestamp() + ">>> PHASE 3 (SURGEON) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
+                logger.info("\n" + ">>> PHASE 3 (SURGEON) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
+                analyzeFullBoardPotential(globalBestBoard);
             }
             consecutiveExtinctions = 0;
         } else {
@@ -478,7 +477,7 @@ public class EternitySolver implements Runnable {
         // 1. Increment the frustration/stagnation counter
         consecutiveExtinctions++;
 
-        System.out.println("\n" + timestamp() + ">>> [!!!] DEAD END AT PHASE 3 (Stagnation level: " + consecutiveExtinctions + ") [!!!]");
+        logger.info("\n" + ">>> [!!!] DEAD END AT PHASE 3 (Stagnation level: " + consecutiveExtinctions + ") [!!!]");
 
         // 2. Base frustration: calculate dynamic retreat bounds (lapping the bottom rows)
         int minRetreat = 10 + (consecutiveExtinctions * 5);
@@ -495,11 +494,10 @@ public class EternitySolver implements Runnable {
 
         // 4. Execute the teardown and manage the thermostat
         if (consecutiveExtinctions > 20) {
-            System.out.println(timestamp() + ">>> [CRITICAL] Massive stagnation! Tearing down " + retreatAmount + " pieces to shift branch completely.");
-            // CRITICAL FIX: Reset the thermostat so the new structural branch has time to mature!
+            logger.info(">>> [CRITICAL] Massive stagnation! Tearing down " + retreatAmount + " pieces to shift branch completely.");
             consecutiveExtinctions = 0;
         } else {
-            System.out.println(timestamp() + ">>> Tearing down " + retreatAmount + " pieces to explore a new branch...");
+            logger.info(">>> Tearing down " + retreatAmount + " pieces to explore a new branch...");
         }
 
         // Calculate how many pieces we keep as our safe Base Camp
@@ -522,8 +520,83 @@ public class EternitySolver implements Runnable {
         consecutiveGpuStagnation = 0;
     }
 
+    /**
+     * Simulates filling the rest of the board with the remaining unused pieces
+     * and calculates the total number of edge conflicts (color mismatches).
+     * A perfect 16x16 Eternity II solution has exactly 0 edge conflicts.
+     * * @param recordBoard The current best board (e.g., 214 pieces placed correctly)
+     */
+    private void analyzeFullBoardPotential(int[] recordBoard) {
+        int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
+        List<Integer> emptySpots = new ArrayList<>();
+        boolean[] usedPhysical = new boolean[256];
+
+        // 1. Identify empty spots and record which physical pieces are already used
+        for (int i = 0; i < 256; i++) {
+            int p = simulatedBoard[i];
+            if (p != -1 && p != -2) {
+                // Assuming your piece ID (p) can be converted to a physical piece index (0-255).
+                // If your PieceUtils uses bitshifting (like p >> 2), adapt this line:
+                int physicalId = p / 4; // Standard assumption: 4 orientations per piece
+                usedPhysical[physicalId] = true;
+            } else {
+                emptySpots.add(i);
+            }
+        }
+
+        // 2. Gather all remaining unused pieces
+        List<Integer> unusedPieces = new ArrayList<>();
+        for (int i = 0; i < 256; i++) {
+            if (!usedPhysical[i]) {
+                // Add the default orientation (Orientation 0) of the unused piece
+                unusedPieces.add(i * 4);
+            }
+        }
+
+        // Shuffle the unused pieces to simulate a random "dump" onto the board
+        Collections.shuffle(unusedPieces);
+
+        // 3. Fill the empty spots on the simulated board
+        for (int i = 0; i < emptySpots.size(); i++) {
+            simulatedBoard[emptySpots.get(i)] = unusedPieces.get(i);
+        }
+
+        // 4. Scan the board and count the edge conflicts
+        int totalConflicts = 0;
+
+        for (int row = 0; row < 16; row++) {
+            for (int col = 0; col < 16; col++) {
+                int idx = row * 16 + col;
+                int currentPiece = simulatedBoard[idx];
+
+                // Check East edge (if not on the rightmost column)
+                if (col < 15) {
+                    int eastNeighbor = simulatedBoard[idx + 1];
+                    if (PieceUtils.getEast(currentPiece) != PieceUtils.getWest(eastNeighbor)) {
+                        totalConflicts++;
+                    }
+                }
+
+                // Check South edge (if not on the bottom row)
+                if (row < 15) {
+                    int southNeighbor = simulatedBoard[idx + 16];
+                    if (PieceUtils.getSouth(currentPiece) != PieceUtils.getNorth(southNeighbor)) {
+                        totalConflicts++;
+                    }
+                }
+            }
+        }
+
+        // 5. Log the results!
+        logger.info(">>> [FULL BOARD SCAN] Simulated a fully laid board. Total edge conflicts: {} / 480", totalConflicts);
+
+        if (totalConflicts < 30) {
+            logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
+        }
+    }
+
     private void handleVictory(int[] winningBoard) {
-        System.out.println("\n" + timestamp() + ">>> ETERNITY II SOLVED BY GPU PIPELINE!!! <<<");
+        logger.info("\n" + ">>> ETERNITY II SOLVED BY GPU PIPELINE!!! <<<");
         updateDisplay(256, buildDisplayBoard(winningBoard));
         RecordManager.saveRecord(buildDisplayBoard(winningBoard), 256, saveProfile);
         consecutiveExtinctions = 0;
@@ -533,7 +606,7 @@ public class EternitySolver implements Runnable {
 
     private void reportSpeed() {
         if (isGpuBusy) {
-//            System.out.println(timestamp() + "[STATUS] GPU Phase 2 is processing millions of moves per second...");
+//            logger.info(timestamp() + "[STATUS] GPU Phase 2 is processing millions of moves per second...");
             return;
         }
 
@@ -549,8 +622,7 @@ public class EternitySolver implements Runnable {
         double gpuTps = gpuTrials / (elapsed / 1000.0);
 
         if (cpuTps != 0 || gpuTps != 0) {
-            System.out.printf("%s[SPEED] CPU Phase 1: %,.0f/s  |  GPU Phase 2/3: %,.0f/s\n",
-                    timestamp(), cpuTps, gpuTps);
+            logger.info(String.format("[SPEED] CPU Phase 1: %,.0f/s  |  GPU Phase 2/3: %,.0f/s", cpuTps, gpuTps));;
         }
 
         lastThroughputReportTime = now;
@@ -561,7 +633,7 @@ public class EternitySolver implements Runnable {
         for (int s = deepestStep; s < 256; s++) bestBoard[buildOrder[s]] = -1;
         if (lockCenter) bestBoard[135] = targetPiece;
         updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
-        if (logMessage != null) System.out.println(logMessage);
+        if (logMessage != null) logger.info(logMessage);
     }
 
     int countPieces(int[] board) {
@@ -617,7 +689,7 @@ public class EternitySolver implements Runnable {
                 writer.write(bucasLink + "\n");
             }
 
-            System.out.println(timestamp() + ">>> Saved local Bucas-link: " + linkFile.getName());
+            logger.info(">>> Saved local Bucas-link: " + linkFile.getName());
 
             uploadToDrive(linkFile, "text/plain", saveProfile);
 
@@ -627,8 +699,8 @@ public class EternitySolver implements Runnable {
     }
 
     private void printPhysicalBoard(int[] board, int score) {
-        System.out.println("\n" + timestamp() + ">>> PHYSICAL PIECE-NUMBERS FOR RECORD (" + score + " PIECES):");
-        System.out.println("------------------------------------------------------------------");
+        logger.info("\n" + ">>> PHYSICAL PIECE-NUMBERS FOR RECORD (" + score + " PIECES):");
+        logger.info("------------------------------------------------------------------");
         for (int row = 0; row < 16; row++) {
             StringBuilder sb = new StringBuilder();
             for (int col = 0; col < 16; col++) {
@@ -646,9 +718,9 @@ public class EternitySolver implements Runnable {
                     sb.append(String.format("%4d", physId + 1));
                 }
             }
-            System.out.println(sb.toString());
+            logger.info(sb.toString());
         }
-        System.out.println("------------------------------------------------------------------\n");
+        logger.info("------------------------------------------------------------------\n");
     }
 
     private void generateSpiralOrder() {

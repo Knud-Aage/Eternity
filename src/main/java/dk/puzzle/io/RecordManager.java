@@ -2,7 +2,10 @@ package dk.puzzle.io;
 
 import com.google.api.client.http.FileContent;
 import com.google.api.services.drive.Drive;
+import dk.puzzle.core.EternitySolver;
 import dk.puzzle.util.PieceUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 import javax.imageio.ImageIO;
 import java.awt.*;
@@ -13,6 +16,7 @@ import java.io.PrintWriter;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Collections;
+
 
 /**
  * Manages the generation and synchronization of puzzle solution records.
@@ -25,6 +29,7 @@ import java.util.Collections;
 public class RecordManager {
     private static final int PIECE_SIZE = 50;
     private static final BufferedImage[][] rotatedImages = new BufferedImage[23][4];
+    private static final Logger logger = LogManager.getLogger(RecordManager.class);
 
     static {
         loadImages();
@@ -43,7 +48,7 @@ public class RecordManager {
      */
     public static void uploadToDrive(java.io.File localFile, String mimeType, String profileFolder) {
         try {
-            System.out.println(">>> [GOOGLE DRIVE] Connects to the cloud...");
+            logger.info(">>> [GOOGLE DRIVE] Connects to the cloud...");
 
             Drive driveService = GoogleDriveConfig.getDriveService();
 
@@ -60,7 +65,7 @@ public class RecordManager {
                     .setFields("id")
                     .execute();
 
-            System.out.println(">>> [GOOGLE DRIVE] Succes! Fil gemt i mappen '" + profileFolder + "' med ID: " + file.getId());
+            logger.info(">>> [GOOGLE DRIVE] Succes! Fil gemt i mappen '" + profileFolder + "' med ID: " + file.getId());
         } catch (Exception e) {
             System.err.println(">>> [GOOGLE DRIVE FEJL] Upload fejlede: " + e.getMessage());
         }
@@ -129,7 +134,7 @@ public class RecordManager {
         uploadToDrive(new File(baseName + ".csv"), "text/csv", strategyName);
 
         String now = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
-        System.out.println(now + " >>> NEW RECORD (" + strategyName + ")! Saved for " + piecesPlaced + " pieces.");
+        logger.info(now + " >>> NEW RECORD (" + strategyName + ")! Saved for " + piecesPlaced + " pieces.");
     }
 
     private static void saveImage(int[][] mainBoard, String filename) {

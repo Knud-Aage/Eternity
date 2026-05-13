@@ -8,6 +8,8 @@ import java.awt.*;
 import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.io.File;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * A graphical component responsible for rendering the Eternity II puzzle board.
@@ -27,6 +29,8 @@ public class BoardVisualizer extends JPanel {
     private final int[][] board;
     // Pre-rotated images: [patternId 1-22][rotation 0=N, 1=E, 2=S, 3=W]
     private final BufferedImage[][] rotatedImages = new BufferedImage[23][4];
+    private static final Logger logger = LogManager.getLogger(BoardVisualizer.class);
+
 
     /**
      * Constructs a new {@code BoardVisualizer} with a reference to the puzzle board.
@@ -62,7 +66,7 @@ public class BoardVisualizer extends JPanel {
                     }
                 }
             } catch (Exception e) {
-                System.out.println("Could not load image: pattern" + i + ".png");
+                logger.info("Could not load image: pattern" + i + ".png");
             }
         }
     }

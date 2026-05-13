@@ -20,6 +20,9 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.util.Collections;
 import java.util.List;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 
 /**
  * Configuration utility for integrating Google Drive API services into the Eternity II solver.
@@ -34,6 +37,8 @@ public class GoogleDriveConfig {
 
     private static final String TOKENS_DIRECTORY_PATH = "tokens";
     private static final List<String> SCOPES = Collections.singletonList(DriveScopes.DRIVE_FILE);
+    private static final Logger logger = LogManager.getLogger(GoogleDriveConfig.class);
+
 
     /**
      * Initializes and returns an authorized Google Drive service instance.
@@ -107,7 +112,7 @@ public class GoogleDriveConfig {
                 .setFields("id")
                 .execute();
 
-        System.out.println(">>> [GOOGLE DRIVE] Oprettede ny mappe i skyen: " + folderName);
+        logger.info(">>> [GOOGLE DRIVE] Oprettede ny mappe i skyen: " + folderName);
         return folder.getId();
     }
 }

@@ -3,6 +3,9 @@ package dk.puzzle.io;
 import dk.puzzle.util.PieceUtils; // Sørg for at denne sti passer til din mappestruktur!
 import java.io.BufferedReader;
 import java.io.FileReader;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 
 /**
  * <p>A utility class designed to convert Eternity II puzzle solution records
@@ -19,6 +22,8 @@ import java.io.FileReader;
  * in the Bucas online tool.</p>
  */
 public class BucasExporter {
+
+    private static final Logger logger = LogManager.getLogger(BucasExporter.class);
 
     /**
      * The main entry point for the BucasExporter application.
@@ -123,13 +128,13 @@ public class BucasExporter {
                     + bucasString
                     + "&motifs_order=jblackwood";
 
-            System.out.println("Finished. Press on this link to see the puzzle:");
-            System.out.println("------------------------------------------------------");
-            System.out.println(finalUrl);
-            System.out.println("------------------------------------------------------");
+            logger.info("Finished. Press on this link to see the puzzle:");
+            logger.info("------------------------------------------------------");
+            logger.info(finalUrl);
+            logger.info("------------------------------------------------------");
 
         } catch (Exception e) {
-            System.out.println("Couldn't find the file. Be sure that it is placed in the records folder.");
+            logger.info("Couldn't find the file. Be sure that it is placed in the records folder.");
             e.printStackTrace();
         }
     }

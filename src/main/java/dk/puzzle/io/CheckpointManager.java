@@ -1,6 +1,9 @@
 package dk.puzzle.io;
 
 import java.io.*;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 
 /**
  * Manages the persistence of puzzle board states to disk.
@@ -10,6 +13,8 @@ import java.io.*;
  * in a specific profile directory.</p>
  */
 public class CheckpointManager {
+
+    private static final Logger logger = LogManager.getLogger(CheckpointManager.class);
 
     /**
      * Automatically identifies and loads the checkpoint with the highest piece count 
@@ -27,13 +32,13 @@ public class CheckpointManager {
         java.io.File folder = new java.io.File(profileFolder);
 
         if (!folder.exists() || !folder.isDirectory()) {
-            System.out.println(">>> [SMART LOAD] Folder '" + profileFolder + "' doesn't exist yet. Start with an empty board.");
+            logger.info(">>> [SMART LOAD] Folder '" + profileFolder + "' doesn't exist yet. Start with an empty board.");
             return null;
         }
 
         java.io.File[] files = folder.listFiles((dir, name) -> name.toLowerCase().endsWith(".dat"));
         if (files == null || files.length == 0) {
-            System.out.println(">>> [SMART LOAD] No .dat checkpoints found in the folder '" + profileFolder + "'.");
+            logger.info(">>> [SMART LOAD] No .dat checkpoints found in the folder '" + profileFolder + "'.");
             return null;
         }
 
@@ -57,7 +62,7 @@ public class CheckpointManager {
         }
 
         if (bestFile != null) {
-            System.out.println(">>> [SMART LOAD] Loads the highest score checkpoint: " + bestFile.getName() + " from folder: " + profileFolder);
+            logger.info(">>> [SMART LOAD] Loads the highest score checkpoint: " + bestFile.getName() + " from folder: " + profileFolder);
             return loadBoardFromFile(bestFile);
         }
 

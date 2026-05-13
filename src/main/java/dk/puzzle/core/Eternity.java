@@ -15,6 +15,8 @@ import java.io.PrintStream;
 import java.time.LocalDateTime;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 
 /**
  * The primary entry point and coordinator for the Eternity II solver application.
@@ -31,6 +33,8 @@ public class Eternity {
     private static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
     private static final AtomicInteger highScore = new AtomicInteger(0);
+    private static final Logger logger = LogManager.getLogger(Eternity.class);
+
 
     /**
      * Orchestrates the startup sequence of the application.
@@ -42,7 +46,7 @@ public class Eternity {
      * @param args Command-line arguments (currently unused).
      */
     public static void main(String[] args) {
-        initLogging();
+//        initLogging();
         
         StartupDialog dialog = new StartupDialog(null);
         dialog.setVisible(true);
@@ -51,7 +55,7 @@ public class Eternity {
             System.exit(0);
         }
 
-        System.out.println("Loading Eternity II Engine...");
+        logger.info("Loading Eternity II Engine...");
 
         int[] basePieces = loadPieces();
         PieceInventory inventory = new PieceInventory(basePieces);
@@ -79,7 +83,7 @@ public class Eternity {
 
             solverTask = new EternitySolver(inventory, targetPiece, useGpu, strategy, lockCenter);
         } else {
-            System.out.println("Macro solver not implemented in this main.");
+            logger.info("Macro solver not implemented in this main.");
         }
 
         if (solverTask != null) {
@@ -242,16 +246,16 @@ public class Eternity {
         });
     }
 
-    private static void initLogging() {
-        try {
-            PrintStream logFile = new PrintStream(new FileOutputStream("eternity_log.txt", true));
-            System.setOut(logFile);
-            System.setErr(logFile);
-            System.out.println("\n--- Session started at " + LocalDateTime.now() + " ---");
-        } catch (IOException e) {
-            System.err.println("Could not initialize log file: " + e.getMessage());
-        }
-    }
+//    private static void initLogging() {
+//        try {
+//            PrintStream logFile = new PrintStream(new FileOutputStream("eternity_log.txt", true));
+//            System.setOut(logFile);
+//            System.setErr(logFile);
+//            logger.info("\n--- Session started at " + LocalDateTime.now() + " ---");
+//        } catch (IOException e) {
+//            System.err.println("Could not initialize log file: " + e.getMessage());
+//        }
+//    }
 
     /**
      * Updates the shared state used for real-time visualization of the puzzle board.
@@ -297,7 +301,7 @@ public class Eternity {
                 return pieces;
             }
         } catch (Exception e) {
-            System.out.println("pieces.csv not found or unreadable. Using mock data.");
+            logger.info("pieces.csv not found or unreadable. Using mock data.");
         }
         return generateMock();
     }
