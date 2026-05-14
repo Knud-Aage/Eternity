@@ -89,7 +89,7 @@ public class EternitySolver implements Runnable {
     // Metrics
     private final AtomicLong globalCpuTrialCount = new AtomicLong(0);
     private final AtomicLong globalGpuTrialCount = new AtomicLong(0);
-    private long lastThroughputReportTime = System.currentTimeMillis(); // Keep for reportSpeed()
+    private long lastThroughputReportTime = System.currentTimeMillis();
     private long totalRepairVariationsTested = 0;
     private long repairLoopsCounter = 0;
     private volatile boolean isGpuBusy = false;
@@ -98,7 +98,9 @@ public class EternitySolver implements Runnable {
     volatile boolean manualOverrideRequested = false;
     private volatile int manualBaseCampTarget = 0;
     private volatile double extinctionThreshold = 0.98;
-
+    private volatile int poisonedIndex = -1;
+    private volatile int poisonedPiece = -1;
+    private final Set<Integer> uniqueMaxScoreHashes = ConcurrentHashMap.newKeySet();
     private ScheduledExecutorService repairReporterScheduler;
     // Using getFormatterLogger allows for printf-style formatting (%,d, %s, etc.)
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
@@ -337,7 +339,7 @@ public class EternitySolver implements Runnable {
         isGpuBusy = false;
 
         long elapsed = System.currentTimeMillis() - start;
-        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d", 
+        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
                 Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
 
         if (result.solved()) {
@@ -354,16 +356,24 @@ public class EternitySolver implements Runnable {
 
             if (deepestStep > absoluteHighScore) {
                 absoluteHighScore = deepestStep;
-
                 System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
-
-                RecordManager.saveRecord(buildDisplayBoard(bestBoard), absoluteHighScore, saveProfile);
+                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                 consecutiveExtinctions = 0;
+
+                uniqueMaxScoreHashes.clear();
+                uniqueMaxScoreHashes.add(Arrays.hashCode(bestBoardOut));
+
                 saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
-                logger.info(">>> PHASE 2 (GPU) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
+
+                logger.info("\n>>> PHASE 3 (SURGEON) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
                 analyzeFullBoardPotential(globalBestBoard);
-            } else {
-                logger.info(">>> PHASE 2 (GPU) Pushed seed to: " + deepestStep + " pieces.");
+
+            } else if (deepestStep == absoluteHighScore) {
+                int boardHash = Arrays.hashCode(bestBoardOut);
+                if (uniqueMaxScoreHashes.add(boardHash)) {
+                    logger.info(">>> [PROGRESS] Surgeon got a new unique variant of %d-pieced board! (Uniquely found %d times so far",
+                                absoluteHighScore, uniqueMaxScoreHashes.size());
+                }
             }
         } else {
             consecutiveGpuStagnation++;
@@ -383,10 +393,8 @@ public class EternitySolver implements Runnable {
             seedPool.addAll(nextSeeds);
             currentBatchSize.set(seedPool.size());
         } else {
-            logger.info(">>> [!!!] Seed gene pool stagnated. Flushing for fresh CPU seeds...");
-            seedPool.clear();
-            currentBatchSize.set(0);
-            consecutiveGpuStagnation = 0;
+            logger.warn(">>> [!!!] Phase 2 GPU stagnated! Trapped below LNS threshold. Activating Teardown...");
+            triggerBranchScrap();
         }
     }
 
@@ -485,25 +493,35 @@ public class EternitySolver implements Runnable {
 
         // 3. Critical Stagnation: if we are stuck for a long time (e.g., trapped in upper rows)
         if (consecutiveExtinctions > 20) {
-            maxRetreat = 200; // Open up the ceiling for a massive retreat
+            maxRetreat = 256;
         }
 
         Random rand = new Random();
         int retreatAmount = minRetreat + rand.nextInt(maxRetreat - minRetreat + 1);
-        retreatAmount = Math.min(retreatAmount, 200); // Absolute safety ceiling
+        retreatAmount = Math.min(retreatAmount, 256);
 
-        // 4. Execute the teardown and manage the thermostat
-        if (consecutiveExtinctions > 20) {
-            logger.info(">>> [CRITICAL] Massive stagnation! Tearing down " + retreatAmount + " pieces to shift branch completely.");
-            consecutiveExtinctions = 0;
-        } else {
-            logger.info(">>> Tearing down " + retreatAmount + " pieces to explore a new branch...");
-        }
 
-        // Calculate how many pieces we keep as our safe Base Camp
+        // Calculate how many pieces we keep as our safe Base Camp FIRST
         int lockedPieces = Math.max(0, absoluteHighScore - retreatAmount);
 
-        // Clear the board and lock the Base Camp securely based on the global best structure
+        // 4. Execute the teardown, log the new base camp score, and manage the thermostat
+        if (consecutiveExtinctions > 20) {
+            logger.info(">>> [CRITICAL] Massive stagnation! Tearing down %d pieces. Base Camp reset to: %d pieces.", retreatAmount, lockedPieces);
+            consecutiveExtinctions = 0;
+        } else {
+            logger.info(">>> Tearing down %d pieces. Base Camp reset to: %d pieces.", retreatAmount, lockedPieces);
+        }
+
+        if (absoluteHighScore > lockedPieces + 5) {
+            poisonedIndex = buildOrder[lockedPieces + 2];
+            poisonedPiece = globalBestBoard[poisonedIndex];
+            logger.info(">>> [GLOBAL TABU] Poisoned Square Active! Piece %d is banned at index %d.", poisonedPiece, poisonedIndex);
+        } else {
+            poisonedIndex = -1;
+            poisonedPiece = -1;
+        }
+
+        // Clear the board and lock the Base Camp securely...
         Arrays.fill(flatResumeBoard, -1);
         for (int step = 0; step < lockedPieces; step++) {
             int idx = buildOrder[step];
@@ -622,7 +640,7 @@ public class EternitySolver implements Runnable {
         double gpuTps = gpuTrials / (elapsed / 1000.0);
 
         if (cpuTps != 0 || gpuTps != 0) {
-            logger.info(String.format("[SPEED] CPU Phase 1: %,.0f/s  |  GPU Phase 2/3: %,.0f/s", cpuTps, gpuTps));;
+            logger.info("[SPEED] CPU Phase 1: %,.0f/s  |  GPU Phase 2/3: %,.0f/s", cpuTps, gpuTps);;
         }
 
         lastThroughputReportTime = now;
@@ -857,7 +875,9 @@ public class EternitySolver implements Runnable {
                 int orientationIdx = orientIdxs[(i + offset) % candidateCount];
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
-
+//                if (boardIdx == poisonedIndex && p == poisonedPiece) {
+//                    continue;
+//                }
                 if (passesLookahead(p, step, row, col, boardIdx)) {
                     localBoard[boardIdx] = p;
                     localUsed[physicalIdx] = true;
