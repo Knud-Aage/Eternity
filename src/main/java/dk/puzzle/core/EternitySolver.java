@@ -492,27 +492,33 @@ public class EternitySolver implements Runnable {
         int maxRetreat = minRetreat + 15;
 
         // 3. Critical Stagnation: if we are stuck for a long time (e.g., trapped in upper rows)
-        if (consecutiveExtinctions > 20) {
-            maxRetreat = 256;
-        }
+        if (consecutiveExtinctions > 25) {
+            maxRetreat = absoluteHighScore;
+       }
 
         Random rand = new Random();
         int retreatAmount = minRetreat + rand.nextInt(maxRetreat - minRetreat + 1);
-        retreatAmount = Math.min(retreatAmount, 256);
 
-
-        // Calculate how many pieces we keep as our safe Base Camp FIRST
         int lockedPieces = Math.max(0, absoluteHighScore - retreatAmount);
 
-        // 4. Execute the teardown, log the new base camp score, and manage the thermostat
-        if (consecutiveExtinctions > 20) {
-            logger.info(">>> [CRITICAL] Massive stagnation! Tearing down %d pieces. Base Camp reset to: %d pieces.", retreatAmount, lockedPieces);
+        if (consecutiveExtinctions > 25) {
+            lockedPieces = 0;
+            retreatAmount = absoluteHighScore;
+        }
+
+        // 4. Execute the teardown
+        if (consecutiveExtinctions > 25) {
+            logger.info(">>> [CRITICAL] Massive stagnation! Tearing down %d pieces. Base Camp reset to: 0 pieces.", retreatAmount);
             consecutiveExtinctions = 0;
         } else {
             logger.info(">>> Tearing down %d pieces. Base Camp reset to: %d pieces.", retreatAmount, lockedPieces);
         }
 
-        if (absoluteHighScore > lockedPieces + 5) {
+        if (lockedPieces == 0) {
+            poisonedIndex = buildOrder[0];
+            poisonedPiece = globalBestBoard[poisonedIndex];
+            logger.info(">>> [GLOBAL TABU] Board reset! Old start piece %d is strictly banned at index %d.", poisonedPiece, poisonedIndex);
+        } else if (absoluteHighScore > lockedPieces + 5) {
             poisonedIndex = buildOrder[lockedPieces + 2];
             poisonedPiece = globalBestBoard[poisonedIndex];
             logger.info(">>> [GLOBAL TABU] Poisoned Square Active! Piece %d is banned at index %d.", poisonedPiece, poisonedIndex);
