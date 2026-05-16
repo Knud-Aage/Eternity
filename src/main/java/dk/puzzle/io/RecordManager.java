@@ -137,7 +137,7 @@ public class RecordManager {
         logger.info(now + " >>> NEW RECORD (" + strategyName + ")! Saved for " + piecesPlaced + " pieces.");
     }
 
-    private static void saveImage(int[][] mainBoard, String filename) {
+    public static void saveImage(int[][] mainBoard, String filename) {
         BufferedImage img = new BufferedImage(16 * PIECE_SIZE, 16 * PIECE_SIZE, BufferedImage.TYPE_INT_ARGB);
         Graphics2D g2d = img.createGraphics();
         g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);

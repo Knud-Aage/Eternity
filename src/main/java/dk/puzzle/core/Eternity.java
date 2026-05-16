@@ -116,51 +116,30 @@ public class Eternity {
                 Font labelFont = new Font("Arial", Font.BOLD, 13);
                 Color textColor = Color.WHITE;
 
-                // 1. Extinction Threshold Slider
-                JLabel extLabel = new JLabel("Extinction Trigger: 98%");
-                extLabel.setFont(labelFont);
-                extLabel.setForeground(textColor);
-                extLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+                JLabel jlabelCpuDepth = new JLabel("CPU Handoff Depth: " + EternitySolver.userCpuHandoffDepth);
+                JLabel jlabelSurgeonHoles = new JLabel("Surgeon Holes (LNS): " + EternitySolver.userSurgeonHoles);
 
-                JSlider extSlider = new JSlider(50, 100, 98);
-                extSlider.setBackground(new Color(40, 42, 45));
-                extSlider.addChangeListener(e -> {
-                    extLabel.setText("Extinction Trigger: " + extSlider.getValue() + "%");
-                    pbpSolver.setExtinctionThreshold(extSlider.getValue() / 100.0);
+                JSlider cpuDepthSlider = new JSlider(JSlider.HORIZONTAL, 2, 20, EternitySolver.userCpuHandoffDepth);
+                cpuDepthSlider.setMajorTickSpacing(2);
+                cpuDepthSlider.setPaintTicks(true);
+                cpuDepthSlider.setPaintLabels(true);
+
+                cpuDepthSlider.addChangeListener(e -> {
+                    int value = cpuDepthSlider.getValue();
+                    EternitySolver.userCpuHandoffDepth = value;
+                    jlabelCpuDepth.setText("CPU Handoff Depth: " + value);
                 });
 
-                // 2. Batch Size Dropdown
-                JLabel batchLabel = new JLabel("Target Seeds: AUTO (Dynamic)");
-                batchLabel.setFont(labelFont);
-                batchLabel.setForeground(textColor);
-                batchLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+                JSlider surgeonHolesSlider = new JSlider(JSlider.HORIZONTAL, 5, 100, EternitySolver.userSurgeonHoles);
+                surgeonHolesSlider.setMajorTickSpacing(20);
+                surgeonHolesSlider.setMinorTickSpacing(5);
+                surgeonHolesSlider.setPaintTicks(true);
+                surgeonHolesSlider.setPaintLabels(true);
 
-                String[] batchOptions = {"AUTO (Dynamic)", "50", "100", "250", "500", "1000", "2500", "5000", "10000"};
-                JComboBox<String> batchBox = new JComboBox<>(batchOptions);
-                batchBox.setMaximumSize(new Dimension(150, 30));
-                batchBox.setAlignmentX(Component.CENTER_ALIGNMENT);
-                batchBox.addActionListener(e -> {
-                    String selected = (String) batchBox.getSelectedItem();
-                    if (selected.startsWith("AUTO")) {
-                        batchLabel.setText("Target Seeds: AUTO (Dynamic)");
-                        pbpSolver.setBatchSizeOverride(-1);
-                    } else {
-                        batchLabel.setText("Target Seeds: " + selected + " (LOCKED)");
-                        pbpSolver.setBatchSizeOverride(Integer.parseInt(selected));
-                    }
-                });
-
-                // Targeted Holes Percentage Slider
-                JLabel targetedHolesLabel = new JLabel("Targeted Holes: 70%");
-                targetedHolesLabel.setFont(labelFont);
-                targetedHolesLabel.setForeground(textColor);
-                targetedHolesLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-                JSlider targetedHolesSlider = new JSlider(0, 100, 70);
-                targetedHolesSlider.setBackground(new Color(40, 42, 45));
-                targetedHolesSlider.addChangeListener(e -> {
-                    targetedHolesLabel.setText("Targeted Holes: " + targetedHolesSlider.getValue() + "%");
-                    pbpSolver.setTargetedHolesPercentage(targetedHolesSlider.getValue() / 100.0);
+                surgeonHolesSlider.addChangeListener(e -> {
+                    int value = surgeonHolesSlider.getValue();
+                    EternitySolver.userSurgeonHoles = value;
+                    jlabelSurgeonHoles.setText("Surgeon Holes (LNS): " + value);
                 });
 
                 // 3. Base Camp Override Slider
@@ -184,22 +163,6 @@ public class Eternity {
                 forceBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
                 forceBtn.addActionListener(e -> pbpSolver.triggerManualOverride(campSlider.getValue()));
 
-                controlPanel.add(Box.createVerticalStrut(30));
-                controlPanel.add(extLabel);
-                controlPanel.add(Box.createVerticalStrut(10));
-                controlPanel.add(extSlider);
-
-                controlPanel.add(Box.createVerticalStrut(30));
-
-                controlPanel.add(batchLabel);
-                controlPanel.add(Box.createVerticalStrut(10));
-                controlPanel.add(batchBox);
-
-                controlPanel.add(Box.createVerticalStrut(30));
-                controlPanel.add(targetedHolesLabel);
-                controlPanel.add(Box.createVerticalStrut(10));
-                controlPanel.add(targetedHolesSlider);
-
                 controlPanel.add(Box.createVerticalStrut(50));
 
                 controlPanel.add(campLabel);
@@ -207,6 +170,11 @@ public class Eternity {
                 controlPanel.add(campSlider);
                 controlPanel.add(Box.createVerticalStrut(20));
                 controlPanel.add(forceBtn);
+
+                controlPanel.add(jlabelCpuDepth);
+                controlPanel.add(cpuDepthSlider);
+                controlPanel.add(jlabelSurgeonHoles);
+                controlPanel.add(surgeonHolesSlider);
 
                 JLabel stagLabel = new JLabel("Auto-Reset Timeout: 20 min");
                 stagLabel.setFont(labelFont);
@@ -245,17 +213,6 @@ public class Eternity {
             }).start();
         });
     }
-
-//    private static void initLogging() {
-//        try {
-//            PrintStream logFile = new PrintStream(new FileOutputStream("eternity_log.txt", true));
-//            System.setOut(logFile);
-//            System.setErr(logFile);
-//            logger.info("\n--- Session started at " + LocalDateTime.now() + " ---");
-//        } catch (IOException e) {
-//            System.err.println("Could not initialize log file: " + e.getMessage());
-//        }
-//    }
 
     /**
      * Updates the shared state used for real-time visualization of the puzzle board.
