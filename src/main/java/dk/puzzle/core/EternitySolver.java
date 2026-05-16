@@ -141,7 +141,7 @@ public class EternitySolver implements Runnable {
 
         this.numCores = Runtime.getRuntime().availableProcessors();
         this.executor = Executors.newFixedThreadPool(numCores);
-        logger.info(">>> Multithreading active with " + numCores + " cores.");
+        System.out.println(">>> Multithreading active with " + numCores + " cores.");
 
         for (int i = 0; i < 1024; i++) {
             if (inventory.allOrientations[i] == targetPiece) {
@@ -188,7 +188,7 @@ public class EternitySolver implements Runnable {
                 System.arraycopy(bestBoard, 0, flatBoard, 0, 256);
                 System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
                 updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
-                logger.info(">>> SUCCESS: Loaded checkpoint fully! Engine locked at " + absoluteHighScore + " pieces.");
+                System.out.println(">>> SUCCESS: Loaded checkpoint fully! Engine locked at " + absoluteHighScore + " pieces.");
             } else {
                 logger.info(">>> [WARNING] Smart Load found the file, but it was EMPTY or CORRUPTED inside!");
             }

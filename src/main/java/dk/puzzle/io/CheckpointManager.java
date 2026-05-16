@@ -62,7 +62,7 @@ public class CheckpointManager {
         }
 
         if (bestFile != null) {
-            logger.info(">>> [SMART LOAD] Loads the highest score checkpoint: " + bestFile.getName() + " from folder: " + profileFolder);
+            System.out.println(">>> [SMART LOAD] Loads the highest score checkpoint: " + bestFile.getName() + " from folder: " + profileFolder);
             return loadBoardFromFile(bestFile);
         }
 

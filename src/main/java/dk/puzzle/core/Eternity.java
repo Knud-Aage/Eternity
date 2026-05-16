@@ -55,7 +55,7 @@ public class Eternity {
             System.exit(0);
         }
 
-        logger.info("Loading Eternity II Engine...");
+        System.out.println("Loading Eternity II Engine...");
 
         int[] basePieces = loadPieces();
         PieceInventory inventory = new PieceInventory(basePieces);
