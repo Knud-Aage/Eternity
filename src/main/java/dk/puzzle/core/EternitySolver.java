@@ -353,6 +353,14 @@ public class EternitySolver implements Runnable {
             }
 
             executor.invokeAll(workers);
+
+            // DEADLOCK DETECTOR
+            if (seedPool.isEmpty()) {
+                logger.warn(">>> [PHASE 1 DEADLOCK] CPU proved that NO alternative seeds exist for this Base Camp!");
+                consecutiveExtinctions++;
+                triggerBranchScrap();
+            }
+
         } catch (InterruptedException e) {
             return;
         }
@@ -391,6 +399,10 @@ public class EternitySolver implements Runnable {
         }
 
         if (result.newHighScore() > scoreBefore) {
+//            if (!verifyBoardStrict(bestBoardOut)) {
+//                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict! Rejecting this fake record.");
+//                return;
+//            }
             deepestStep = result.newHighScore();
             consecutiveGpuStagnation = 0;
 
@@ -415,14 +427,14 @@ public class EternitySolver implements Runnable {
             } else if (deepestStep == absoluteHighScore) {
                 int boardHash = Arrays.hashCode(bestBoardOut);
                 if (uniqueMaxScoreHashes.add(boardHash)) {
-                    analyzeFullBoardPotential(globalBestBoard);
+                    analyzeFullBoardPotential(bestBoardOut);
                     logger.info(">>> [PROGRESS] Surgeon got a new unique variant of %d-pieced board! (Uniquely found %d times so far",
                             absoluteHighScore, uniqueMaxScoreHashes.size());
                 }
             }
         } else {
             consecutiveGpuStagnation++;
-            System.out.printf(">>> PHASE 2 (GPU) No progress. Stagnation counter: %d/10%n", consecutiveGpuStagnation);
+//            System.out.printf(">>> PHASE 2 (GPU) No progress. Stagnation counter: %d/10%n", consecutiveGpuStagnation);
         }
 
         if (consecutiveGpuStagnation < 10) {
@@ -487,6 +499,10 @@ public class EternitySolver implements Runnable {
         }
 
         if (result.newHighScore() > scoreBefore) {
+            if (!verifyBoardStrict(bestBoardOut)) {
+                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict! Rejecting this fake record.");
+                return;
+            }
             deepestStep = result.newHighScore();
             updateTabuList(bestBoardOut);
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
@@ -505,6 +521,13 @@ public class EternitySolver implements Runnable {
 
                 logger.info(">>> PHASE 3 (SURGEON) BROKE RECORD! NEW HIGH SCORE: " + absoluteHighScore + " <<<");
                 analyzeFullBoardPotential(globalBestBoard);
+            } else if (deepestStep == absoluteHighScore) {
+                int boardHash = Arrays.hashCode(bestBoardOut);
+                if (uniqueMaxScoreHashes.add(boardHash)) {
+                    analyzeFullBoardPotential(bestBoardOut);
+                    logger.info(">>> [PROGRESS] Surgeon got a new unique variant of %d-pieced board! (Uniquely found %d times so far)",
+                            absoluteHighScore, uniqueMaxScoreHashes.size());
+                }
             }
             consecutiveExtinctions = 0;
         } else {
@@ -521,6 +544,11 @@ public class EternitySolver implements Runnable {
                 tabuTenure[i] = currentRepairIteration + 25;
             }
         }
+    }
+
+    void clearTabu() {
+        Arrays.fill(tabuTenure, 0);
+        logger.info(">>> [TABU] All tenures cleared for fresh Phase 3 cycle.");
     }
 
     /**
@@ -593,13 +621,14 @@ public class EternitySolver implements Runnable {
         seedPool.clear();
         currentBatchSize.set(0);
         consecutiveGpuStagnation = 0;
+        clearTabu();
     }
 
     /**
-     * Simulates filling the rest of the board with the remaining unused pieces
-     * and calculates the total number of edge conflicts (color mismatches).
-     * A perfect 16x16 Eternity II solution has exactly 0 edge conflicts.
-     * * @param recordBoard The current best board (e.g., 214 pieces placed correctly)
+     * Simulates filling the rest of the board with the remaining unused pieces.
+     * Uses an "Intelligent Edge-Aware Fill" algorithm that ensures corner pieces
+     * and border pieces are placed at the edges and rotated so their gray sides (0) face outwards.
+     * * @param recordBoard The current best board
      */
     private void analyzeFullBoardPotential(int[] recordBoard) {
         int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
@@ -610,30 +639,86 @@ public class EternitySolver implements Runnable {
         for (int i = 0; i < 256; i++) {
             int p = simulatedBoard[i];
             if (p != -1 && p != -2) {
-                // Assuming your piece ID (p) can be converted to a physical piece index (0-255).
-                // If your PieceUtils uses bitshifting (like p >> 2), adapt this line:
-                int physicalId = p / 4; // Standard assumption: 4 orientations per piece
-                usedPhysical[physicalId] = true;
+                int physicalId = -1;
+                for (int oi = 0; oi < 1024; oi++) {
+                    if (inventory.allOrientations[oi] == p) {
+                        physicalId = inventory.physicalMapping[oi];
+                        break;
+                    }
+                }
+                if (physicalId != -1) {
+                    usedPhysical[physicalId] = true;
+                }
             } else {
                 emptySpots.add(i);
             }
         }
 
-        // 2. Gather all remaining unused pieces
-        List<Integer> unusedPieces = new ArrayList<>();
-        for (int i = 0; i < 256; i++) {
-            if (!usedPhysical[i]) {
-                // Add the default orientation (Orientation 0) of the unused piece
-                unusedPieces.add(i * 4);
+        // 2. Gather all remaining unused physical pieces
+        List<Integer> unusedPhysIds = new ArrayList<>();
+        for (int physId = 0; physId < 256; physId++) {
+            if (!usedPhysical[physId]) {
+                unusedPhysIds.add(physId);
             }
         }
 
-        // Shuffle the unused pieces to simulate a random "dump" onto the board
-        Collections.shuffle(unusedPieces);
+        // Shuffle to ensure a different random variant each time
+        Collections.shuffle(unusedPhysIds);
 
-        // 3. Fill the empty spots on the simulated board
-        for (int i = 0; i < emptySpots.size(); i++) {
-            simulatedBoard[emptySpots.get(i)] = unusedPieces.get(i);
+        // 3. INTELLIGENT FILL: Place pieces based on board geography
+        for (int spot : emptySpots) {
+            int row = spot / 16;
+            int col = spot % 16;
+
+            // Define exactly which sides MUST be gray (0) based on the spot's position
+            boolean reqN = (row == 0);
+            boolean reqS = (row == 15);
+            boolean reqW = (col == 0);
+            boolean reqE = (col == 15);
+
+            int selectedListIndex = -1;
+            int selectedOrientedPiece = -1;
+
+            // Search through the unused pieces for one that perfectly matches the gray-edge requirements
+            for (int i = 0; i < unusedPhysIds.size(); i++) {
+                int physId = unusedPhysIds.get(i);
+
+                // Test all 4 orientations of this specific physical piece
+                for (int oi = 0; oi < 1024; oi++) {
+                    if (inventory.physicalMapping[oi] == physId) {
+                        int p = inventory.allOrientations[oi];
+
+                        boolean match = true;
+                        // The XOR logic (!=) ensures that an edge is gray ONLY if it is required to be gray
+                        if (reqN != (PieceUtils.getNorth(p) == 0)) match = false;
+                        if (reqS != (PieceUtils.getSouth(p) == 0)) match = false;
+                        if (reqW != (PieceUtils.getWest(p) == 0)) match = false;
+                        if (reqE != (PieceUtils.getEast(p) == 0)) match = false;
+
+                        if (match) {
+                            selectedListIndex = i;
+                            selectedOrientedPiece = p;
+                            break;
+                        }
+                    }
+                }
+                if (selectedListIndex != -1) break; // We found a valid piece for this spot!
+            }
+
+            // Place the piece and remove it from the inventory
+            if (selectedListIndex != -1) {
+                simulatedBoard[spot] = selectedOrientedPiece;
+                unusedPhysIds.remove(selectedListIndex);
+            } else {
+                // FALLBACK: In case of inventory mismatch, just take the first available piece
+                int fallbackPhysId = unusedPhysIds.remove(0);
+                for (int oi = 0; oi < 1024; oi++) {
+                    if (inventory.physicalMapping[oi] == fallbackPhysId) {
+                        simulatedBoard[spot] = inventory.allOrientations[oi];
+                        break;
+                    }
+                }
+            }
         }
 
         // 4. Scan the board and count the edge conflicts
@@ -644,7 +729,7 @@ public class EternitySolver implements Runnable {
                 int idx = row * 16 + col;
                 int currentPiece = simulatedBoard[idx];
 
-                // Check East edge (if not on the rightmost column)
+                // Check East edge
                 if (col < 15) {
                     int eastNeighbor = simulatedBoard[idx + 1];
                     if (PieceUtils.getEast(currentPiece) != PieceUtils.getWest(eastNeighbor)) {
@@ -652,7 +737,7 @@ public class EternitySolver implements Runnable {
                     }
                 }
 
-                // Check South edge (if not on the bottom row)
+                // Check South edge
                 if (row < 15) {
                     int southNeighbor = simulatedBoard[idx + 16];
                     if (PieceUtils.getSouth(currentPiece) != PieceUtils.getNorth(southNeighbor)) {
@@ -662,12 +747,14 @@ public class EternitySolver implements Runnable {
             }
         }
 
-        // 5. Log the results!
-        logger.info(">>> [FULL BOARD SCAN] Simulated a fully laid board. Total edge conflicts: %d / 480", totalConflicts);
+        // 5. Log and Save
+        logger.info(">>> [FULL BOARD SCAN] Simulated an edge-aware fully laid board. Total internal edge conflicts: %d / 480", totalConflicts);
 
         if (totalConflicts < 30) {
             logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
         }
+
+        saveFullBoardVariant(simulatedBoard, absoluteHighScore, totalConflicts);
     }
 
     private void handleVictory(int[] winningBoard) {
@@ -781,7 +868,6 @@ public class EternitySolver implements Runnable {
                 writer.write("Eternity II Record: " + score + " pieces\n");
                 writer.write("Time: " + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "\n");
                 writer.write("Strategy: " + saveProfile + "\n\n");
-                writer.write("Click to see the board:\n");
                 writer.write(bucasLink + "\n");
             }
 
@@ -817,6 +903,103 @@ public class EternitySolver implements Runnable {
             logger.info(sb.toString());
         }
         logger.info("------------------------------------------------------------------");
+    }
+
+    /**
+     * Saves a "Full Board" variant into its own dedicated directory.
+     * Generates unique filenames with timestamps to preserve ALL generated variants
+     * for later analysis.
+     * * @param simulatedBoard The full 256-piece board array
+     * @param baseScore The number of correct pieces placed before the random fill
+     * @param conflicts The total number of edge color mismatches on the full board
+     */
+    private void saveFullBoardVariant(int[] simulatedBoard, int baseScore, int conflicts) {
+        // 1. Create the appropriate directory (e.g., TYPEWRITER_LOCKED_FULL)
+        String fullProfileFolder = saveProfile + "_FULL";
+        java.io.File folder = new java.io.File(fullProfileFolder);
+        if (!folder.exists()) {
+            folder.mkdirs();
+        }
+
+        // 2. Generate a unique filename: Base[Score]_Errors[Count]_[Timestamp]
+        // Example output: Base215_Errors42_194532_842
+        String timeId = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss_SSS"));
+        String baseFilename = "Base" + baseScore + "_Errors" + conflicts + "_" + timeId;
+
+        // 3. Save the CSV file mapping (Physical piece numbers 1-256)
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, baseFilename + ".csv"))) {
+            for (int row = 0; row < 16; row++) {
+                StringBuilder line = new StringBuilder();
+                for (int col = 0; col < 16; col++) {
+                    int p = simulatedBoard[row * 16 + col];
+                    int physId = -1;
+
+                    // Translate from the bit-packed orientation ID to the physical piece ID
+                    for (int oi = 0; oi < 1024; oi++) {
+                        if (inventory.allOrientations[oi] == p) {
+                            physId = inventory.physicalMapping[oi];
+                            break;
+                        }
+                    }
+
+                    // +1 because standard Eternity piece datasets are 1-256 (not 0-255)
+                    line.append(physId + 1);
+                    if (col < 15) line.append(",");
+                }
+                writer.println(line.toString());
+            }
+        } catch (Exception e) {
+            logger.error(">>> Error saving Full Board CSV: %d", e.getMessage());
+        }
+
+        // 4. Save the Bucas link (allowing rapid visual inspection in the browser)
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, baseFilename + "_link.txt"))) {
+            writer.println("Base Score (Correctly placed foundation): " + baseScore);
+            writer.println("Edge Conflicts (Mismatches): " + conflicts);
+            writer.println("\nClick the Bucas Link below to view this specific variant:");
+            writer.println(BucasExporter.exportBoard(simulatedBoard));
+        } catch (Exception e) {
+            logger.error(">>> Error saving Full Board Bucas Link: %d", e.getMessage());
+        }
+
+        // 5. PICTURE / IMAGE GENERATION:
+        // If your RecordManager has a method to explicitly draw and save a .png
+        // (e.g., RecordManager.saveImage(board, filepath)), you can call it here:
+        RecordManager.saveImage(buildDisplayBoard(simulatedBoard), new java.io.File(folder, baseFilename + ".png").getAbsolutePath());
+    }
+
+    /**
+     * STRICT QUALITY CONTROL:
+     * Scans the entire board to ensure every placed piece perfectly matches its neighbors.
+     * This acts as an absolute firewall against corrupted GPU "Frankenstein" boards.
+     */
+    private boolean verifyBoardStrict(int[] board) {
+        for (int row = 0; row < 16; row++) {
+            for (int col = 0; col < 16; col++) {
+                int idx = row * 16 + col;
+                int p = board[idx];
+
+                // Skip empty spots
+                if (p == -1 || p == -2) continue;
+
+                // Check East edge (if the piece to the right is placed)
+                if (col < 15) {
+                    int eastP = board[idx + 1];
+                    if (eastP != -1 && eastP != -2) {
+                        if (PieceUtils.getEast(p) != PieceUtils.getWest(eastP)) return false;
+                    }
+                }
+
+                // Check South edge (if the piece below is placed)
+                if (row < 15) {
+                    int southP = board[idx + 16];
+                    if (southP != -1 && southP != -2) {
+                        if (PieceUtils.getSouth(p) != PieceUtils.getNorth(southP)) return false;
+                    }
+                }
+            }
+        }
+        return true; // The board is mathematically flawless!
     }
 
     private void generateSpiralOrder() {
@@ -963,9 +1146,9 @@ public class EternitySolver implements Runnable {
                 int orientationIdx = orientIdxs[(i + offset) % candidateCount];
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
-//                if (boardIdx == poisonedIndex && p == poisonedPiece) {
-//                    continue;
-//                }
+                if (boardIdx == poisonedIndex && p == poisonedPiece) {
+                    continue;
+                }
                 if (passesLookahead(p, step, row, col, boardIdx)) {
                     localBoard[boardIdx] = p;
                     localUsed[physicalIdx] = true;

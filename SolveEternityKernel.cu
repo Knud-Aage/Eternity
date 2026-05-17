@@ -170,9 +170,17 @@ extern "C" __global__ void solvePBP(
     }
 
     int step          = startingStep;
-    int maxStepReached = startingStep;
+    int maxStepReached = startingStep; // build-order step index (internal use only)
+    int bestPiecesPlaced = 0;          // actual placed piece count reported as high score
     int bestLocalBoard[256];
     unsigned long long stepCounter = 0;
+
+    // Count pieces already on the board from the seed (correct starting piece count)
+    int seedPiecesPlaced = 0;
+    for (int i = 0; i < 256; i++) {
+        if (board[i] != -1) seedPiecesPlaced++;
+    }
+    bestPiecesPlaced = seedPiecesPlaced;
 
     // Budget: generous but finite to avoid indefinite hangs.
     // 200M steps ~= a few seconds on GPU; adjust as needed.
@@ -257,8 +265,15 @@ extern "C" __global__ void solvePBP(
             foundPiece = true;
             step++;
 
-            if (step > maxStepReached) {
-                maxStepReached = step;
+            if (step > maxStepReached) maxStepReached = step; // internal DFS tracking
+
+            // Count actual placed pieces — matches how Java counts from checkpoints.
+            // This correctly handles skipped positions (locked center at 135, seed gaps).
+            int piecesNow = 0;
+            for (int i = 0; i < 256; i++) { if (board[i] != -1) piecesNow++; }
+
+            if (piecesNow > bestPiecesPlaced) {
+                bestPiecesPlaced = piecesNow;
                 for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
             }
             break;
@@ -298,18 +313,37 @@ extern "C" __global__ void solvePBP(
         }
     }
 
-    // Report best board from this thread
-    int currentMax = *d_gpuHighScore;
-    while (maxStepReached > currentMax) {
-        if (atomicCAS(d_gpuHighScore, currentMax, maxStepReached) == currentMax) {
-            for (int i = 0; i < 256; i++) d_bestBoardOut[i] = bestLocalBoard[i];
-            break;
-        }
-        currentMax = *d_gpuHighScore;
-    }
+    // Report best board from this thread using an Atomic Spinlock.
+    // bestPiecesPlaced is actual piece count — same unit as Java's deepestStep.
+    int globalMaxRaw = *d_gpuHighScore;
+    int globalMax = globalMaxRaw & 0x0FFFFFFF; // Strip the lock bit
 
+    while (bestPiecesPlaced > globalMax) {
+        int expected = globalMax;
+        int lockedVal = bestPiecesPlaced | 0x40000000; // Apply lock bit (Bit 30)
+
+        // Attempt to lock the door AND update the score in one atomic move
+        int oldVal = atomicCAS(d_gpuHighScore, expected, lockedVal);
+
+        if (oldVal == expected) {
+            // LOCK ACQUIRED! We are the only thread writing the board right now.
+            for (int i = 0; i < 256; i++) {
+                d_bestBoardOut[i] = bestLocalBoard[i];
+            }
+            // Memory fence ensures all 256 integers are saved before unlocking
+            __threadfence();
+
+            // UNLOCK and officially publish the new piece count
+            atomicExch(d_gpuHighScore, bestPiecesPlaced);
+            break;
+        } else {
+            // Lock failed (someone else is writing, or score increased).
+            globalMaxRaw = oldVal;
+            globalMax = globalMaxRaw & 0x0FFFFFFF;
+        }
+    }
     atomicAdd(d_totalSteps, stepCounter);
-    d_threadDepths[tid] = maxStepReached;
+    d_threadDepths[tid] = bestPiecesPlaced;
 }
 
 
@@ -390,22 +424,38 @@ extern "C" __global__ void solveRepairMode(
 
     int holeStep = 0;
     unsigned long long stepCounter = 0;
-    int bestSoFar = *d_gpuHighScore; // local copy to reduce atomic reads
+    int bestSoFar = (*d_gpuHighScore) & 0x0FFFFFFF; // Mask out lock bit
 
     while (holeStep >= 0 && stepCounter < (unsigned long long)maxStepsPerThread) {
         if (*d_solvedFlag == 1) break;
 
-        // Save if we've filled all holes (or a new best partial fill)
+// Save if we've filled all holes (or a new best partial fill)
         int currentTotal = basePieces + holeStep;
         if (currentTotal > bestSoFar) {
-            int globalMax = *d_gpuHighScore;
+            int globalMaxRaw = *d_gpuHighScore;
+            int globalMax = globalMaxRaw & 0x0FFFFFFF;
+
             while (currentTotal > globalMax) {
-                if (atomicCAS(d_gpuHighScore, globalMax, currentTotal) == globalMax) {
-                    for (int i = 0; i < 256; i++) d_bestBoardOut[i] = board[i];
+                int expected = globalMax;
+                int lockedVal = currentTotal | 0x40000000; // Apply lock bit
+
+                int oldVal = atomicCAS(d_gpuHighScore, expected, lockedVal);
+
+                if (oldVal == expected) {
+                    // LOCK ACQUIRED! Safely write the board.
+                    for (int i = 0; i < 256; i++) {
+                        d_bestBoardOut[i] = board[i];
+                    }
+                    __threadfence();
+
+                    // UNLOCK
+                    atomicExch(d_gpuHighScore, currentTotal);
                     bestSoFar = currentTotal;
                     break;
                 }
-                globalMax = *d_gpuHighScore;
+                // Lock failed, update and spin
+                globalMaxRaw = oldVal;
+                globalMax = globalMaxRaw & 0x0FFFFFFF;
             }
         }
 
