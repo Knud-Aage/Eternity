@@ -1,19 +1,32 @@
 package dk.puzzle.ai;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Random;
+import java.util.*;
 
 /**
- * Selects and evolves board configurations (seeds) to be used by the puzzle solver.
- * 
- * <p>This class implements a heuristic scoring system and a selection mechanism 
- * resembling a genetic algorithm, prioritizing boards with more pieces, better 
- * placement distribution, and fewer "trapped" empty slots.</p>
+ * Selects the best seed boards from GPU results for the next search round.
+ *
+ * <p>Seeds are partial boards with ~40 placed pieces produced by CPU workers.
+ * They are passed directly to the GPU DFS kernel, which means every seed
+ * must be internally edge-consistent — any constraint violation in a seed
+ * propagates directly into the GPU's best-board output and triggers the
+ * {@code verifyBoardStrict} rejection in Phase 2.</p>
+ *
+ * <p><b>No mutation is applied.</b> Swapping pieces between positions in a
+ * valid partial board almost always creates edge conflicts (the swapped piece
+ * no longer matches its neighbours). Diversity is instead achieved by
+ * selecting from a wide pool of CPU-generated seeds that are already
+ * structurally distinct, and by stratified sampling across score tiers.</p>
+ *
+ * <p>Selection strategy:</p>
+ * <ul>
+ *   <li>Top 20% by score: kept as-is ("elite")</li>
+ *   <li>Next 30%: sampled randomly from the top 50% for variety</li>
+ *   <li>Remaining 50%: sampled from the full pool to preserve diversity</li>
+ * </ul>
  */
 public class SeedSelector {
 
+    // Position weights: centre cells are hardest, border cells are easiest.
     private static final int[] POSITION_WEIGHT = buildPositionWeights();
 
     private static int[] buildPositionWeights() {
@@ -22,133 +35,149 @@ public class SeedSelector {
             int row = i / 16;
             int col = i % 16;
             int distFromEdge = Math.min(Math.min(row, 15 - row), Math.min(col, 15 - col));
-            w[i] = distFromEdge + 1;
+            w[i] = distFromEdge + 1; // 1 (border) to 8 (centre)
         }
         return w;
     }
 
     /**
-     * Evaluates the "fitness" of a given board state.
-     * 
-     * <p>The score is calculated based on:
-     * <ul>
-     *     <li><b>Depth:</b> The number of pieces successfully placed (heavily weighted).</li>
-     *     <li><b>Position:</b> Favoring pieces placed further from the edges.</li>
-     *     <li><b>Danger Penalty:</b> Penalizing empty slots that have 3 or more neighbors, as these are difficult to fill.</li>
-     * </ul></p>
+     * Scores a board based on placement depth, position quality, and constraint pressure.
      *
-     * @param board An array of 256 integers representing the current board state.
-     * @param depthReached The number of pieces placed or the search depth attained for this specific board.
-     * @return A heuristic score where higher values indicate a more promising board state.
+     * @param board        256-element array; -1 indicates an empty cell.
+     * @param depthReached Number of pieces placed as reported by the GPU thread.
+     * @return             Combined score — higher is better.
      */
     public static int scoreBoard(int[] board, int depthReached) {
-        int placed = 0;
         int posScore = 0;
         int dangerPenalty = 0;
 
         for (int i = 0; i < 256; i++) {
             if (board[i] != -1) {
-                placed++;
                 posScore += POSITION_WEIGHT[i];
-            }
-        }
-
-        for (int i = 0; i < 256; i++) {
-            if (board[i] == -1) {
+            } else {
+                // Penalise empty cells that are heavily surrounded — they are
+                // hard to fill and indicate structural dead ends nearby.
                 int row = i / 16;
                 int col = i % 16;
                 int filledNeighbours = 0;
-                if (row > 0 && board[i - 16] != -1) filledNeighbours++;
+                if (row > 0  && board[i - 16] != -1) filledNeighbours++;
                 if (row < 15 && board[i + 16] != -1) filledNeighbours++;
-                if (col > 0 && board[i - 1] != -1) filledNeighbours++;
-                if (col < 15 && board[i + 1] != -1) filledNeighbours++;
+                if (col > 0  && board[i - 1]  != -1) filledNeighbours++;
+                if (col < 15 && board[i + 1]  != -1) filledNeighbours++;
                 if (filledNeighbours >= 3) dangerPenalty += (filledNeighbours - 2) * 5;
             }
         }
 
+        // depthReached carries the most weight: it is the GPU's own measure of progress.
         return depthReached * 100 + posScore * 2 - dangerPenalty;
     }
 
     /**
-     * Selects a subset of boards from a population, applying elitism and mutation.
-     * 
-     * <p>The selection strategy produces the {@code targetCount} by:
-     * 1. Selecting the top 10% (Elites) as exact copies.
-     * 2. Selecting and heavily mutating the top 40% (Exploration).
-     * 3. Filling the remainder with lightly mutated versions of the top 50% (Refinement).</p>
+     * Validates that a board has no internal edge conflicts between placed pieces.
      *
-     * @param allBoards A list of board configurations to choose from.
-     * @param threadDepths An array where each index corresponds to the depth reached by the board at the same index in {@code allBoards}.
-     * @param targetCount The desired number of boards to return.
-     * @param random A {@link Random} instance for mutation and selection.
-     * @return A new list of selected and potentially mutated board configurations.
+     * <p>Used as a safety gate before seeds are returned. Any seed that fails
+     * this check is silently dropped — it would cause a {@code verifyBoardStrict}
+     * rejection in Phase 2 if sent to the GPU.</p>
+     *
+     * @param board 256-element board array.
+     * @return {@code true} if all adjacent placed pieces have matching edges.
+     */
+    public static boolean isEdgeConsistent(int[] board) {
+        for (int i = 0; i < 256; i++) {
+            if (board[i] == -1) continue;
+            int row = i / 16;
+            int col = i % 16;
+
+            // Check east neighbour
+            if (col < 15 && board[i + 1] != -1) {
+                int myEast    = (board[i]     >> 16) & 0xFF;
+                int theirWest =  board[i + 1]        & 0xFF;
+                if (myEast != theirWest) return false;
+            }
+            // Check south neighbour
+            if (row < 15 && board[i + 16] != -1) {
+                int mySouth    = (board[i]      >>  8) & 0xFF;
+                int theirNorth = (board[i + 16] >> 24) & 0xFF;
+                if (mySouth != theirNorth) return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Selects the best seeds from a completed GPU round for the next round.
+     *
+     * <p>All returned seeds are guaranteed to be edge-consistent. Any board
+     * that fails {@link #isEdgeConsistent} is silently skipped.</p>
+     *
+     * @param allBoards    All seed boards from the previous round (one board = int[256]).
+     * @param threadDepths GPU-reported max depth reached per thread (same order as allBoards).
+     * @param targetCount  Number of seeds to return.
+     * @param random       Random source for stratified sampling.
+     * @return             Selected seeds, all edge-consistent, ready for the next GPU round.
      */
     public static List<int[]> selectBest(
             List<int[]> allBoards,
             int[] threadDepths,
             int targetCount,
-            Random random) {
+            Random random)
+    {
         int n = allBoards.size();
         if (n == 0) return new ArrayList<>();
 
+        // Score all boards
         int[] scores = new int[n];
         for (int i = 0; i < n; i++) {
             scores[i] = scoreBoard(allBoards.get(i), i < threadDepths.length ? threadDepths[i] : 0);
         }
 
+        // Sort indices by score descending
         Integer[] indices = new Integer[n];
         for (int i = 0; i < n; i++) indices[i] = i;
         Arrays.sort(indices, (a, b) -> scores[b] - scores[a]);
 
-        int eliteCount = Math.max(1, targetCount / 10);
-        int mutateCount = Math.max(1, targetCount * 4 / 10);
-        int fillCount = targetCount - eliteCount - mutateCount;
+        // Tier boundaries
+        int eliteCount  = Math.max(1, targetCount * 2 / 10); // top 20%
+        int midCount    = Math.max(1, targetCount * 3 / 10); // next 30% from top half
+        int broadCount  = targetCount - eliteCount - midCount; // remaining from full pool
+
+        int top50 = Math.max(1, n / 2);
 
         List<int[]> result = new ArrayList<>(targetCount);
 
-        for (int i = 0; i < eliteCount && i < n; i++) {
-            result.add(Arrays.copyOf(allBoards.get(indices[i]), 256));
-        }
-
-        for (int i = 0; i < mutateCount && i < n; i++) {
-            int[] mutated = Arrays.copyOf(allBoards.get(indices[i]), 256);
-            mutate(mutated, random, 2 + random.nextInt(2));
-            result.add(mutated);
-        }
-
-        int top50 = Math.max(1, n / 2);
-        for (int i = 0; i < fillCount; i++) {
-            int srcIdx = indices[random.nextInt(top50)];
-            int[] copy = Arrays.copyOf(allBoards.get(srcIdx), 256);
-            mutate(copy, random, 1);
-            result.add(copy);
-        }
-
-        return result;
-    }
-
-    private static void mutate(int[] board, Random random, int swaps) {
-        List<Integer> innerPlaced = new ArrayList<>();
-        for (int i = 0; i < 256; i++) {
-            if (board[i] != -1) {
-                int row = i / 16;
-                int col = i % 16;
-                if (row > 0 && row < 15 && col > 0 && col < 15) {
-                    innerPlaced.add(i);
-                }
+        // --- Elite: top 20% by score, copied directly ---
+        for (int i = 0; i < indices.length && result.size() < eliteCount; i++) {
+            int[] board = allBoards.get(indices[i]);
+            if (isEdgeConsistent(board)) {
+                result.add(Arrays.copyOf(board, 256));
             }
         }
 
-        for (int s = 0; s < swaps && innerPlaced.size() >= 2; s++) {
-            int idxA = random.nextInt(innerPlaced.size());
-            int idxB = random.nextInt(innerPlaced.size());
-            if (idxA == idxB) continue;
-            int posA = innerPlaced.get(idxA);
-            int posB = innerPlaced.get(idxB);
-            // Swap
-            int tmp = board[posA];
-            board[posA] = board[posB];
-            board[posB] = tmp;
+        // --- Mid tier: random sample from top 50% ---
+        for (int attempt = 0; attempt < midCount * 3 && result.size() < eliteCount + midCount; attempt++) {
+            int[] board = allBoards.get(indices[random.nextInt(top50)]);
+            if (isEdgeConsistent(board)) {
+                result.add(Arrays.copyOf(board, 256));
+            }
         }
+
+        // --- Broad tier: random sample from full pool for diversity ---
+        for (int attempt = 0; attempt < broadCount * 3 && result.size() < targetCount; attempt++) {
+            int[] board = allBoards.get(indices[random.nextInt(n)]);
+            if (isEdgeConsistent(board)) {
+                result.add(Arrays.copyOf(board, 256));
+            }
+        }
+
+        // If we came up short (many invalid seeds), fill remainder from elite
+        int eliteIdx = 0;
+        while (result.size() < targetCount && eliteIdx < indices.length) {
+            int[] board = allBoards.get(indices[eliteIdx++]);
+            if (isEdgeConsistent(board)) {
+                result.add(Arrays.copyOf(board, 256));
+            }
+        }
+
+        return result;
     }
 }

@@ -399,10 +399,10 @@ public class EternitySolver implements Runnable {
         }
 
         if (result.newHighScore() > scoreBefore) {
-//            if (!verifyBoardStrict(bestBoardOut)) {
-//                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict! Rejecting this fake record.");
-//                return;
-//            }
+            if (!verifyBoardStrict(bestBoardOut)) {
+                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict! Rejecting this fake record.");
+                return;
+            }
             deepestStep = result.newHighScore();
             consecutiveGpuStagnation = 0;
 
