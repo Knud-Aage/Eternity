@@ -76,7 +76,7 @@ public class EternitySolver implements Runnable {
     final boolean[] usedPhysicalPieces = new boolean[256];
     final int[] tabuTenure = new int[256];
     final int[] buildOrder = new int[256];
-
+    private volatile int lastReportedDepth = 0;
     volatile int absoluteHighScore = 0;
     volatile int deepestStep = 0;
     int currentRepairIteration = 0;
@@ -359,6 +359,12 @@ public class EternitySolver implements Runnable {
                 logger.warn(">>> [PHASE 1 DEADLOCK] CPU proved that NO alternative seeds exist for this Base Camp!");
                 consecutiveExtinctions++;
                 triggerBranchScrap();
+            }else {
+                if (poisonedIndex != -1) {
+                    logger.info(">>> [TABU] CPU successfully bypassed the dead end. Global Tabu lifted.");
+                    poisonedIndex = -1;
+                    poisonedPiece = -1;
+                }
             }
 
         } catch (InterruptedException e) {
@@ -386,12 +392,16 @@ public class EternitySolver implements Runnable {
         long start = System.currentTimeMillis();
         GpuEngine.GpuResult result = gpuEngine.runDeepDfs(
                 seeds, currentSeedDepth, deepestStep, bestBoardOut, buildOrder);
-
+        // CLIMBING TRACKER: Print to the log ONLY when the GPU reaches a new depth for this branch
+        if (result.newHighScore() > lastReportedDepth) {
+            logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
+            lastReportedDepth = result.newHighScore();
+        }
         globalGpuTrialCount.addAndGet(result.stepsTaken());
         isGpuBusy = false;
 
         long elapsed = System.currentTimeMillis() - start;
-        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %d",
+        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
                 Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
 
         if (result.solved()) {
@@ -445,7 +455,7 @@ public class EternitySolver implements Runnable {
                     new Random()
             );
 
-            logger.info(">>> Phase 2 Evolution: Bred %d new seeds (Elite + Mutated) for next round!%n", nextSeeds.size());
+            logger.info(">>> Phase 2 Evolution: Bred %d new seeds (Elite + Mutated) for next round!", nextSeeds.size());
 
             seedPool.addAll(nextSeeds);
             currentBatchSize.set(seedPool.size());
@@ -491,7 +501,11 @@ public class EternitySolver implements Runnable {
         int scoreBefore = deepestStep;
         int[] bestBoardOut = new int[256];
         GpuEngine.GpuResult result = gpuEngine.runRepairMode(swissCheeseBoards, deepestStep, bestBoardOut);
-
+        // CLIMBING TRACKER: Print to the log ONLY when the GPU reaches a new depth for this branch
+        if (result.newHighScore() > lastReportedDepth) {
+            logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
+            lastReportedDepth = result.newHighScore();
+        }
         globalGpuTrialCount.addAndGet(result.stepsTaken());
 
         if (result.solved()) {
@@ -539,9 +553,14 @@ public class EternitySolver implements Runnable {
     }
 
     void updateTabuList(int[] newBoard) {
+        // RELAXED TENURE: Shorter memory allows the Surgeon to re-optimize areas much faster.
+        // Base of 5 rounds, plus 1 extra round for every 25 pieces placed.
+        // E.g., at 200 pieces: 5 + (200 / 25) = 13 rounds (much more forgiving than 25!)
+        int tenureLength = 5 + (absoluteHighScore / 25);
+
         for (int i = 0; i < 256; i++) {
             if (newBoard[i] != bestBoard[i] && newBoard[i] != -1) {
-                tabuTenure[i] = currentRepairIteration + 25;
+                tabuTenure[i] = currentRepairIteration + tenureLength;
             }
         }
     }
@@ -560,7 +579,7 @@ public class EternitySolver implements Runnable {
      */
     void triggerBranchScrap() {
         // 1. Increment the frustration/stagnation counter
-//        consecutiveExtinctions++;
+        consecutiveExtinctions++;
 
         logger.info(">>> [!!!] DEAD END AT PHASE 3 (Stagnation level: " + consecutiveExtinctions + ") [!!!]");
 
@@ -584,11 +603,22 @@ public class EternitySolver implements Runnable {
         }
 
         // 4. Execute the teardown
+        // Reset the climbing tracker so it starts reporting from the new Base Camp
+        lastReportedDepth = lockedPieces;
+
         if (consecutiveExtinctions > 25) {
-            logger.info(">>> [CRITICAL] Massive stagnation! Tearing down %d pieces. Base Camp reset to: 0 pieces.", retreatAmount);
+//            logger.warn("================================================================");
+//            logger.warn(">>> [CRITICAL TEARDOWN] MASSIVE STAGNATION!");
+//            logger.warn(">>> Removed: %d pieces", retreatAmount);
+//            logger.warn(">>> New Base Camp: 0 pieces remaining");
+//            logger.warn("================================================================");
             consecutiveExtinctions = 0;
-        } else {
-            logger.info(">>> Tearing down %d pieces. Base Camp reset to: %d pieces.", retreatAmount, lockedPieces);
+//        } else {
+//            logger.info("----------------------------------------------------------------");
+//            logger.info(">>> [TEARDOWN] Branch scrapped due to stagnation.");
+//            logger.info(">>> Removed: %d pieces", retreatAmount);
+//            logger.info(">>> New Base Camp: %d pieces remaining", lockedPieces);
+//            logger.info("----------------------------------------------------------------");
         }
 
         if (lockedPieces == 0) {
@@ -924,7 +954,7 @@ public class EternitySolver implements Runnable {
         // 2. Generate a unique filename: Base[Score]_Errors[Count]_[Timestamp]
         // Example output: Base215_Errors42_194532_842
         String timeId = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss_SSS"));
-        String baseFilename = "Base" + baseScore + "_Errors" + conflicts + "_" + timeId;
+        String baseFilename = "Errors" +  conflicts + "_Base" + baseScore + "_" + timeId;
 
         // 3. Save the CSV file mapping (Physical piece numbers 1-256)
         try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, baseFilename + ".csv"))) {
