@@ -394,7 +394,7 @@ public class EternitySolver implements Runnable {
                 seeds, currentSeedDepth, deepestStep, bestBoardOut, buildOrder);
         // CLIMBING TRACKER: Print to the log ONLY when the GPU reaches a new depth for this branch
         if (result.newHighScore() > lastReportedDepth) {
-            logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
+            System.out.printf(">>> [CLIMBING] Current pieces placed: %d / 256%n", result.newHighScore());
             lastReportedDepth = result.newHighScore();
         }
         globalGpuTrialCount.addAndGet(result.stepsTaken());
@@ -541,9 +541,16 @@ public class EternitySolver implements Runnable {
                     analyzeFullBoardPotential(bestBoardOut);
                     logger.info(">>> [PROGRESS] Surgeon got a new unique variant of %d-pieced board! (Uniquely found %d times so far)",
                             absoluteHighScore, uniqueMaxScoreHashes.size());
+                } else {
+                    consecutiveExtinctions++;
+
+                    // Force the Tabu system to ban this exact duplicate configuration
+                    updateTabuList(bestBoardOut);
                 }
+            } else {
+                consecutiveExtinctions++;
+                updateTabuList(bestBoardOut);
             }
-            consecutiveExtinctions = 0;
         } else {
             consecutiveExtinctions++;
             if (consecutiveExtinctions >= 10) {
