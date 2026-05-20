@@ -144,7 +144,7 @@ extern "C" __global__ void solvePBP(
     if (tid >= numPartialBoards) return;
 
     int board[256];
-    int pieceStack[256];   // pieceStack[step] = next orientation index to try at this step
+    int pieceStack[256];
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
 
     // Precomputed reverse map: given an orientation index, what is its physId?
@@ -169,7 +169,7 @@ extern "C" __global__ void solvePBP(
         }
     }
 
-    int step          = startingStep;
+    int step = startingStep;
     int maxStepReached = startingStep; // build-order step index (internal use only)
     int bestPiecesPlaced = 0;          // actual placed piece count reported as high score
     int bestLocalBoard[256];
@@ -194,8 +194,8 @@ extern "C" __global__ void solvePBP(
 
         int boardIdx = d_buildOrder[step];
 
-        // Skip locked center piece
-        if (lockCenterFlag == 1 && boardIdx == 135) {
+        if ((lockCenterFlag == 1 && boardIdx == 135) ||
+            boardIdx == 221 || boardIdx == 45 || boardIdx == 210 || boardIdx == 34) {
             step++;
             continue;
         }
@@ -284,8 +284,15 @@ extern "C" __global__ void solvePBP(
             pieceStack[step] = 0;
             step--;
 
-            if (lockCenterFlag == 1 && step >= startingStep && d_buildOrder[step] == 135)
-                step--;
+            while (step >= startingStep) {
+                int undoIdx = d_buildOrder[step];
+                if ((lockCenterFlag == 1 && undoIdx == 135) ||
+                    undoIdx == 221 || undoIdx == 45 || undoIdx == 210 || undoIdx == 34) {
+                    step--;
+                } else {
+                    break;
+                }
+            }
 
             if (step >= startingStep) {
                 int pToUndo    = board[d_buildOrder[step]];

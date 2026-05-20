@@ -13,6 +13,7 @@ import dk.puzzle.util.PieceUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -114,7 +115,28 @@ public class EternitySolver implements Runnable {
     private volatile int poisonedIndex = -1;
     private volatile int poisonedPiece = -1;
     private ScheduledExecutorService repairReporterScheduler;
+    // ==========================================================
+    // HINT STRATEGY FIELDS
+    // ==========================================================
+    private static final int[] HINT_POSITIONS = { 221, 45, 210, 34 };
+    private static final int[] HINT_PHYSICAL_NUMBERS = { 249, 181, 255, 208 };
+    private static final int[] HINT_ROTATIONS = { 1, 0, 0, 0 };
+    private final int[] hintPackedValues = new int[4];
+    private final int[] hintPhysicalIndices = new int[4];
 
+    private int findPackedPiece(int physicalNumber, int targetRotation) {
+        int physIdx = physicalNumber - 1; // pieces.csv is 1-based, inventory is 0-based
+        int foundCount = 0;
+        for (int oi = 0; oi < 1024; oi++) {
+            if (inventory.physicalMapping[oi] == physIdx) {
+                if (foundCount == targetRotation) {
+                    return inventory.allOrientations[oi];
+                }
+                foundCount++;
+            }
+        }
+        return -1;
+    }
     /**
      * Constructs a new {@code EternitySolver} and initializes the search environment.
      *
@@ -198,6 +220,28 @@ public class EternitySolver implements Runnable {
             }
         } else {
             logger.info(">>> [WARNING] Smart Load failed and returned null. Starting from scratch.");
+        }
+        // ==========================================================
+        // RESOLVE AND PRE-LOCK HINTS INTO ALL MASTER BOARDS
+        // ==========================================================
+        for (int h = 0; h < 4; h++) {
+            int packed = findPackedPiece(HINT_PHYSICAL_NUMBERS[h], HINT_ROTATIONS[h]);
+            hintPackedValues[h] = packed;
+            hintPhysicalIndices[h] = HINT_PHYSICAL_NUMBERS[h] - 1;
+
+            if (packed == -1) {
+                logger.error(">>> [HINTS] Could not resolve hint piece #%d (physical #%d)!", h, HINT_PHYSICAL_NUMBERS[h]);
+            } else {
+                // Lock them into all persistent tracking boards unconditionally
+                bestBoard[HINT_POSITIONS[h]] = packed;
+                globalBestBoard[HINT_POSITIONS[h]] = packed;
+                flatResumeBoard[HINT_POSITIONS[h]] = packed;
+                logger.info(">>> [HINTS] Hint piece #%d (physical #%d) locked at position %d", h, HINT_PHYSICAL_NUMBERS[h], HINT_POSITIONS[h]);
+            }
+        }
+        // Ensure center is also securely locked on the flatResumeBoard
+        if (lockCenter) {
+            flatResumeBoard[135] = targetPiece;
         }
     }
 
@@ -435,7 +479,9 @@ public class EternitySolver implements Runnable {
                 seeds, currentSeedDepth, deepestStep, bestBoardOut, buildOrder);
         // CLIMBING TRACKER: Print to the log ONLY when the GPU reaches a new depth for this branch
         if (result.newHighScore() > lastReportedDepth) {
-            System.out.printf(">>> [CLIMBING] Current pieces placed: %d / 256%n", result.newHighScore());
+            String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            System.out.printf("[%s] >>> [CLIMBING] Current pieces placed: %d / 256%n",
+                    timestamp, result.newHighScore());
             lastReportedDepth = result.newHighScore();
         }
         globalGpuTrialCount.addAndGet(result.stepsTaken());
@@ -498,7 +544,7 @@ public class EternitySolver implements Runnable {
                     new Random()
             );
 
-            logger.info(">>> Phase 2 Evolution: Bred %d new seeds (Elite + Mutated) for next round!", nextSeeds.size());
+//            logger.info(">>> Phase 2 Evolution: Bred %d new seeds (Elite + Mutated) for next round!", nextSeeds.size());
 
             seedPool.addAll(nextSeeds);
             currentBatchSize.set(seedPool.size());
@@ -606,11 +652,16 @@ public class EternitySolver implements Runnable {
 
     void updateTabuList(int[] newBoard) {
         // RELAXED TENURE: Shorter memory allows the Surgeon to re-optimize areas much faster.
-        // Base of 5 rounds, plus 1 extra round for every 25 pieces placed.
-        // E.g., at 200 pieces: 5 + (200 / 25) = 13 rounds (much more forgiving than 25!)
         int tenureLength = 5 + (absoluteHighScore / 25);
 
         for (int i = 0; i < 256; i++) {
+            // --- THE SURGEON SHIELD ---
+            // Ban the Surgeon from ever touching the 4 hints + the 135 center piece
+            if (i == 135 || i == 221 || i == 45 || i == 210 || i == 34) {
+                tabuTenure[i] = Integer.MAX_VALUE;
+                continue;
+            }
+
             if (newBoard[i] != bestBoard[i] && newBoard[i] != -1) {
                 tabuTenure[i] = currentRepairIteration + tenureLength;
             }
@@ -750,66 +801,62 @@ public class EternitySolver implements Runnable {
         // Shuffle to ensure a different random variant each time
         Collections.shuffle(unusedPhysIds);
 
-        // 3. INTELLIGENT FILL: Place pieces based on board geography
         for (int spot : emptySpots) {
             int row = spot / 16;
             int col = spot % 16;
 
-            // Define exactly which sides MUST be gray (0) based on the spot's position
-            boolean reqN = (row == 0);
-            boolean reqS = (row == 15);
-            boolean reqW = (col == 0);
-            boolean reqE = (col == 15);
+        boolean atNorthEdge = (row == 0);
+        boolean atSouthEdge = (row == 15);
+        boolean atWestEdge = (col == 0);
+        boolean atEastEdge = (col == 15);
 
-            int selectedListIndex = -1;
-            int selectedOrientedPiece = -1;
+        int bestBrikIndex = -1;
+        int bestOrientedPiece = -1;
 
-            // Search through the unused pieces for one that perfectly matches the gray-edge requirements
-            for (int i = 0; i < unusedPhysIds.size(); i++) {
-                int physId = unusedPhysIds.get(i);
+        for (int i = 0; i < unusedPhysIds.size(); i++) {
+            int physId = unusedPhysIds.get(i);
+            for (int oi = 0; oi < 1024; oi++) {
+                if (inventory.physicalMapping[oi] == physId) {
+                    int p = inventory.allOrientations[oi];
 
-                // Test all 4 orientations of this specific physical piece
-                for (int oi = 0; oi < 1024; oi++) {
-                    if (inventory.physicalMapping[oi] == physId) {
-                        int p = inventory.allOrientations[oi];
+                    boolean match = true;
 
-                        boolean match = reqN == (PieceUtils.getNorth(p) == 0);
-                        // The XOR logic (!=) ensures that an edge is gray ONLY if it is required to be gray
-                        if (reqS != (PieceUtils.getSouth(p) == 0)) {
-                            match = false;
-                        }
-                        if (reqW != (PieceUtils.getWest(p) == 0)) {
-                            match = false;
-                        }
-                        if (reqE != (PieceUtils.getEast(p) == 0)) {
-                            match = false;
-                        }
+                    // North
+                    if (atNorthEdge && PieceUtils.getNorth(p) != 0) match = false;
+                    if (!atNorthEdge && PieceUtils.getNorth(p) == 0) match = false;
 
-                        if (match) {
-                            selectedListIndex = i;
-                            selectedOrientedPiece = p;
-                            break;
-                        }
-                    }
-                }
-                if (selectedListIndex != -1) {
-                    break; // We found a valid piece for this spot!
-                }
-            }
+                    // South
+                    if (atSouthEdge && PieceUtils.getSouth(p) != 0) match = false;
+                    if (!atSouthEdge && PieceUtils.getSouth(p) == 0) match = false;
 
-            // Place the piece and remove it from the inventory
-            if (selectedListIndex != -1) {
-                simulatedBoard[spot] = selectedOrientedPiece;
-                unusedPhysIds.remove(selectedListIndex);
-            } else {
-                // FALLBACK: In case of inventory mismatch, just take the first available piece
-                int fallbackPhysId = unusedPhysIds.remove(0);
-                for (int oi = 0; oi < 1024; oi++) {
-                    if (inventory.physicalMapping[oi] == fallbackPhysId) {
-                        simulatedBoard[spot] = inventory.allOrientations[oi];
+                    // West
+                    if (atWestEdge && PieceUtils.getWest(p) != 0) match = false;
+                    if (!atWestEdge && PieceUtils.getWest(p) == 0) match = false;
+
+                    // East
+                    if (atEastEdge && PieceUtils.getEast(p) != 0) match = false;
+                    if (!atEastEdge && PieceUtils.getEast(p) == 0) match = false;
+
+                    if (match && row > 0 && simulatedBoard[spot - 16] != -1)
+                        if (PieceUtils.getNorth(p) != PieceUtils.getSouth(simulatedBoard[spot - 16])) match = false;
+                    if (match && col > 0 && simulatedBoard[spot - 1] != -1)
+                        if (PieceUtils.getWest(p) != PieceUtils.getEast(simulatedBoard[spot - 1])) match = false;
+
+                    if (match) {
+                        bestBrikIndex = i;
+                        bestOrientedPiece = p;
                         break;
                     }
                 }
+            }
+            if (bestBrikIndex != -1) break;
+        }
+
+            if (bestBrikIndex != -1) {
+                simulatedBoard[spot] = bestOrientedPiece;
+                unusedPhysIds.remove(bestBrikIndex);
+            } else {
+                simulatedBoard[spot] = -1;
             }
         }
 
@@ -893,6 +940,14 @@ public class EternitySolver implements Runnable {
         if (lockCenter) {
             bestBoard[135] = targetPiece;
         }
+
+        // --- RE-LOCK HINTS AFTER WIPE ---
+        for (int h = 0; h < 4; h++) {
+            if (hintPackedValues[h] != -1) {
+                bestBoard[HINT_POSITIONS[h]] = hintPackedValues[h];
+            }
+        }
+
         updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
         if (logMessage != null) {
             logger.info(logMessage);
@@ -1055,6 +1110,45 @@ public class EternitySolver implements Runnable {
      * Scans the entire board to ensure every placed piece perfectly matches its neighbors.
      * This acts as an absolute firewall against corrupted GPU "Frankenstein" boards.
      */
+//    private boolean verifyBoardStrict(int[] board) {
+//        for (int row = 0; row < 16; row++) {
+//            for (int col = 0; col < 16; col++) {
+//                int idx = row * 16 + col;
+//                int p = board[idx];
+//
+//                // Skip empty spots
+//                if (p == -1 || p == -2) {
+//                    continue;
+//                }
+//
+//                // Check East edge (if the piece to the right is placed)
+//                if (col < 15) {
+//                    int eastP = board[idx + 1];
+//                    if (eastP != -1 && eastP != -2) {
+//                        if (PieceUtils.getEast(p) != PieceUtils.getWest(eastP)) {
+//                            return false;
+//                        }
+//                    }
+//                }
+//
+//                // Check South edge (if the piece below is placed)
+//                if (row < 15) {
+//                    int southP = board[idx + 16];
+//                    if (southP != -1 && southP != -2) {
+//                        if (PieceUtils.getSouth(p) != PieceUtils.getNorth(southP)) {
+//                            return false;
+//                        }
+//                    }
+//                }
+//            }
+//        }
+//        return true; // The board is mathematically flawless!
+//    }
+
+    /**
+     * DIAGNOSTIC STRICT QUALITY CONTROL:
+     * Scans the board and explicitly logs the exact location and colors of any edge conflict.
+     */
     private boolean verifyBoardStrict(int[] board) {
         for (int row = 0; row < 16; row++) {
             for (int col = 0; col < 16; col++) {
@@ -1066,28 +1160,36 @@ public class EternitySolver implements Runnable {
                     continue;
                 }
 
-                // Check East edge (if the piece to the right is placed)
+                // Check East edge
                 if (col < 15) {
                     int eastP = board[idx + 1];
                     if (eastP != -1 && eastP != -2) {
-                        if (PieceUtils.getEast(p) != PieceUtils.getWest(eastP)) {
+                        int myEast = PieceUtils.getEast(p);
+                        int theirWest = PieceUtils.getWest(eastP);
+                        if (myEast != theirWest) {
+                            logger.error(">>> [DIAGNOSTIC] CONFLICT EAST: Piece at idx %d (row %d, col %d) has East=%d, but neighbor at idx %d has West=%d",
+                                    idx, row, col, myEast, idx + 1, theirWest);
                             return false;
                         }
                     }
                 }
 
-                // Check South edge (if the piece below is placed)
+                // Check South edge
                 if (row < 15) {
                     int southP = board[idx + 16];
                     if (southP != -1 && southP != -2) {
-                        if (PieceUtils.getSouth(p) != PieceUtils.getNorth(southP)) {
+                        int mySouth = PieceUtils.getSouth(p);
+                        int theirNorth = PieceUtils.getNorth(southP);
+                        if (mySouth != theirNorth) {
+                            logger.error(">>> [DIAGNOSTIC] CONFLICT SOUTH: Piece at idx %d (row %d, col %d) has South=%d, but neighbor at idx %d has North=%d",
+                                    idx, row, col, mySouth, idx + 16, theirNorth);
                             return false;
                         }
                     }
                 }
             }
         }
-        return true; // The board is mathematically flawless!
+        return true;
     }
 
     private void generateSpiralOrder() {
@@ -1137,6 +1239,44 @@ public class EternitySolver implements Runnable {
         SPIRAL
     }
 
+    /**
+     * A registry that tracks the top high-scoring boards to provide diversity
+     * for Phase 3 repair operations.
+     */
+    class TopBoardRegistry {
+        private final List<int[]> registry = new ArrayList<>();
+        private int currentIndex = 0;
+        private static final int MAX_CAPACITY = 20;
+
+        public synchronized void offer(int[] board, int score) {
+            // Check if this board configuration is already in the registry
+            int boardHash = Arrays.hashCode(board);
+            for (int[] existing : registry) {
+                if (Arrays.hashCode(existing) == boardHash) return;
+            }
+
+            if (registry.size() < MAX_CAPACITY) {
+                registry.add(Arrays.copyOf(board, 256));
+            } else {
+                // Replace the oldest or least relevant if needed;
+                // here we just keep the first 20 found for simplicity
+                // as Phase 3 clears on retreat.
+            }
+        }
+
+        public synchronized int[] nextForRepair() {
+            if (registry.isEmpty()) return null;
+            int[] board = registry.get(currentIndex);
+            currentIndex = (currentIndex + 1) % registry.size();
+            return board;
+        }
+
+        public synchronized void clear() {
+            registry.clear();
+            currentIndex = 0;
+        }
+    }
+
     class CpuSearchWorker implements Callable<Boolean> {
         private final int[] localBoard = new int[256];
         private final int[] localResumeBoard = new int[256];
@@ -1166,6 +1306,13 @@ public class EternitySolver implements Runnable {
                 localBoard[135] = targetPiece;
                 if (centerPhysicalIdx != -1) {
                     localUsed[centerPhysicalIdx] = true;
+                }
+            }
+            for (int h = 0; h < 4; h++) {
+                int packed = hintPackedValues[h];
+                if (packed != -1) {
+                    localBoard[HINT_POSITIONS[h]] = packed;
+                    localUsed[hintPhysicalIndices[h]] = true;
                 }
             }
         }
@@ -1278,6 +1425,9 @@ public class EternitySolver implements Runnable {
                 int orientationIdx = orientIdxs[(i + offset) % candidateCount];
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
+                if (eastReq != CompatibilityIndex.WILDCARD && PieceUtils.getEast(p) != eastReq) continue;
+                if (southReq != CompatibilityIndex.WILDCARD && PieceUtils.getSouth(p) != southReq) continue;
+
                 if (boardIdx == poisonedIndex && p == poisonedPiece) {
                     continue;
                 }
