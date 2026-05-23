@@ -583,13 +583,19 @@ public class EternitySolver implements Runnable {
             sourceBoard = bestBoard; // fallback if registry is empty
         }
 
-        List<int[]> swissCheeseBoards = surgeon.punchHoles(
-                sourceBoard, numClones, holesToPunch,
-                tabuTenure, currentRepairIteration, deepestStep, buildOrder);
-
+        List<int[]> variations;
+        if (consecutiveExtinctions > 20) {
+            variations = surgeon.punchHoles(
+                    sourceBoard, numClones, holesToPunch,
+                    tabuTenure, currentRepairIteration, deepestStep, buildOrder);
+        } else {
+            variations = surgeon.punchHoles(
+                    sourceBoard, numClones, holesToPunch,
+                    tabuTenure, currentRepairIteration, deepestStep, buildOrder);
+        }
         int scoreBefore = deepestStep;
         int[] bestBoardOut = new int[256];
-        GpuEngine.GpuResult result = gpuEngine.runRepairMode(swissCheeseBoards, deepestStep, bestBoardOut);
+        GpuEngine.GpuResult result = gpuEngine.runRepairMode(variations, deepestStep, bestBoardOut);
         // CLIMBING TRACKER: Print to the log ONLY when the GPU reaches a new depth for this branch
         if (result.newHighScore() > lastReportedDepth) {
             logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
@@ -644,7 +650,7 @@ public class EternitySolver implements Runnable {
             }
         } else {
             consecutiveExtinctions++;
-            if (consecutiveExtinctions >= 10) {
+            if (consecutiveExtinctions >= 20) {
                 triggerBranchScrap();
             }
         }
@@ -711,18 +717,7 @@ public class EternitySolver implements Runnable {
         lastReportedDepth = lockedPieces;
 
         if (consecutiveExtinctions > 25) {
-//            logger.warn("================================================================");
-//            logger.warn(">>> [CRITICAL TEARDOWN] MASSIVE STAGNATION!");
-//            logger.warn(">>> Removed: %d pieces", retreatAmount);
-//            logger.warn(">>> New Base Camp: 0 pieces remaining");
-//            logger.warn("================================================================");
             consecutiveExtinctions = 0;
-//        } else {
-//            logger.info("----------------------------------------------------------------");
-//            logger.info(">>> [TEARDOWN] Branch scrapped due to stagnation.");
-//            logger.info(">>> Removed: %d pieces", retreatAmount);
-//            logger.info(">>> New Base Camp: %d pieces remaining", lockedPieces);
-//            logger.info("----------------------------------------------------------------");
         }
 
         if (lockedPieces == 0) {
@@ -1407,6 +1402,9 @@ public class EternitySolver implements Runnable {
 
             int candidateCount = candidates.cardinality();
             if (candidateCount == 0) {
+                if (step > 200) {
+                    logger.error(">>> [DEAD END] No candidate at index %d (step %d)!", boardIdx, step);
+                }
                 return false;
             }
 
@@ -1446,6 +1444,7 @@ public class EternitySolver implements Runnable {
                     localResumeBoard[boardIdx] = ghost;
                 }
             }
+
             return false;
         }
 
