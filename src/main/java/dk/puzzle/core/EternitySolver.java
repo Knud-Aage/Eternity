@@ -590,7 +590,7 @@ public class EternitySolver implements Runnable {
                     tabuTenure, currentRepairIteration, deepestStep, buildOrder);
         } else {
             variations = surgeon.punchHoles(
-                    sourceBoard, numClones, holesToPunch,
+                    sourceBoard, numClones, Math.round(holesToPunch / 2.5f),
                     tabuTenure, currentRepairIteration, deepestStep, buildOrder);
         }
         int scoreBefore = deepestStep;
@@ -723,8 +723,17 @@ public class EternitySolver implements Runnable {
         if (lockedPieces == 0) {
             poisonedIndex = buildOrder[0];
             poisonedPiece = globalBestBoard[poisonedIndex];
-            logger.info(">>> [GLOBAL TABU] Board reset! Old start piece %d is strictly banned at index %d.",
-                    poisonedPiece, poisonedIndex);
+
+            // Translate to physical piece number for better logging
+            int physId = -1;
+            for (int i = 0; i < 1024; i++) {
+                if (inventory.allOrientations[i] == poisonedPiece) {
+                    physId = inventory.physicalMapping[i] + 1;
+                    break;
+                }
+            }
+            logger.info(">>> [GLOBAL TABU] Board reset! Banning physical piece #%d (packed: %d) at index %d to force a new branch.",
+                    physId, poisonedPiece, poisonedIndex);
         } else if (absoluteHighScore > lockedPieces + 5) {
             poisonedIndex = buildOrder[lockedPieces + 2];
             poisonedPiece = globalBestBoard[poisonedIndex];
