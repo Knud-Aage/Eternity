@@ -88,4 +88,25 @@ public class PieceInventory {
         }
     }
 
+    /**
+     * Returns the base colors (North, East, South, West) for a given physical piece ID.
+     * * @param physicalId The 1-based ID from the imported data (1 to 256).
+     * @return An array of 4 integers representing {North, East, South, West}.
+     */
+    public int[] getBaseColors(int physicalId) {
+        // 1. Convert the 1-based ID from the text file to your 0-based Java index
+        int arrayIndex = physicalId - 1;
+
+        // 2. Find the base orientation (rotation 0) in your 1024-array.
+        // Assuming rotation 0 is stored at (index * 4).
+        int bitPackedPiece = this.allOrientations[arrayIndex * 4];
+
+        // 3. Unpack the colors using your existing PieceUtils
+        int n = PieceUtils.getNorth(bitPackedPiece);
+        int e = PieceUtils.getEast(bitPackedPiece);
+        int s = PieceUtils.getSouth(bitPackedPiece);
+        int w = PieceUtils.getWest(bitPackedPiece);
+
+        return new int[]{n, e, s, w};
+    }
 }

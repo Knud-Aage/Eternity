@@ -90,7 +90,7 @@ public class CheckpointManager {
         try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
             oos.writeObject(board);
         } catch (IOException e) {
-            System.err.println(">>> [FEJL] Cou: " + e.getMessage());
+            System.err.println(">>> [ERROR] Cou: " + e.getMessage());
         }
     }
 

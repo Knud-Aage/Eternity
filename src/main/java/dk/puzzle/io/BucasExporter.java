@@ -71,7 +71,7 @@ public class BucasExporter {
     // ==========================================================
     public static void main(String[] args) {
 //        String filename = "records/SPIRAL/Record_209Pieces.csv";
-        String filename = "records/TYPEWRITER_LOCKED/Record_210Pieces.csv";
+        String filename = "records/TYPEWRITER_LOCKED/Record_254Pieces.csv";
 
         String[] board = new String[256];
         for (int i = 0; i < 256; i++) {

@@ -30,7 +30,7 @@ public class Eternity {
     private static final int CENTER_PIECE_INDEX = 138;
     private static final int CENTER_PIECE_ROTATION = 2;
 
-    private static final AtomicInteger currentScore = new AtomicInteger(0);
+    public static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
     private static final AtomicInteger highScore = new AtomicInteger(0);
     private static final Logger logger = LogManager.getLogger(Eternity.class);
@@ -236,7 +236,7 @@ public class Eternity {
         }
     }
 
-    private static int[] loadPieces() {
+    public static int[] loadPieces() {
         try (BufferedReader br = new BufferedReader(new FileReader("pieces.csv"))) {
             int[] pieces = new int[256];
             int i = 0;
