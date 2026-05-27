@@ -13,7 +13,6 @@ import dk.puzzle.util.PieceUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -72,7 +71,7 @@ public class EternitySolver implements Runnable {
     // Core Solver Components
     private final PieceInventory inventory;
     private final CompatibilityIndex compatIndex;
-    private final SurgeonHeuristics surgeon;
+    final SurgeonHeuristics surgeon;
     private GpuEngine gpuEngine;
 
     // Configuration Flags
@@ -84,7 +83,7 @@ public class EternitySolver implements Runnable {
     private final ExecutorService executor;
     private final int numCores;
     private final int targetBatchSize = 50000;
-    private volatile int userBatchSizeOverride = -1;
+    volatile int userBatchSizeOverride = -1;
     private final ConcurrentLinkedQueue<int[]> seedPool = new ConcurrentLinkedQueue<>();
     private final AtomicInteger currentBatchSize = new AtomicInteger(0);
     private int fatalGpuBugCount = 0;
@@ -93,11 +92,11 @@ public class EternitySolver implements Runnable {
     // Board State
     private final int[] flatResumeBoard = new int[256]; // Board state for CPU workers to resume from
     private final boolean[] usedPhysicalPieces = new boolean[256]; // Tracks used physical pieces for CPU workers
-    private final int[] tabuTenure = new int[256]; // Tabu list for LNS
-    private final int[] buildOrder = new int[256]; // Order of filling board positions
-    private final int[] bestBoard = new int[256]; // Best board found in current phase/branch
-    private final int[] globalBestBoard = new int[256]; // Overall best board found
-    private final TopBoardRegistry topBoards = new TopBoardRegistry(); // Registry of top boards for LNS
+    final int[] tabuTenure = new int[256]; // Tabu list for LNS
+    final int[] buildOrder = new int[256]; // Order of filling board positions
+    final int[] bestBoard = new int[256]; // Best board found in current phase/branch
+    final int[] globalBestBoard = new int[256]; // Overall best board found
+    final TopBoardRegistry topBoards = new TopBoardRegistry(); // Registry of top boards for LNS
 
     // Puzzle Specifics
     private final int targetPiece; // The center piece
@@ -112,20 +111,20 @@ public class EternitySolver implements Runnable {
     private final AtomicLong globalGpuTrialCount = new AtomicLong(0);
     private final Set<Integer> uniqueMaxScoreHashes = ConcurrentHashMap.newKeySet(); // For tracking unique boards at max score
     private volatile int currentSeedDepth = SEED_DEPTH;
-    private volatile int absoluteHighScore = 0; // Overall highest score achieved
-    private volatile int deepestStep = 0; // Deepest step reached in current search branch
+    volatile int absoluteHighScore = 0; // Overall highest score achieved
+    volatile int deepestStep = 0; // Deepest step reached in current search branch
     private int currentRepairIteration = 0; // Counter for LNS iterations
     private int consecutiveExtinctions = 0; // Counter for consecutive failures in LNS
-    private volatile boolean manualOverrideRequested = false;
-    private volatile int manualBaseCampTarget = 0;
-    private volatile double extinctionThreshold = 0.98; // For GUI Bridge
+    volatile boolean manualOverrideRequested = false;
+    volatile int manualBaseCampTarget = 0;
+    volatile double extinctionThreshold = 0.98; // For GUI Bridge
     private volatile int lastReportedDepth = 0; // For climbing tracker
     private int consecutiveGpuStagnation = 0; // For GPU Phase 2 deadlock detection
     private long lastThroughputReportTime = System.currentTimeMillis();
     private long totalRepairVariationsTested = 0;
     private long repairLoopsCounter = 0;
     private volatile boolean isGpuBusy = false;
-    private volatile int stagnationLimitMinutes = 20;
+    volatile int stagnationLimitMinutes = 20;
     private volatile int poisonedIndex = -1; // For global Tabu
     private volatile int poisonedPiece = -1; // For global Tabu
     private ScheduledExecutorService repairReporterScheduler; // Unused, can be removed if not planned for future use
@@ -210,41 +209,61 @@ public class EternitySolver implements Runnable {
         loadCheckpointAndHints();
     }
 
+
+
     /**
      * Loads the checkpoint and pre-locks hint pieces into the board.
      */
     private void loadCheckpointAndHints() {
-        int[][] loaded = CheckpointManager.loadSmartCheckpoint(saveProfile);
-        if (loaded != null) {
-            int loadedCount = 0;
-            for (int r = 0; r < 16; r++) {
-                if (loaded[r] == null) {
-                    continue;
-                }
-                for (int c = 0; c < 16; c++) {
-                    int p = loaded[r][c];
-                    if (p != -1 && p != 0 && p != -2) {
-                        bestBoard[r * 16 + c] = p;
-                        globalBestBoard[r * 16 + c] = p;
-                        loadedCount++;
+        SolverState loadedState = CheckpointManager.loadSmartState(saveProfile);
+
+        if (loadedState != null) {
+            // 1. Restore the board
+            restoreBoardState(loadedState.bestBoard);
+
+            // 2. Restore the memory!
+            System.arraycopy(loadedState.tabuTenure, 0, this.tabuTenure, 0, 256);
+            this.uniqueMaxScoreHashes.addAll(loadedState.uniqueMaxScoreHashes);
+
+            // 3. Restore the TopBoards registry
+            for (int[] historicBoard : loadedState.topBoardsRegistry) {
+                this.topBoards.offer(historicBoard, loadedState.score);
+            }
+
+            logger.info(">>> SUCCESS: Loaded checkpoint AND restored historic solver memory!");
+        } else {
+            int[][] loaded = CheckpointManager.loadSmartCheckpoint(saveProfile);
+            if (loaded != null) {
+                int loadedCount = 0;
+                for (int r = 0; r < 16; r++) {
+                    if (loaded[r] == null) {
+                        continue;
+                    }
+                    for (int c = 0; c < 16; c++) {
+                        int p = loaded[r][c];
+                        if (p != -1 && p != 0 && p != -2) {
+                            bestBoard[r * 16 + c] = p;
+                            globalBestBoard[r * 16 + c] = p;
+                            loadedCount++;
+                        }
                     }
                 }
-            }
-            if (loadedCount > 0) {
-                this.absoluteHighScore = loadedCount;
-                this.deepestStep = loadedCount;
-                if (lockCenter) {
-                    bestBoard[135] = targetPiece;
-                    globalBestBoard[135] = targetPiece;
+                if (loadedCount > 0) {
+                    this.absoluteHighScore = loadedCount;
+                    this.deepestStep = loadedCount;
+                    if (lockCenter) {
+                        bestBoard[135] = targetPiece;
+                        globalBestBoard[135] = targetPiece;
+                    }
+                    System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
+                    updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
+                    logger.info(">>> SUCCESS: Loaded checkpoint fully! Engine locked at " + absoluteHighScore + " pieces.");
+                } else {
+                    logger.warn(">>> [WARNING] Smart Load found the file, but it was EMPTY or CORRUPTED inside!");
                 }
-                System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
-                updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
-                logger.info(">>> SUCCESS: Loaded checkpoint fully! Engine locked at " + absoluteHighScore + " pieces.");
             } else {
-                logger.warn(">>> [WARNING] Smart Load found the file, but it was EMPTY or CORRUPTED inside!");
+                logger.info(">>> [WARNING] Smart Load failed and returned null. Starting from scratch.");
             }
-        } else {
-            logger.info(">>> [WARNING] Smart Load failed and returned null. Starting from scratch.");
         }
 
         // RESOLVE AND PRE-LOCK HINTS INTO ALL MASTER BOARDS
@@ -266,6 +285,34 @@ public class EternitySolver implements Runnable {
         // Ensure center is also securely locked on the flatResumeBoard
         if (lockCenter) {
             flatResumeBoard[135] = targetPiece;
+        }
+    }
+
+    private void restoreBoardState(int[][] loaded) {
+        if (loaded == null) return;
+        int loadedCount = 0;
+        for (int r = 0; r < 16; r++) {
+            if (loaded[r] == null) {
+                continue;
+            }
+            for (int c = 0; c < 16; c++) {
+                int p = loaded[r][c];
+                if (p != -1 && p != 0 && p != -2) {
+                    bestBoard[r * 16 + c] = p;
+                    globalBestBoard[r * 16 + c] = p;
+                    loadedCount++;
+                }
+            }
+        }
+        if (loadedCount > 0) {
+            this.absoluteHighScore = loadedCount;
+            this.deepestStep = loadedCount;
+            if (lockCenter) {
+                bestBoard[135] = targetPiece;
+                globalBestBoard[135] = targetPiece;
+            }
+            System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
+            updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
         }
     }
 
@@ -374,8 +421,18 @@ public class EternitySolver implements Runnable {
                 if (repairReporterScheduler != null) { // repairReporterScheduler is unused, can be removed
                     repairReporterScheduler.shutdownNow();
                 }
-                CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore,
-                        saveProfile);
+                // Inside EternitySolver
+                SolverState memoryToSave = new SolverState(
+                        buildDisplayBoard(globalBestBoard),
+                        absoluteHighScore,
+                        this.tabuTenure, // Sends the active Tabu list
+                        this.uniqueMaxScoreHashes, // Sends the hashes of explored high-score variants
+                        this.topBoards.getRawRegistry() // You'll need to add a getter to TopBoardRegistry to return its List<int[]>
+                );
+
+                CheckpointManager.saveSmartState(memoryToSave, saveProfile);
+//                CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore,
+//                        saveProfile);
             }
         }));
     }
@@ -490,7 +547,7 @@ public class EternitySolver implements Runnable {
             globalGpuTrialCount.addAndGet(result.stepsTaken()); // Update global trial count
 
             if (result.solved()) {
-                logger.info("LØST! Runde %d", round);
+                logger.info("SOLVED! Round %d", round);
                 handleVictory(currentBestBoard); // Use handleVictory for solution saving
                 return;
             }
@@ -501,10 +558,10 @@ public class EternitySolver implements Runnable {
                 absoluteHighScore = highScore; // Update global absoluteHighScore
                 updateDisplay(highScore, buildDisplayBoard(globalBestBoard)); // Update display
                 RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile); // Save record
-                logger.info("[Runde %d] Ny highscore: %d brikker (%d ms)",
+                logger.info("[Round %d] New highscore: %d pieces (%d ms)",
                         round, highScore, elapsed);
             } else {
-                logger.info("[Runde %d] Ingen fremgang. Highscore: %d (%d ms)",
+                logger.info("[Round %d] No progress. Highscore: %d (%d ms)",
                         round, highScore, elapsed);
             }
 
@@ -570,18 +627,25 @@ public class EternitySolver implements Runnable {
 
     /**
      * Handles periodic saving of the current best board to a checkpoint file.
+     *
      * @param lastPeriodicSave The timestamp of the last periodic save.
-     * @return The updated timestamp of the last periodic save.
      */
-    private long handlePeriodicSave(long lastPeriodicSave) {
+    private void handlePeriodicSave(long lastPeriodicSave) {
         if (System.currentTimeMillis() - lastPeriodicSave > 300_000) { // 5 minutes
             synchronized (displayLock) {
-                CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore,
-                        saveProfile);
+                SolverState memoryToSave = new SolverState(
+                        buildDisplayBoard(globalBestBoard),
+                        absoluteHighScore,
+                        this.tabuTenure, // Sends the active Tabu list
+                        this.uniqueMaxScoreHashes, // Sends the hashes of explored high-score variants
+                        this.topBoards.getRawRegistry() // You'll need to add a getter to TopBoardRegistry to return its List<int[]>
+                );
+
+                CheckpointManager.saveSmartState(memoryToSave, saveProfile);//                CheckpointManager.saveRecordCheckpoint(buildDisplayBoard(globalBestBoard), absoluteHighScore,
+//                        saveProfile);
             }
-            return System.currentTimeMillis();
+            System.currentTimeMillis();
         }
-        return lastPeriodicSave;
     }
 
     /**
@@ -674,6 +738,8 @@ public class EternitySolver implements Runnable {
         // CLIMBING TRACKER: Print to the log ONLY when the GPU reaches a new depth for this branch
         if (result.newHighScore() > lastReportedDepth) {
             logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
+            System.out.printf("%s >>> [CLIMBING] Current pieces placed: %d / 256",
+                    LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")), result.newHighScore());
             lastReportedDepth = result.newHighScore();
         }
         globalGpuTrialCount.addAndGet(result.stepsTaken());
@@ -689,14 +755,31 @@ public class EternitySolver implements Runnable {
 
         if (result.newHighScore() > scoreBefore) {
             if (!verifyBoardStrict(bestBoardOut)) {
-                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict! Rejecting " +
-                        "this fake record.");
-                fatalGpuBugCount++;
-                if (fatalGpuBugCount > 50) {
-                    logger.info(">>> [DEEP RESET] Too many conflicts at the finish line. Removing 20 pieces to break the deadlock.");
-                    // Force the Surgeon to remove a larger chunk to change the geometry
-                    triggerBranchScrap();
-                    fatalGpuBugCount = 0;
+                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict!");
+
+                int piecesPlaced = countPieces(bestBoardOut);
+
+                if (piecesPlaced >= 240) {
+                    logger.info(">>> [RESCUE] High-score board (" + piecesPlaced + ") detected. Executing emergency surgery...");
+
+                    int validPieces = rescueBoard(bestBoardOut);
+                    logger.info(">>> [RESCUE] Surgeon removed conflicting pieces. Rescued board has " + validPieces + " valid pieces.");
+
+                    // If the rescued board is still better than our previous deepest step, keep it!
+                    if (validPieces > deepestStep) {
+                        deepestStep = validPieces;
+                        System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
+                        topBoards.offer(bestBoardOut, deepestStep);
+                        updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
+                        logger.info(">>> [RESCUE SUCCESS] Rescued board established as new Base Camp!");
+                    }
+                } else {
+                    fatalGpuBugCount++;
+                    if (fatalGpuBugCount > 50) {
+                        logger.info(">>> [DEEP RESET] Too many conflicts at the finish line. Removing 20 pieces to break the deadlock.");
+                        triggerBranchScrap();
+                        fatalGpuBugCount = 0;
+                    }
                 }
                 return;
             }
@@ -795,6 +878,8 @@ public class EternitySolver implements Runnable {
         // CLIMBING TRACKER: Print to the log ONLY when the GPU reaches a new depth for this branch
         if (result.newHighScore() > lastReportedDepth) {
             logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
+            System.out.printf("%s >>> [CLIMBING] Current pieces placed: %d / 256",
+                    LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")), result.newHighScore());
             lastReportedDepth = result.newHighScore();
         }
         globalGpuTrialCount.addAndGet(result.stepsTaken());
@@ -805,14 +890,31 @@ public class EternitySolver implements Runnable {
 
         if (result.newHighScore() > scoreBefore) {
             if (!verifyBoardStrict(bestBoardOut)) {
-                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict! Rejecting " +
-                        "this fake record.");
-                fatalGpuBugCount++;
-                if (fatalGpuBugCount > 50) {
-                    logger.info(">>> [DEEP RESET] Too many conflicts at the finish line. Removing 20 pieces to break the deadlock.");
-                    // Force the Surgeon to remove a larger chunk to change the geometry
-                    triggerBranchScrap();
-                    fatalGpuBugCount = 0;
+                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict!");
+
+                int piecesPlaced = countPieces(bestBoardOut);
+
+                if (piecesPlaced >= 240) {
+                    logger.info(">>> [RESCUE] High-score board (" + piecesPlaced + ") detected. Executing emergency surgery...");
+
+                    int validPieces = rescueBoard(bestBoardOut);
+                    logger.info(">>> [RESCUE] Surgeon removed conflicting pieces. Rescued board has " + validPieces + " valid pieces.");
+
+                    // If the rescued board is still better than our previous deepest step, keep it!
+                    if (validPieces > deepestStep) {
+                        deepestStep = validPieces;
+                        System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
+                        topBoards.offer(bestBoardOut, deepestStep);
+                        updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
+                        logger.info(">>> [RESCUE SUCCESS] Rescued board established as new Base Camp!");
+                    }
+                } else {
+                    fatalGpuBugCount++;
+                    if (fatalGpuBugCount > 50) {
+                        logger.info(">>> [DEEP RESET] Too many conflicts at the finish line. Removing 20 pieces to break the deadlock.");
+                        triggerBranchScrap();
+                        fatalGpuBugCount = 0;
+                    }
                 }
                 return;
             }
@@ -865,7 +967,7 @@ public class EternitySolver implements Runnable {
      *
      * @param newBoard The newly found best board.
      */
-    private void updateTabuList(int[] newBoard) {
+    void updateTabuList(int[] newBoard) {
         // RELAXED TENURE: Shorter memory allows the Surgeon to re-optimize areas much faster.
         int tenureLength = 5 + (absoluteHighScore / 25);
 
@@ -886,7 +988,7 @@ public class EternitySolver implements Runnable {
     /**
      * Clears all entries from the Tabu list, making all board positions available for modification.
      */
-    private void clearTabu() {
+    void clearTabu() {
         Arrays.fill(tabuTenure, 0);
         logger.info(">>> [TABU] All tenures cleared for fresh Phase 3 cycle.");
     }
@@ -1155,7 +1257,7 @@ public class EternitySolver implements Runnable {
      * @param targetStep The depth to retreat to.
      * @param logMessage An optional message to log about the retreat.
      */
-    private void retreat(int targetStep, String logMessage) {
+    void retreat(int targetStep, String logMessage) {
         deepestStep = Math.max(0, targetStep);
         for (int s = deepestStep; s < 256; s++) {
             bestBoard[buildOrder[s]] = -1;
@@ -1183,7 +1285,7 @@ public class EternitySolver implements Runnable {
      * @param board The 1D integer array representing the board.
      * @return The count of non-empty, non-hole pieces.
      */
-    private int countPieces(int[] board) {
+    int countPieces(int[] board) {
         int count = 0;
         for (int p : board) {
             if (p != -1 && p != -2) {
@@ -1199,7 +1301,7 @@ public class EternitySolver implements Runnable {
      * @param sourceArray The 1D integer array representing the board.
      * @return A 2D integer array (16x16) for display.
      */
-    private int[][] buildDisplayBoard(int[] sourceArray) {
+    int[][] buildDisplayBoard(int[] sourceArray) {
         int[][] displayBoard = new int[16][16];
         for (int i = 0; i < 16; i++) {
             Arrays.fill(displayBoard[i], -1);
@@ -1360,7 +1462,7 @@ public class EternitySolver implements Runnable {
      * @param board The 1D integer array representing the board to verify.
      * @return True if the board is mathematically flawless, false otherwise.
      */
-    private boolean verifyBoardStrict(int[] board) {
+    boolean verifyBoardStrict(int[] board) {
         for (int row = 0; row < 16; row++) {
             for (int col = 0; col < 16; col++) {
                 int idx = row * 16 + col;
@@ -1401,6 +1503,61 @@ public class EternitySolver implements Runnable {
             }
         }
         return true;
+    }
+
+    /**
+     * Emergency surgery to strip out conflicts and create a clean crater
+     * around the bad pieces, while protecting the hints and center.
+     */
+    private int rescueBoard(int[] corruptedBoard) {
+        int[] rescuedBoard = Arrays.copyOf(corruptedBoard, 256);
+
+        for (int row = 0; row < 16; row++) {
+            for (int col = 0; col < 16; col++) {
+                int idx = row * 16 + col;
+                int p = rescuedBoard[idx];
+                if (p == -1 || p == -2) continue;
+
+                boolean conflict = false;
+                if (col < 15) {
+                    int eastP = rescuedBoard[idx + 1];
+                    if (eastP != -1 && eastP != -2 && PieceUtils.getEast(p) != PieceUtils.getWest(eastP)) {
+                        conflict = true;
+                    }
+                }
+                if (row < 15) {
+                    int southP = rescuedBoard[idx + 16];
+                    if (southP != -1 && southP != -2 && PieceUtils.getSouth(p) != PieceUtils.getNorth(southP)) {
+                        conflict = true;
+                    }
+                }
+
+                if (conflict) {
+                    // Punch out the piece and its immediate neighbors to create a crater.
+                    // Protecting center (135) and hints (221, 45, 210, 34).
+                    int[] neighbors = {idx, idx + 1, idx + 16, idx - 1, idx - 16};
+
+                    for (int n : neighbors) {
+                        if (n >= 0 && n < 256) {
+                            if (n != 135 && n != 221 && n != 45 && n != 210 && n != 34) {
+                                rescuedBoard[n] = -1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        int validPieces = 0;
+        for (int i = 0; i < 256; i++) {
+            if (rescuedBoard[i] != -1 && rescuedBoard[i] != -2) {
+                validPieces++;
+            }
+        }
+
+        // Copy the rescued board back into the original array
+        System.arraycopy(rescuedBoard, 0, corruptedBoard, 0, 256);
+        return validPieces;
     }
 
     /**
@@ -1502,6 +1659,10 @@ public class EternitySolver implements Runnable {
         public synchronized void clear() {
             registry.clear();
             currentIndex = 0;
+        }
+
+        public List getRawRegistry() {
+            return registry;
         }
     }
 

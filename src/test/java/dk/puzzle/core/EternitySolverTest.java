@@ -3,12 +3,15 @@ package dk.puzzle.core;
 import dk.puzzle.io.CheckpointManager;
 import dk.puzzle.io.RecordManager;
 import dk.puzzle.model.PieceInventory;
+import dk.puzzle.util.PieceUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 
 import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -52,6 +55,12 @@ class EternitySolverTest {
         checkpointMock.close();
         recordMock.close();
         eternityMock.close();
+    }
+
+    private double getTargetedHolesPercentage(dk.puzzle.ai.SurgeonHeuristics surgeon) throws Exception {
+        java.lang.reflect.Field field = dk.puzzle.ai.SurgeonHeuristics.class.getDeclaredField("targetedHolesPercentage");
+        field.setAccessible(true);
+        return (double) field.get(surgeon);
     }
 
     @Test
@@ -118,5 +127,202 @@ class EternitySolverTest {
         assertEquals(100, solver.deepestStep);
         assertEquals(-1, solver.bestBoard[100], "Pieces at or after the retreat depth should be cleared");
         assertEquals(centerPiece, solver.bestBoard[135], "Locked center piece at index 135 must be preserved");
+    }
+
+    @Test
+    void testConfigurationSetters() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        // Test setStagnationLimit
+        solver.setStagnationLimit(45);
+        assertEquals(45, solver.stagnationLimitMinutes);
+
+        // Test setBatchSizeOverride
+        solver.setBatchSizeOverride(1000);
+        assertEquals(1000, solver.userBatchSizeOverride);
+
+        // Test setExtinctionThreshold
+        solver.setExtinctionThreshold(0.85);
+        assertEquals(0.85, solver.extinctionThreshold, 0.001);
+
+        // Test setTargetedHolesPercentage
+        solver.setTargetedHolesPercentage(0.95);
+        double val = getTargetedHolesPercentage(solver.surgeon);
+        assertEquals(0.95, val, 0.001);
+    }
+
+    @Test
+    void testTriggerManualOverride() {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        assertFalse(solver.manualOverrideRequested);
+        assertEquals(0, solver.manualBaseCampTarget);
+
+        solver.triggerManualOverride(150);
+        assertTrue(solver.manualOverrideRequested);
+        assertEquals(150, solver.manualBaseCampTarget);
+    }
+
+    @Test
+    void testVerifyBoardStrictValidEmpty() {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = new int[256];
+        Arrays.fill(board, -1); // empty board is mathematically flawless
+
+        assertTrue(solver.verifyBoardStrict(board));
+    }
+
+    @Test
+    void testVerifyBoardStrictValidMatching() {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = new int[256];
+        Arrays.fill(board, -1);
+
+        // Pack two matching pieces horizontally:
+        // Piece at index 0 (row 0, col 0): North=1, East=2, South=3, West=4
+        // Piece at index 1 (row 0, col 1): North=5, East=6, South=7, West=2
+        // East of index 0 (2) matches West of index 1 (2).
+        board[0] = PieceUtils.pack(1, 2, 3, 4);
+        board[1] = PieceUtils.pack(5, 6, 7, 2);
+
+        // Pack two matching pieces vertically:
+        // Piece at index 16 (row 1, col 0): North=3, East=8, South=9, West=10
+        // South of index 0 (3) matches North of index 16 (3).
+        board[16] = PieceUtils.pack(3, 8, 9, 10);
+
+        assertTrue(solver.verifyBoardStrict(board), "Board with all matching adjacent edges should be valid");
+    }
+
+    @Test
+    void testVerifyBoardStrictEastWestMismatch() {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = new int[256];
+        Arrays.fill(board, -1);
+
+        // East of index 0 (2) mismatches West of index 1 (9)
+        board[0] = PieceUtils.pack(1, 2, 3, 4);
+        board[1] = PieceUtils.pack(5, 6, 7, 9);
+
+        assertFalse(solver.verifyBoardStrict(board), "Board with horizontal conflict must be invalid");
+    }
+
+    @Test
+    void testVerifyBoardStrictSouthNorthMismatch() {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = new int[256];
+        Arrays.fill(board, -1);
+
+        // South of index 0 (3) mismatches North of index 16 (9)
+        board[0] = PieceUtils.pack(1, 2, 3, 4);
+        board[16] = PieceUtils.pack(9, 6, 7, 8);
+
+        assertFalse(solver.verifyBoardStrict(board), "Board with vertical conflict must be invalid");
+    }
+
+    @Test
+    void testTopBoardRegistry() {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        EternitySolver.TopBoardRegistry registry = solver.topBoards;
+
+        registry.clear();
+        assertNull(registry.nextForRepair());
+
+        // Offer some unique boards
+        int[] board1 = new int[256];
+        board1[0] = 100;
+        int[] board2 = new int[256];
+        board2[0] = 200;
+
+        registry.offer(board1, 10);
+        registry.offer(board2, 12);
+
+        // Offer a duplicate board
+        int[] board1Duplicate = new int[256];
+        board1Duplicate[0] = 100;
+        registry.offer(board1Duplicate, 10);
+
+        // Retrieve round-robin and check they are unique
+        int[] first = registry.nextForRepair();
+        int[] second = registry.nextForRepair();
+        int[] third = registry.nextForRepair();
+
+        assertNotNull(first);
+        assertNotNull(second);
+        assertNotNull(third);
+
+        // First and third should be identical (since we have size 2 and round-robin)
+        assertArrayEquals(first, third);
+        assertFalse(Arrays.equals(first, second));
+
+        // Test capacity limit of 20
+        registry.clear();
+        for (int i = 0; i < 30; i++) {
+            int[] temp = new int[256];
+            temp[0] = i;
+            registry.offer(temp, i);
+        }
+
+        // Retrieve 20 elements, they must be unique, and retrieving 21st element should be one of the first 20.
+        Set<Integer> uniqueValues = new HashSet<>();
+        for (int i = 0; i < 20; i++) {
+            int[] b = registry.nextForRepair();
+            assertNotNull(b);
+            uniqueValues.add(b[0]);
+        }
+        assertEquals(20, uniqueValues.size(), "Registry should contain exactly 20 unique boards");
+
+        // 21st call should return a board whose val is in uniqueValues (no new boards beyond capacity of 20)
+        int[] b21 = registry.nextForRepair();
+        assertTrue(uniqueValues.contains(b21[0]), "Capped registry should not add boards beyond capacity");
+    }
+
+    @Test
+    void testUpdateTabuListAndClearTabu() {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 9999, false, EternitySolver.BuildStrategy.TYPEWRITER, true);
+
+        // Ensure a clean slate for testing
+        Arrays.fill(solver.tabuTenure, 0);
+        Arrays.fill(solver.bestBoard, 10); // Reference values
+
+        int[] newBoard = new int[256];
+        System.arraycopy(solver.bestBoard, 0, newBoard, 0, 256);
+
+        // Modify only index 0
+        newBoard[0] = 20;
+
+        solver.absoluteHighScore = 50; // tenureLength: 5 + (50 / 25) = 7
+        solver.updateTabuList(newBoard);
+
+        // 1. Check permanently tabu elements (Shielded positions)
+        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[135], "Center should be shielded");
+        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[221], "Hint 221 should be shielded");
+        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[45], "Hint 45 should be shielded");
+        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[210], "Hint 210 should be shielded");
+        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[34], "Hint 34 should be shielded");
+
+        // 2. Check dynamic tabu for modified piece (index 0)
+        // expected tenure = currentRepairIteration (0) + 7 = 7
+        assertEquals(7, solver.tabuTenure[0], "Modified piece should receive correct tenure length");
+
+        // 3. Check that unmodified pieces have 0 tenure
+        assertEquals(0, solver.tabuTenure[1], "Unchanged piece should have no tenure");
+
+        // 4. Test clearTabu
+        solver.clearTabu();
+        for (int i = 0; i < 256; i++) {
+            assertEquals(0, solver.tabuTenure[i], "clearTabu should reset all positions to 0");
+        }
     }
 }

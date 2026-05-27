@@ -1,6 +1,8 @@
 package dk.puzzle.io;
 
 import java.io.*;
+
+import dk.puzzle.core.SolverState;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -15,6 +17,53 @@ import org.apache.logging.log4j.Logger;
 public class CheckpointManager {
 
     private static final Logger logger = LogManager.getLogger(CheckpointManager.class);
+    // UPDATE: Now takes the full SolverState object
+    public static void saveSmartState(SolverState state, String profileFolder) {
+        File folder = new File(profileFolder);
+        if (!folder.exists()) folder.mkdirs();
+
+        File file = new File(folder, "memory_checkpoint_" + state.score + ".dat");
+
+        try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
+            oos.writeObject(state); // Saves the board AND the memory!
+            System.out.println(">>> [SUCCESS] Saved solver memory to: " + file.getAbsolutePath());
+        } catch (IOException e) {
+            System.err.println(">>> [ERROR] Could not save memory: " + e.getMessage());
+        }
+    }
+
+    // UPDATE: Now returns the full SolverState object
+    public static SolverState loadSmartState(String profileFolder) {
+        File folder = new File(profileFolder);
+        if (!folder.exists() || folder.listFiles() == null) return null;
+
+        File latestFile = getHighestScoreFile(folder); // Assuming you have a method that finds the best file
+        if (latestFile == null) return null;
+
+        try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(latestFile))) {
+            return (SolverState) ois.readObject(); // Reads the board AND the memory!
+        } catch (Exception e) {
+            System.err.println(">>> [ERROR] Failed to load memory: " + e.getMessage());
+            return null;
+        }
+    }
+
+    // Helper to find the file with the highest score (if you don't already have one)
+    private static File getHighestScoreFile(File folder) {
+        File bestFile = null;
+        int maxScore = -1;
+        for (File file : folder.listFiles((dir, name) -> name.startsWith("memory_checkpoint_") && name.endsWith(".dat"))) {
+            try {
+                String scoreStr = file.getName().replace("memory_checkpoint_", "").replace(".dat", "");
+                int score = Integer.parseInt(scoreStr);
+                if (score > maxScore) {
+                    maxScore = score;
+                    bestFile = file;
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+        return bestFile;
+    }
 
     /**
      * Automatically identifies and loads the checkpoint with the highest piece count 
