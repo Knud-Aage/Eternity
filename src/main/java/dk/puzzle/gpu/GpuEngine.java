@@ -4,6 +4,8 @@ import dk.puzzle.model.PieceInventory;
 import jcuda.Pointer;
 import jcuda.Sizeof;
 import jcuda.driver.*;
+import jcuda.runtime.JCuda;
+
 import java.util.List;
 import static jcuda.driver.JCudaDriver.*;
 
@@ -30,6 +32,7 @@ public class GpuEngine {
      *                   within the GPU kernels.
      */
     public GpuEngine(PieceInventory inventory, boolean lockCenter) {
+        JCuda.cudaSetDeviceFlags(JCuda.cudaDeviceScheduleBlockingSync);
         this.inventory = inventory;
         this.lockCenter = lockCenter;
         initCUDA();

@@ -55,7 +55,14 @@ public class TopBoardRegistry {
 
     public synchronized int bestScore() {
         if (entries.isEmpty()) return 0;
-        return entries.get(0).score;
+        return entries.getFirst().score;
+    }
+
+    /**
+     * Exposes the registry for the CheckpointManager so it can be saved to disk.
+     */
+    public List<int[]> getRawRegistry() {
+        return new ArrayList<>(this.entries.stream().map(e -> e.board).toList());
     }
 
     public static class Entry {
