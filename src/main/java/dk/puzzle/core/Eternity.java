@@ -76,15 +76,27 @@ public class Eternity {
 
         Runnable solverTask = null;
 
+        // Read the checkbox from your startup dialog GUI
+//        boolean useOfficialConstraints = myCenterPieceCheckbox.isSelected();
+
         if (usePbp) {
             EternitySolver.BuildStrategy strategy = useSpiral ?
                     EternitySolver.BuildStrategy.SPIRAL :
                     EternitySolver.BuildStrategy.TYPEWRITER;
 
+            // Pass the checkbox variable in as the very last parameter!
             solverTask = new EternitySolver(inventory, targetPiece, useGpu, strategy, lockCenter);
-        } else {
-            logger.info("Macro solver not implemented in this main.");
         }
+
+//        if (usePbp) {
+//            EternitySolver.BuildStrategy strategy = useSpiral ?
+//                    EternitySolver.BuildStrategy.SPIRAL :
+//                    EternitySolver.BuildStrategy.TYPEWRITER;
+//
+//            solverTask = new EternitySolver(inventory, targetPiece, useGpu, strategy, lockCenter);
+//        } else {
+//            logger.info("Macro solver not implemented in this main.");
+//        }
 
         if (solverTask != null) {
             Thread solverThread = new Thread(solverTask, "SolverThread");

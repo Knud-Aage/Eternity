@@ -112,11 +112,10 @@ public class EternitySolver implements Runnable {
 
     // HINT STRATEGY FIELDS
     private static final int[] HINT_POSITIONS = {221, 45, 210, 34};
-    private static final int[] HINT_PHYSICAL_NUMBERS = {249, 181, 255, 208};
+    private static final int[] HINT_PHYSICAL_INDICES = {248, 180, 254, 207};
     private static final int[] HINT_ROTATIONS = {1, 0, 0, 0};
-    private final int[] hintPackedValues = new int[4];
-    private final int[] hintPhysicalIndices = new int[4];
-
+    private final int[] hintPackedValues = new int[] {-1, -1, -1, -1};
+    private final int[] hintPhysicalIndices = new int[] {-1, -1, -1, -1};
     private int findPackedPiece(int physicalNumber, int targetRotation) {
         int physIdx = physicalNumber - 1;
         int foundCount = 0;
@@ -129,6 +128,64 @@ public class EternitySolver implements Runnable {
             }
         }
         return -1;
+    }
+
+    private void loadCheckpointAndHints() {
+        SolverState loadedState = CheckpointManager.loadSmartState(saveProfile);
+
+        if (loadedState != null) {
+            restoreBoardState(loadedState.bestBoard);
+            System.arraycopy(loadedState.tabuTenure, 0, this.tabuTenure, 0, 256);
+            this.uniqueMaxScoreHashes.addAll(loadedState.uniqueMaxScoreHashes);
+            for (int[] historicBoard : loadedState.topBoardsRegistry) {
+                this.topBoards.offer(historicBoard, loadedState.score);
+            }
+            logger.info(">>> SUCCESS: Loaded checkpoint AND restored historic solver memory!");
+        } else {
+            int[][] loaded = CheckpointManager.loadSmartCheckpoint(saveProfile);
+            if (loaded != null) {
+                restoreBoardState(loaded);
+                logger.info(">>> SUCCESS: Loaded legacy checkpoint fully!");
+            } else {
+                logger.info(">>> [WARNING] Smart Load failed and returned null. Starting from scratch.");
+            }
+        }
+
+// --- THE MASTER SWITCH: COLOR-BASED INJECTION ---
+        if (this.lockCenter) {
+            int[][] officialHints = {
+                    {8, 2, 3, 10}, {3, 13, 6, 8},
+                    {13, 10, 11, 18}, {10, 20, 18, 16}
+            };
+
+            for (int h = 0; h < 4; h++) {
+                int[] edges = officialHints[h];
+                int foundPacked = -1;
+                for(int oi=0; oi<1024; oi++) {
+                    int p = inventory.allOrientations[oi];
+                    if (PieceUtils.getNorth(p) == edges[0] && PieceUtils.getEast(p) == edges[1] &&
+                            PieceUtils.getSouth(p) == edges[2] && PieceUtils.getWest(p) == edges[3]) {
+                        foundPacked = p;
+                        hintPhysicalIndices[h] = inventory.physicalMapping[oi]; // Save physical ID for CPU Worker!
+                        break;
+                    }
+                }
+
+                if (foundPacked != -1) {
+                    hintPackedValues[h] = foundPacked;
+                    bestBoard[HINT_POSITIONS[h]] = foundPacked;
+                    globalBestBoard[HINT_POSITIONS[h]] = foundPacked;
+                    flatResumeBoard[HINT_POSITIONS[h]] = foundPacked;
+                }
+            }
+            flatResumeBoard[135] = targetPiece;
+            logger.info(">>> [CENTER] Center piece and hints locked.");
+        } else {
+            Arrays.fill(hintPackedValues, -1);
+            Arrays.fill(hintPhysicalIndices, -1);
+            logger.info(">>> [UNCONSTRAINED] Checkbox is off. Running completely without Center Piece or Hints!");
+        }
+        updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
     }
 
     public EternitySolver(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy, boolean lockCenter) {
@@ -162,47 +219,38 @@ public class EternitySolver implements Runnable {
             }
         }
 
+        // --- NEW: IMMUNIZE STATIC LOCKS FROM GPU OVERWRITES ---
+        // By pushing the fixed positions to the absolute start of the build order,
+        // the GPU (which starts at depth 14+) will never backtrack far enough to overwrite them.
+        if (this.lockCenter) {
+            List<Integer> newOrder = new ArrayList<>();
+            newOrder.add(135); // Add Center
+            for (int hPos : HINT_POSITIONS) {
+                newOrder.add(hPos); // Add Hints
+            }
+
+            // Add the rest of the board
+            for (int i = 0; i < 256; i++) {
+                int pos = buildOrder[i];
+                boolean isStatic = (pos == 135);
+                for (int hPos : HINT_POSITIONS) {
+                    if (pos == hPos) isStatic = true;
+                }
+                if (!isStatic) {
+                    newOrder.add(pos);
+                }
+            }
+            // Overwrite the build order
+            for (int i = 0; i < 256; i++) {
+                buildOrder[i] = newOrder.get(i);
+            }
+            logger.info(">>> [ARCHITECTURE] Build Order optimized: Static locks shielded from GPU.");
+        }
+
         this.compatIndex = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
         this.surgeon = new SurgeonHeuristics(lockCenter, 0.70);
 
         loadCheckpointAndHints();
-    }
-
-    private void loadCheckpointAndHints() {
-        SolverState loadedState = CheckpointManager.loadSmartState(saveProfile);
-
-        if (loadedState != null) {
-            restoreBoardState(loadedState.bestBoard);
-            System.arraycopy(loadedState.tabuTenure, 0, this.tabuTenure, 0, 256);
-            this.uniqueMaxScoreHashes.addAll(loadedState.uniqueMaxScoreHashes);
-            for (int[] historicBoard : loadedState.topBoardsRegistry) {
-                this.topBoards.offer(historicBoard, loadedState.score);
-            }
-            logger.info(">>> SUCCESS: Loaded checkpoint AND restored historic solver memory!");
-        } else {
-            int[][] loaded = CheckpointManager.loadSmartCheckpoint(saveProfile);
-            if (loaded != null) {
-                restoreBoardState(loaded);
-                logger.info(">>> SUCCESS: Loaded legacy checkpoint fully!");
-            } else {
-                logger.info(">>> [WARNING] Smart Load failed and returned null. Starting from scratch.");
-            }
-        }
-
-        // RESOLVE AND PRE-LOCK HINTS
-        for (int h = 0; h < 4; h++) {
-            int packed = findPackedPiece(HINT_PHYSICAL_NUMBERS[h], HINT_ROTATIONS[h]);
-            hintPackedValues[h] = packed;
-            hintPhysicalIndices[h] = HINT_PHYSICAL_NUMBERS[h] - 1;
-
-            if (packed != -1) {
-                bestBoard[HINT_POSITIONS[h]] = packed;
-                globalBestBoard[HINT_POSITIONS[h]] = packed;
-                flatResumeBoard[HINT_POSITIONS[h]] = packed;
-                logger.info(">>> [HINTS] Hint piece #%d (physical #%d) locked at position %d", h, HINT_PHYSICAL_NUMBERS[h], HINT_POSITIONS[h]);
-            }
-        }
-        if (lockCenter) flatResumeBoard[135] = targetPiece;
     }
 
     private void restoreBoardState(int[][] loaded) {
@@ -365,14 +413,15 @@ public class EternitySolver implements Runnable {
                         phaseCounter++;
                         boolean seedsReady = seedPool.size() >= activeBatch;
 
-                        // Claude's Phase Scheduler: Force Deep DFS every 5th round!
-                        if (phaseCounter % 4 == 0 && seedsReady) {
-                            logger.info(">>> [SCHEDULER] Phase 2 refresh (round %d of 5)", phaseCounter);
+                        int refreshInterval = (consecutiveExtinctions > 10) ? 2 : 4;
+                        if (phaseCounter % refreshInterval == 0 && seedsReady) {
+                            // Phase 2 runs more frequently when stuck
                             runPhase2_GpuDeepDfs();
                         } else if (!seedsReady) {
                             runPhase1_CpuSeedGen();
                         } else {
                             runPhase3_GpuSurgeon();
+                            phaseCounter++;
                         }
                     } else if (seedPool.size() >= activeBatch) {
                         runPhase2_GpuDeepDfs();
@@ -483,9 +532,12 @@ public class EternitySolver implements Runnable {
             Future<GpuEngine.GpuResult> future = gpuExecutor.submit(() ->
                     gpuEngine.runDeepDfs(seeds, currentSeedDepth, deepestStep, bestBoardOut, buildOrder)
             );
-            result = future.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            // Timeout must cover a full kernel run. With 1M steps and lookahead,
+            // each batch takes ~4-40 minutes depending on STEP_BUDGET in the .cu file.
+            // 10 seconds was killing every run before it could finish.
+            result = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
         } catch (java.util.concurrent.TimeoutException e) {
-            logger.warn(">>> [GPU TIMEOUT] Phase 2 Kernel locked up! Triggering structural teardown and rebooting GPU...");
+            logger.warn(">>> [GPU TIMEOUT] Phase 2 Kernel locked up after 10 minutes! Triggering structural teardown and rebooting GPU...");
             isGpuBusy = false;
             rebootGpuEngine();
             triggerBranchScrap();
@@ -497,6 +549,8 @@ public class EternitySolver implements Runnable {
             triggerBranchScrap();
             return;
         }
+
+        applyStaticLocks(bestBoardOut);
 
         if (result.newHighScore() > lastReportedDepth) {
             logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
@@ -581,7 +635,23 @@ public class EternitySolver implements Runnable {
         int[] sourceBoard = topBoards.nextForRepair();
         if (sourceBoard == null) sourceBoard = bestBoard;
 
-        int actualHoles = (consecutiveExtinctions > 20) ? ((deepestStep > 250) ? 5 : Math.round(holesToPunch / 2.5f)) : ((deepestStep > 200) ? 5 : holesToPunch);
+        // More holes when we're stuck deep — 5 holes at 209 pieces is not enough
+        // to escape a structural dead end. Scale up with depth and stagnation.
+        int actualHoles;
+        if (consecutiveExtinctions > 20) {
+            // Heavy stagnation: aggressive excavation to break out
+            actualHoles = Math.min(holesToPunch * 2, deepestStep / 5);
+        } else if (deepestStep > 240) {
+            // Very close to solved: tiny surgical holes only
+            actualHoles = Math.max(3, holesToPunch / 4);
+        } else if (deepestStep > 200) {
+            // Normal high-depth operation: use configured hole count
+            actualHoles = holesToPunch;
+        } else {
+            // Below 200: use configured hole count
+            actualHoles = holesToPunch;
+        }
+        actualHoles = Math.clamp(actualHoles, 1, deepestStep - 5); // safety clamp
         List<int[]> variations = surgeon.excavateFrontier(
                 sourceBoard, numClones, actualHoles, tabuTenure, currentRepairIteration, deepestStep, buildOrder);
 
@@ -593,9 +663,11 @@ public class EternitySolver implements Runnable {
             Future<GpuEngine.GpuResult> future = gpuExecutor.submit(() ->
                     gpuEngine.runRepairMode(variations, deepestStep, bestBoardOut)
             );
-            result = future.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            // Phase 3 repair batches take 4-8 minutes per run with 50k clones.
+            // 10 seconds killed every batch before results could be collected.
+            result = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
         } catch (java.util.concurrent.TimeoutException e) {
-            logger.warn(">>> [GPU TIMEOUT] Phase 3 Surgeon locked up! Triggering teardown and rebooting GPU...");
+            logger.warn(">>> [GPU TIMEOUT] Phase 3 Surgeon locked up after 10 minutes! Triggering teardown and rebooting GPU...");
             rebootGpuEngine();
             triggerBranchScrap();
             return;
@@ -605,6 +677,8 @@ public class EternitySolver implements Runnable {
             triggerBranchScrap();
             return;
         }
+
+        applyStaticLocks(bestBoardOut);
 
         if (result.newHighScore() > lastReportedDepth) {
             logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
@@ -667,7 +741,8 @@ public class EternitySolver implements Runnable {
     void updateTabuList(int[] newBoard) {
         int tenureLength = 5 + (absoluteHighScore / 25);
         for (int i = 0; i < 256; i++) {
-            if (i == 135 || i == 221 || i == 45 || i == 210 || i == 34) {
+            // BUG FIX: Only apply infinite Tabu ban if we are playing with locked pieces!
+            if (this.lockCenter && (i == 135 || i == 221 || i == 45 || i == 210 || i == 34)) {
                 tabuTenure[i] = Integer.MAX_VALUE;
                 continue;
             }
@@ -679,6 +754,152 @@ public class EternitySolver implements Runnable {
 
     void clearTabu() {
         Arrays.fill(tabuTenure, 0);
+    }
+
+    private void analyzeFullBoardPotential(int[] recordBoard) {
+        int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
+        List<Integer> emptySpots = new ArrayList<>();
+        boolean[] usedPhysical = new boolean[256];
+
+        for (int i = 0; i < 256; i++) {
+            int p = simulatedBoard[i];
+            if (p != -1 && p != -2) {
+                int physicalId = -1;
+                for (int oi = 0; oi < 1024; oi++) {
+                    if (inventory.allOrientations[oi] == p) {
+                        physicalId = inventory.physicalMapping[oi];
+                        break;
+                    }
+                }
+                if (physicalId != -1) usedPhysical[physicalId] = true;
+            } else {
+                emptySpots.add(i);
+            }
+        }
+
+        List<Integer> unusedPhysIds = new ArrayList<>();
+        for (int physId = 0; physId < 256; physId++) {
+            if (!usedPhysical[physId]) unusedPhysIds.add(physId);
+        }
+
+        Collections.shuffle(unusedPhysIds);
+
+        for (int spot : emptySpots) {
+            int row = spot / 16;
+            int col = spot % 16;
+            boolean atNorthEdge = (row == 0);
+            boolean atSouthEdge = (row == 15);
+            boolean atWestEdge = (col == 0);
+            boolean atEastEdge = (col == 15);
+
+            int bestBrikIndex = -1;
+            int bestOrientedPiece = -1;
+
+            for (int i = 0; i < unusedPhysIds.size(); i++) {
+                int physId = unusedPhysIds.get(i);
+                for (int oi = 0; oi < 1024; oi++) {
+                    if (inventory.physicalMapping[oi] == physId) {
+                        int p = inventory.allOrientations[oi];
+                        boolean match = true;
+
+                        // 1. MUST have border on the actual edges
+                        if (atNorthEdge && PieceUtils.getNorth(p) != 0) match = false;
+                        if (atSouthEdge && PieceUtils.getSouth(p) != 0) match = false;
+                        if (atWestEdge && PieceUtils.getWest(p) != 0) match = false;
+                        if (atEastEdge && PieceUtils.getEast(p) != 0) match = false;
+
+                        // 2. MUST NOT have border on the inside! (The Missing Rule)
+                        if (!atNorthEdge && PieceUtils.getNorth(p) == 0) match = false;
+                        if (!atSouthEdge && PieceUtils.getSouth(p) == 0) match = false;
+                        if (!atWestEdge && PieceUtils.getWest(p) == 0) match = false;
+                        if (!atEastEdge && PieceUtils.getEast(p) == 0) match = false;
+
+                        // 3. Check internal neighbors (Pass 1 only)
+                        if (match && row > 0 && simulatedBoard[spot - 16] != -1) {
+                            if (PieceUtils.getNorth(p) != PieceUtils.getSouth(simulatedBoard[spot - 16])) match = false;
+                        }
+                        if (match && col > 0 && simulatedBoard[spot - 1] != -1) {
+                            if (PieceUtils.getWest(p) != PieceUtils.getEast(simulatedBoard[spot - 1])) match = false;
+                        }
+
+                        if (match) {
+                            bestBrikIndex = i;
+                            bestOrientedPiece = p;
+                            break;
+                        }
+                    }
+                }
+                if (bestBrikIndex != -1) break;
+            }
+
+            // PASS 2: Fallback to EDGE ONLY match (Ignore internal neighbors, but strictly forbid inner borders)
+            if (bestBrikIndex == -1) {
+                for (int i = 0; i < unusedPhysIds.size(); i++) {
+                    int physId = unusedPhysIds.get(i);
+                    for (int oi = 0; oi < 1024; oi++) {
+                        if (inventory.physicalMapping[oi] == physId) {
+                            int p = inventory.allOrientations[oi];
+                            boolean match = true;
+
+                            // MUST have border on the actual edges
+                            if (atNorthEdge && PieceUtils.getNorth(p) != 0) match = false;
+                            if (atSouthEdge && PieceUtils.getSouth(p) != 0) match = false;
+                            if (atWestEdge && PieceUtils.getWest(p) != 0) match = false;
+                            if (atEastEdge && PieceUtils.getEast(p) != 0) match = false;
+
+                            // MUST NOT have border on the inside!
+                            if (!atNorthEdge && PieceUtils.getNorth(p) == 0) match = false;
+                            if (!atSouthEdge && PieceUtils.getSouth(p) == 0) match = false;
+                            if (!atWestEdge && PieceUtils.getWest(p) == 0) match = false;
+                            if (!atEastEdge && PieceUtils.getEast(p) == 0) match = false;
+
+                            if (match) {
+                                bestBrikIndex = i;
+                                bestOrientedPiece = p;
+                                break;
+                            }
+                        }
+                    }
+                    if (bestBrikIndex != -1) break;
+                }
+            }
+
+            // PASS 3: Ultimate Fallback - Just place anything so there isn't a hole!
+            if (bestBrikIndex != -1) {
+                simulatedBoard[spot] = bestOrientedPiece;
+                unusedPhysIds.remove(bestBrikIndex);
+            } else {
+                int fallbackPhysId = unusedPhysIds.remove(0);
+                for (int oi = 0; oi < 1024; oi++) {
+                    if (inventory.physicalMapping[oi] == fallbackPhysId) {
+                        simulatedBoard[spot] = inventory.allOrientations[oi];
+                        break;
+                    }
+                }
+            }
+        }
+
+        int totalConflicts = 0;
+        for (int row = 0; row < 16; row++) {
+            for (int col = 0; col < 16; col++) {
+                int idx = row * 16 + col;
+                int currentPiece = simulatedBoard[idx];
+                if (currentPiece == -1) continue;
+                if (col < 15) {
+                    int eastNeighbor = simulatedBoard[idx + 1];
+                    if (eastNeighbor != -1 && PieceUtils.getEast(currentPiece) != PieceUtils.getWest(eastNeighbor)) totalConflicts++;
+                }
+                if (row < 15) {
+                    int southNeighbor = simulatedBoard[idx + 16];
+                    if (southNeighbor != -1 && PieceUtils.getSouth(currentPiece) != PieceUtils.getNorth(southNeighbor)) totalConflicts++;
+                }
+            }
+        }
+
+        logger.info(">>> [FULL BOARD SCAN] Simulated an edge-aware fully laid board. Total internal edge conflicts: %d / 480", totalConflicts);
+        if (totalConflicts < 30) logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
+
+        saveFullBoardVariant(simulatedBoard, absoluteHighScore, totalConflicts);
     }
 
     private void triggerBranchScrap() {
@@ -730,12 +951,59 @@ public class EternitySolver implements Runnable {
             poisonedPiece = -1;
         }
 
+        // --- 1. RESET BOARD TO EMPTY ---
         Arrays.fill(flatResumeBoard, -1);
+
+        // --- 2. HARD-INJECT THE HINTS DIRECTLY FROM COLORS ---
+        if (lockCenter) {
+            flatResumeBoard[135] = targetPiece;
+
+            // Hard-coded edge definitions to bypass variable initialization issues
+            // Format: {North, East, South, West, PositionIndex}
+            int[][] officialHints = {
+                    {8, 2, 3, 10, 221}, {3, 13, 6, 8, 45},
+                    {13, 10, 11, 18, 210}, {10, 20, 18, 16, 34}
+            };
+
+            for (int[] hint : officialHints) {
+                int packed = -1;
+                for(int oi=0; oi<1024; oi++) {
+                    int p = inventory.allOrientations[oi];
+                    // Look for the exact color match on all 4 sides
+                    if (PieceUtils.getNorth(p) == hint[0] && PieceUtils.getEast(p) == hint[1] &&
+                            PieceUtils.getSouth(p) == hint[2] && PieceUtils.getWest(p) == hint[3]) {
+                        packed = p;
+                        break;
+                    }
+                }
+                if (packed != -1) {
+                    flatResumeBoard[hint[4]] = packed;
+                }
+            }
+        }
+
+// --- 3. RE-FILL PREVIOUS WORK ON TOP ---
         for (int step = 0; step < lockedPieces; step++) {
             int idx = buildOrder[step];
             if (lockCenter && idx == 135) continue;
-            flatResumeBoard[idx] = globalBestBoard[idx];
+
+            // Only protect hint spots IF we are actually playing with hints!
+            boolean isHint = false;
+            if (lockCenter) {
+                for(int h : HINT_POSITIONS) {
+                    if(idx == h) {
+                        isHint = true;
+                        break;
+                    }
+                }
+            }
+            if(!isHint) {
+                flatResumeBoard[idx] = globalBestBoard[idx];
+            }
         }
+
+        // Final safety net
+        applyStaticLocks(flatResumeBoard);
 
         deepestStep = Math.max(0, lockedPieces);
         seedPool.clear();
@@ -743,133 +1011,9 @@ public class EternitySolver implements Runnable {
         consecutiveGpuStagnation = 0;
         phaseCounter = 0; // RESET PHASE SCHEDULER
         clearTabu();
-    }
 
-    private void analyzeFullBoardPotential(int[] recordBoard) {
-        int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
-        List<Integer> emptySpots = new ArrayList<>();
-        boolean[] usedPhysical = new boolean[256];
-
-        for (int i = 0; i < 256; i++) {
-            int p = simulatedBoard[i];
-            if (p != -1 && p != -2) {
-                int physicalId = -1;
-                for (int oi = 0; oi < 1024; oi++) {
-                    if (inventory.allOrientations[oi] == p) {
-                        physicalId = inventory.physicalMapping[oi];
-                        break;
-                    }
-                }
-                if (physicalId != -1) usedPhysical[physicalId] = true;
-            } else {
-                emptySpots.add(i);
-            }
-        }
-
-        List<Integer> unusedPhysIds = new ArrayList<>();
-        for (int physId = 0; physId < 256; physId++) {
-            if (!usedPhysical[physId]) unusedPhysIds.add(physId);
-        }
-
-        Collections.shuffle(unusedPhysIds);
-
-        for (int spot : emptySpots) {
-            int row = spot / 16;
-            int col = spot % 16;
-            boolean atNorthEdge = (row == 0);
-            boolean atSouthEdge = (row == 15);
-            boolean atWestEdge = (col == 0);
-            boolean atEastEdge = (col == 15);
-
-            int bestBrikIndex = -1;
-            int bestOrientedPiece = -1;
-
-            for (int i = 0; i < unusedPhysIds.size(); i++) {
-                int physId = unusedPhysIds.get(i);
-                for (int oi = 0; oi < 1024; oi++) {
-                    if (inventory.physicalMapping[oi] == physId) {
-                        int p = inventory.allOrientations[oi];
-                        boolean match = true;
-                        if (atNorthEdge && PieceUtils.getNorth(p) != 0) match = false;
-                        if (atSouthEdge && PieceUtils.getSouth(p) != 0) match = false;
-                        if (atWestEdge && PieceUtils.getWest(p) != 0) match = false;
-                        if (atEastEdge && PieceUtils.getEast(p) != 0) match = false;
-                        if (match && row > 0 && simulatedBoard[spot - 16] != -1) {
-                            if (PieceUtils.getNorth(p) != PieceUtils.getSouth(simulatedBoard[spot - 16])) match = false;
-                        }
-                        if (match && col > 0 && simulatedBoard[spot - 1] != -1) {
-                            if (PieceUtils.getWest(p) != PieceUtils.getEast(simulatedBoard[spot - 1])) match = false;
-                        }
-                        if (match) {
-                            bestBrikIndex = i;
-                            bestOrientedPiece = p;
-                            break;
-                        }
-                    }
-                }
-                if (bestBrikIndex != -1) break;
-            }
-
-            // PASS 2: Fallback to EDGE ONLY match (Ignore internal neighbors, just keep borders flat)
-            if (bestBrikIndex == -1) {
-                for (int i = 0; i < unusedPhysIds.size(); i++) {
-                    int physId = unusedPhysIds.get(i);
-                    for (int oi = 0; oi < 1024; oi++) {
-                        if (inventory.physicalMapping[oi] == physId) {
-                            int p = inventory.allOrientations[oi];
-                            boolean match = true;
-                            if (atNorthEdge && PieceUtils.getNorth(p) != 0) match = false;
-                            if (atSouthEdge && PieceUtils.getSouth(p) != 0) match = false;
-                            if (atWestEdge && PieceUtils.getWest(p) != 0) match = false;
-                            if (atEastEdge && PieceUtils.getEast(p) != 0) match = false;
-
-                            if (match) {
-                                bestBrikIndex = i;
-                                bestOrientedPiece = p;
-                                break;
-                            }
-                        }
-                    }
-                    if (bestBrikIndex != -1) break;
-                }
-            }
-
-            // PASS 3: Ultimate Fallback - Just place anything so there isn't a hole!
-            if (bestBrikIndex != -1) {
-                simulatedBoard[spot] = bestOrientedPiece;
-                unusedPhysIds.remove(bestBrikIndex);
-            } else {
-                int fallbackPhysId = unusedPhysIds.remove(0);
-                for (int oi = 0; oi < 1024; oi++) {
-                    if (inventory.physicalMapping[oi] == fallbackPhysId) {
-                        simulatedBoard[spot] = inventory.allOrientations[oi];
-                        break;
-                    }
-                }
-            }
-        }
-
-        int totalConflicts = 0;
-        for (int row = 0; row < 16; row++) {
-            for (int col = 0; col < 16; col++) {
-                int idx = row * 16 + col;
-                int currentPiece = simulatedBoard[idx];
-                if (currentPiece == -1) continue;
-                if (col < 15) {
-                    int eastNeighbor = simulatedBoard[idx + 1];
-                    if (eastNeighbor != -1 && PieceUtils.getEast(currentPiece) != PieceUtils.getWest(eastNeighbor)) totalConflicts++;
-                }
-                if (row < 15) {
-                    int southNeighbor = simulatedBoard[idx + 16];
-                    if (southNeighbor != -1 && PieceUtils.getSouth(currentPiece) != PieceUtils.getNorth(southNeighbor)) totalConflicts++;
-                }
-            }
-        }
-
-        logger.info(">>> [FULL BOARD SCAN] Simulated an edge-aware fully laid board. Total internal edge conflicts: %d / 480", totalConflicts);
-        if (totalConflicts < 30) logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
-
-        saveFullBoardVariant(simulatedBoard, absoluteHighScore, totalConflicts);
+        // Force GUI to paint the hints immediately
+        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
     }
 
     private void handleVictory(int[] winningBoard) {
@@ -903,9 +1047,11 @@ public class EternitySolver implements Runnable {
         for (int s = deepestStep; s < 256; s++) {
             bestBoard[buildOrder[s]] = -1;
         }
-        if (lockCenter) bestBoard[135] = targetPiece;
-        for (int h = 0; h < 4; h++) {
-            if (hintPackedValues[h] != -1) bestBoard[HINT_POSITIONS[h]] = hintPackedValues[h];
+        if (lockCenter) {
+            bestBoard[135] = targetPiece;
+            for (int h = 0; h < 4; h++) {
+                if (hintPackedValues[h] != -1) bestBoard[HINT_POSITIONS[h]] = hintPackedValues[h];
+            }
         }
         updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
         if (logMessage != null) logger.info(logMessage);
@@ -1041,7 +1187,11 @@ public class EternitySolver implements Runnable {
                     int[] neighbors = {idx, idx + 1, idx + 16, idx - 1, idx - 16};
                     for (int n : neighbors) {
                         if (n >= 0 && n < 256) {
-                            if (n != 135 && n != 221 && n != 45 && n != 210 && n != 34) rescuedBoard[n] = -1;
+                            // BUG FIX: Only protect the static locks if the Master Switch is ON!
+                            if (this.lockCenter && (n == 135 || n == 221 || n == 45 || n == 210 || n == 34)) {
+                                continue;
+                            }
+                            rescuedBoard[n] = -1;
                         }
                     }
                 }
@@ -1053,6 +1203,22 @@ public class EternitySolver implements Runnable {
         }
         System.arraycopy(rescuedBoard, 0, corruptedBoard, 0, 256);
         return validPieces;
+    }
+
+    /**
+     * Re-applies the Center Piece and the 4 Hint Pieces to any board array.
+     * This is necessary because the GPU kernel only writes the path it explored,
+     * leaving unexplored hint positions as -1 (empty holes).
+     */
+    private void applyStaticLocks(int[] board) {
+        if (this.lockCenter) {
+            board[135] = targetPiece;
+            for (int h = 0; h < 4; h++) {
+                if (hintPackedValues[h] != -1) {
+                    board[HINT_POSITIONS[h]] = hintPackedValues[h];
+                }
+            }
+        }
     }
 
     private void generateSpiralOrder() {
@@ -1129,12 +1295,14 @@ public class EternitySolver implements Runnable {
             if (lockCenter) {
                 localBoard[135] = targetPiece;
                 if (centerPhysicalIdx != -1) localUsed[centerPhysicalIdx] = true;
-            }
-            for (int h = 0; h < 4; h++) {
-                int packed = hintPackedValues[h];
-                if (packed != -1) {
-                    localBoard[HINT_POSITIONS[h]] = packed;
-                    localUsed[hintPhysicalIndices[h]] = true;
+                for (int h = 0; h < 4; h++) {
+                    int packed = hintPackedValues[h];
+                    if (packed != -1) {
+                        localBoard[HINT_POSITIONS[h]] = packed;
+                        if (hintPhysicalIndices[h] != -1) {
+                            localUsed[hintPhysicalIndices[h]] = true;
+                        }
+                    }
                 }
             }
         }

@@ -194,8 +194,8 @@ extern "C" __global__ void solvePBP(
 
         int boardIdx = d_buildOrder[step];
 
-        if ((lockCenterFlag == 1 && boardIdx == 135) ||
-            boardIdx == 221 || boardIdx == 45 || boardIdx == 210 || boardIdx == 34) {
+        if (lockCenterFlag == 1 && (boardIdx == 135 ||
+            boardIdx == 221 || boardIdx == 45 || boardIdx == 210 || boardIdx == 34)) {
             step++;
             continue;
         }
@@ -286,8 +286,8 @@ extern "C" __global__ void solvePBP(
 
             while (step >= startingStep) {
                 int undoIdx = d_buildOrder[step];
-                if ((lockCenterFlag == 1 && undoIdx == 135) ||
-                    undoIdx == 221 || undoIdx == 45 || undoIdx == 210 || undoIdx == 34) {
+                if (lockCenterFlag == 1 && (undoIdx == 135 ||
+                    undoIdx == 221 || undoIdx == 45 || undoIdx == 210 || undoIdx == 34)) {
                     step--;
                 } else {
                     break;
