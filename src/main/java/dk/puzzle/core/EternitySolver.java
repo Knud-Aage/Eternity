@@ -56,13 +56,13 @@ public class EternitySolver implements Runnable {
 
     // Configuration Flags
     private boolean useGpu;
+    private long methodStartTime = 0;
     private final boolean lockCenter;
 
     // Threading and Concurrency
     private final ExecutorService executor;
     private ExecutorService gpuExecutor; // Dedicated GPU thread for Context safety
     private final int numCores;
-    private final int targetBatchSize = 50000;
     volatile int userBatchSizeOverride = -1;
     private final ConcurrentLinkedQueue<int[]> seedPool = new ConcurrentLinkedQueue<>();
     private final AtomicInteger currentBatchSize = new AtomicInteger(0);
@@ -112,8 +112,6 @@ public class EternitySolver implements Runnable {
 
     // HINT STRATEGY FIELDS
     private static final int[] HINT_POSITIONS = {221, 45, 210, 34};
-    private static final int[] HINT_PHYSICAL_INDICES = {248, 180, 254, 207};
-    private static final int[] HINT_ROTATIONS = {1, 0, 0, 0};
     private final int[] hintPackedValues = new int[] {-1, -1, -1, -1};
     private final int[] hintPhysicalIndices = new int[] {-1, -1, -1, -1};
     private int findPackedPiece(int physicalNumber, int targetRotation) {
@@ -512,6 +510,9 @@ public class EternitySolver implements Runnable {
     }
 
     private void runPhase2_GpuDeepDfs() {
+        // Use the class-level field instead of a local variable
+        methodStartTime = System.currentTimeMillis();
+
         int activeBatch = getDynamicBatchSize();
         if (userBatchSizeOverride > 0) activeBatch = userBatchSizeOverride;
 
@@ -522,28 +523,17 @@ public class EternitySolver implements Runnable {
         }
         if (seeds.isEmpty()) return;
 
-        int scoreBefore = deepestStep;
         int[] bestBoardOut = new int[256];
         isGpuBusy = true;
-        long start = System.currentTimeMillis();
+
         GpuEngine.GpuResult result = null;
 
         try {
             Future<GpuEngine.GpuResult> future = gpuExecutor.submit(() ->
                     gpuEngine.runDeepDfs(seeds, currentSeedDepth, deepestStep, bestBoardOut, buildOrder)
             );
-            // Timeout must cover a full kernel run. With 1M steps and lookahead,
-            // each batch takes ~4-40 minutes depending on STEP_BUDGET in the .cu file.
-            // 10 seconds was killing every run before it could finish.
             result = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
-        } catch (java.util.concurrent.TimeoutException e) {
-            logger.warn(">>> [GPU TIMEOUT] Phase 2 Kernel locked up after 10 minutes! Triggering structural teardown and rebooting GPU...");
-            isGpuBusy = false;
-            rebootGpuEngine();
-            triggerBranchScrap();
-            return;
         } catch (Exception e) {
-            logger.error(">>> [GPU ERROR] Pipeline crashed during Phase 2: " + e.getMessage());
             isGpuBusy = false;
             rebootGpuEngine();
             triggerBranchScrap();
@@ -551,80 +541,50 @@ public class EternitySolver implements Runnable {
         }
 
         applyStaticLocks(bestBoardOut);
-
-        if (result.newHighScore() > lastReportedDepth) {
-            logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
-            lastReportedDepth = result.newHighScore();
-        }
         globalGpuTrialCount.addAndGet(result.stepsTaken());
         isGpuBusy = false;
 
-        long elapsed = System.currentTimeMillis() - start;
-        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d", Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
+        // --- CALCULATION USING CLASS-LEVEL FIELD ---
+        long elapsed = System.currentTimeMillis() - methodStartTime;
+        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
+                Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
 
         if (result.solved()) handleVictory(bestBoardOut);
 
-        if (result.newHighScore() > scoreBefore) {
-            if (!verifyBoardStrict(bestBoardOut)) {
-                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict!");
-                int piecesPlaced = countPieces(bestBoardOut);
+        if (result.newHighScore() > absoluteHighScore) {
+            int hash = Arrays.hashCode(bestBoardOut);
+            logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %d", result.newHighScore(), hash);
 
-                if (piecesPlaced >= 240) {
-                    logger.info(">>> [RESCUE] High-score board (" + piecesPlaced + ") detected. Executing emergency surgery...");
-                    int validPieces = rescueBoard(bestBoardOut);
-                    if (validPieces > deepestStep) {
-                        deepestStep = validPieces;
-                        System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
-                        topBoards.offer(bestBoardOut, deepestStep);
-                        updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
-                    }
-                } else {
-                    fatalGpuBugCount++;
-                    if (fatalGpuBugCount > 50) {
-                        triggerBranchScrap();
-                        fatalGpuBugCount = 0;
-                    }
-                }
-                return;
-            }
             deepestStep = result.newHighScore();
+            absoluteHighScore = deepestStep;
+            lastReportedDepth = absoluteHighScore;
             consecutiveGpuStagnation = 0;
 
-            System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
+            System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+
             topBoards.offer(bestBoardOut, deepestStep);
-            updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
+            updateDisplay(deepestStep, buildDisplayBoard(globalBestBoard));
 
-            if (deepestStep > absoluteHighScore) {
-                absoluteHighScore = deepestStep;
-                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
-                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-                consecutiveExtinctions = 0;
-                uniqueMaxScoreHashes.clear();
-                uniqueMaxScoreHashes.add(Arrays.hashCode(bestBoardOut));
-                saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
-                analyzeFullBoardPotential(globalBestBoard);
+            uniqueMaxScoreHashes.clear();
+            uniqueMaxScoreHashes.add(hash);
 
-            } else if (deepestStep == absoluteHighScore) {
-                if (uniqueMaxScoreHashes.add(Arrays.hashCode(bestBoardOut))) {
-                    analyzeFullBoardPotential(bestBoardOut);
-                }
-            }
+            RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
+            saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+            analyzeFullBoardPotential(globalBestBoard);
         } else {
             consecutiveGpuStagnation++;
         }
 
-        if (consecutiveGpuStagnation < 10) {
-            List<int[]> nextSeeds = SeedSelector.selectBest(
-                    seeds, result.threadDepths(), getDynamicBatchSize(), new Random());
-            seedPool.addAll(nextSeeds);
+        if (consecutiveGpuStagnation < 4) {
+            seedPool.addAll(SeedSelector.selectBest(seeds, result.threadDepths(), getDynamicBatchSize(), new Random()));
             currentBatchSize.set(seedPool.size());
         } else {
-            logger.warn(">>> [!!!] Phase 2 GPU stagnated! Trapped below LNS threshold. Activating Teardown...");
             triggerBranchScrap();
         }
     }
 
     private void runPhase3_GpuSurgeon() {
+        long start = System.currentTimeMillis();
         int numClones = 50000;
         int holesToPunch = userSurgeonHoles;
 
@@ -680,18 +640,33 @@ public class EternitySolver implements Runnable {
 
         applyStaticLocks(bestBoardOut);
 
-        if (result.newHighScore() > lastReportedDepth) {
-            logger.info(">>> [CLIMBING] Current pieces placed: %d / 256", result.newHighScore());
-            lastReportedDepth = result.newHighScore();
-        }
+// --- 1. METRICS & VICTORY CHECK ---
         globalGpuTrialCount.addAndGet(result.stepsTaken());
+        isGpuBusy = false;
+
+        // We declare the timer here, immediately before the logging,
+        // using a unique name and a direct System call.
+        long calculationElapsed = System.currentTimeMillis() - start;
+
+        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
+                Math.round((double) result.stepsTaken() * 1000) / Math.max(1, calculationElapsed));
 
         if (result.solved()) handleVictory(bestBoardOut);
+        // --- 2. THE STRICT GPU ECHO FILTER ---
+        // GpuEngine.java ONLY updates bestBoardOut if it strictly beats absoluteHighScore.
+        // Therefore, we ignore EVERYTHING unless it beats the absolute global record.
+        if (result.newHighScore() > absoluteHighScore) {
 
-        if (result.newHighScore() > scoreBefore) {
+            int hash = Arrays.hashCode(bestBoardOut);
+            logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %d", result.newHighScore(), hash);
+            System.out.printf(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %d%n", result.newHighScore(), hash);
+
             if (!verifyBoardStrict(bestBoardOut)) {
+                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict!");
                 int piecesPlaced = countPieces(bestBoardOut);
+
                 if (piecesPlaced >= 240) {
+                    logger.info(">>> [RESCUE] High-score board (" + piecesPlaced + ") detected. Executing emergency surgery...");
                     int validPieces = rescueBoard(bestBoardOut);
                     if (validPieces > deepestStep) {
                         deepestStep = validPieces;
@@ -708,33 +683,36 @@ public class EternitySolver implements Runnable {
                 }
                 return;
             }
+
+            // --- 3. APPLY NEW GLOBAL RECORD ---
             deepestStep = result.newHighScore();
-            updateTabuList(bestBoardOut);
+            absoluteHighScore = deepestStep;
+            lastReportedDepth = absoluteHighScore;
+
+            consecutiveGpuStagnation = 0;
+            consecutiveExtinctions = 0;
+
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
+            System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+
             topBoards.offer(bestBoardOut, deepestStep);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
-            if (deepestStep > absoluteHighScore) {
-                absoluteHighScore = deepestStep;
-                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
-                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-                consecutiveExtinctions = 0;
-                saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
-                analyzeFullBoardPotential(globalBestBoard);
-            } else if (deepestStep == absoluteHighScore) {
-                if (uniqueMaxScoreHashes.add(Arrays.hashCode(bestBoardOut))) {
-                    analyzeFullBoardPotential(bestBoardOut);
-                } else {
-                    consecutiveExtinctions++;
-                    updateTabuList(bestBoardOut);
-                }
-            } else {
-                consecutiveExtinctions++;
-                updateTabuList(bestBoardOut);
-            }
+            uniqueMaxScoreHashes.clear();
+            uniqueMaxScoreHashes.add(hash);
+
+            RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
+            saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+            analyzeFullBoardPotential(globalBestBoard);
+
         } else {
-            consecutiveExtinctions++;
-            if (consecutiveExtinctions >= 20) triggerBranchScrap();
+            // The GPU failed to beat the absolute global high score.
+            // The bestBoardOut array is stale. Ignore it and increment stagnation.
+            consecutiveGpuStagnation++;
+        }
+        if (consecutiveGpuStagnation >= 4) {
+            logger.warn(">>> [!!!] Surgeon stagnated! Activating Teardown...");
+            triggerBranchScrap();
         }
     }
 
@@ -742,6 +720,7 @@ public class EternitySolver implements Runnable {
         int tenureLength = 5 + (absoluteHighScore / 25);
         for (int i = 0; i < 256; i++) {
             // BUG FIX: Only apply infinite Tabu ban if we are playing with locked pieces!
+
             if (this.lockCenter && (i == 135 || i == 221 || i == 45 || i == 210 || i == 34)) {
                 tabuTenure[i] = Integer.MAX_VALUE;
                 continue;
@@ -929,7 +908,13 @@ public class EternitySolver implements Runnable {
         lastReportedDepth = lockedPieces;
 
         if (lockedPieces == 0) {
-            poisonedIndex = buildOrder[0];
+            // On full reset, ban the first piece AND randomise which early position
+            // gets poisoned so CPU workers are forced down different structural paths.
+            // Banning only position 0 is not enough — workers converge back to the
+            // same board via a slightly different first step.
+            int banDepth = Math.min(5 + consecutiveExtinctions, 20);
+            int banStep  = new Random().nextInt(Math.max(1, banDepth));
+            poisonedIndex = buildOrder[banStep];
             poisonedPiece = globalBestBoard[poisonedIndex];
 
             if (poisonedPiece != -1) {
@@ -940,10 +925,11 @@ public class EternitySolver implements Runnable {
                         break;
                     }
                 }
-                logger.info(">>> [GLOBAL TABU] Board reset! Banning physical piece #%d (packed: %d) at index %d.", physId, poisonedPiece, poisonedIndex);
+                logger.info(">>> [GLOBAL TABU] Full reset! Banning physical piece #%d at buildOrder[%d] (pos %d).",
+                        physId, banStep, poisonedIndex);
             }
         } else if (absoluteHighScore > lockedPieces + 5) {
-            poisonedIndex = buildOrder[lockedPieces + 2];
+            poisonedIndex = buildOrder[lockedPieces];
             poisonedPiece = globalBestBoard[poisonedIndex];
             logger.info(">>> [GLOBAL TABU] Poisoned Square Active! Piece %d is banned at index %d.", poisonedPiece, poisonedIndex);
         } else {
@@ -953,6 +939,14 @@ public class EternitySolver implements Runnable {
 
         // --- 1. RESET BOARD TO EMPTY ---
         Arrays.fill(flatResumeBoard, -1);
+        // On full reset (lockedPieces == 0): also wipe bestBoard so the solver
+        // doesn't silently re-anchor CPU workers to the stuck configuration.
+        // globalBestBoard is preserved for record-keeping but not used as a base camp.
+        if (lockedPieces == 0) {
+            Arrays.fill(bestBoard, -1);
+            applyStaticLocks(bestBoard);
+            logger.info(">>> [FULL RESET] bestBoard wiped. Exploring fresh territory.");
+        }
 
         // --- 2. HARD-INJECT THE HINTS DIRECTLY FROM COLORS ---
         if (lockCenter) {
@@ -1011,7 +1005,7 @@ public class EternitySolver implements Runnable {
         consecutiveGpuStagnation = 0;
         phaseCounter = 0; // RESET PHASE SCHEDULER
         clearTabu();
-
+        topBoards.clear();
         // Force GUI to paint the hints immediately
         updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
     }
@@ -1025,20 +1019,45 @@ public class EternitySolver implements Runnable {
         System.exit(0);
     }
 
+    /**
+     * Computes a position-weighted board fingerprint.
+     * Printed in the speed log so repeated boards are immediately visible.
+     * Two boards with the same pieces in different positions produce different hashes.
+     */
+    private int boardHash(int[] board) {
+        int h = 0;
+        for (int i = 0; i < 256; i++) {
+            if (board[i] != -1) {
+                h = h * 31 + (i * 1000003 ^ board[i]);
+            }
+        }
+        return h & 0x7FFFFFFF;
+    }
+
     private void reportSpeed() {
-        if (isGpuBusy) return;
+        // BUG FIX: Remove 'if (isGpuBusy) return;' completely!
+
         long now = System.currentTimeMillis();
         long elapsed = now - lastThroughputReportTime;
         if (elapsed < 2000) return;
 
         long cpuTrials = globalCpuTrialCount.getAndSet(0);
         long gpuTrials = globalGpuTrialCount.getAndSet(0);
+
+        // If neither the CPU nor GPU have reported new completed trials, do nothing.
+        // Importantly, we DO NOT update the 'lastThroughputReportTime' here!
+        if (cpuTrials == 0 && gpuTrials == 0) {
+            return;
+        }
+
         double cpuTps = cpuTrials / (elapsed / 1000.0);
         double gpuTps = gpuTrials / (elapsed / 1000.0);
 
-        if (cpuTps != 0 || gpuTps != 0) {
-            logger.info("[SPEED] CPU Phase 1: %,.0f/s  |  GPU Phase 2/3: %,.0f/s", cpuTps, gpuTps);
-        }
+        int hash = boardHash(bestBoard);
+        logger.info("[SPEED] CPU: %,.0f/s  |  GPU: %,.0f/s  |  Pieces: %d  |  Hash: %08X",
+                cpuTps, gpuTps, deepestStep, hash);
+
+        // Only reset the timer after a successful log
         lastThroughputReportTime = now;
     }
 
@@ -1340,6 +1359,7 @@ public class EternitySolver implements Runnable {
                 synchronized (displayLock) {
                     if (step > deepestStep) {
                         deepestStep = step;
+                        System.arraycopy(localBoard, 0, bestBoard, 0, 256);
                         updateDisplay(deepestStep, buildDisplayBoard(localBoard));
                         if (!useGpu && deepestStep > absoluteHighScore) {
                             absoluteHighScore = deepestStep;
