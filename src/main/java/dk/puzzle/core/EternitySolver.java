@@ -72,7 +72,7 @@ public class EternitySolver implements Runnable {
     // Board State
     private final int[] flatResumeBoard = new int[256];
     private final boolean[] usedPhysicalPieces = new boolean[256];
-    final int[] tabuTenure = new int[256];
+//    final int[] tabuTenure = new int[256];
     final int[] buildOrder = new int[256];
     final int[] bestBoard = new int[256];
     final int[] globalBestBoard = new int[256];
@@ -133,7 +133,7 @@ public class EternitySolver implements Runnable {
 
         if (loadedState != null) {
             restoreBoardState(loadedState.bestBoard);
-            System.arraycopy(loadedState.tabuTenure, 0, this.tabuTenure, 0, 256);
+//            System.arraycopy(loadedState.tabuTenure, 0, this.tabuTenure, 0, 256);
             this.uniqueMaxScoreHashes.addAll(loadedState.uniqueMaxScoreHashes);
             for (int[] historicBoard : loadedState.topBoardsRegistry) {
                 this.topBoards.offer(historicBoard, loadedState.score);
@@ -366,7 +366,6 @@ public class EternitySolver implements Runnable {
                 SolverState memoryToSave = new SolverState(
                         buildDisplayBoard(globalBestBoard),
                         absoluteHighScore,
-                        this.tabuTenure,
                         this.uniqueMaxScoreHashes,
                         this.topBoards.getRawRegistry()
                 );
@@ -417,9 +416,11 @@ public class EternitySolver implements Runnable {
                             runPhase2_GpuDeepDfs();
                         } else if (!seedsReady) {
                             runPhase1_CpuSeedGen();
-                        } else {
+                        } else if (deepestStep >= absoluteHighScore - 10) {
                             runPhase3_GpuSurgeon();
                             phaseCounter++;
+                        } else {
+                            phaseCounter = 0;
                         }
                     } else if (seedPool.size() >= activeBatch) {
                         runPhase2_GpuDeepDfs();
@@ -441,7 +442,6 @@ public class EternitySolver implements Runnable {
                         SolverState memoryToSave = new SolverState(
                                 buildDisplayBoard(globalBestBoard),
                                 absoluteHighScore,
-                                this.tabuTenure,
                                 this.uniqueMaxScoreHashes,
                                 this.topBoards.getRawRegistry()
                         );
@@ -499,12 +499,6 @@ public class EternitySolver implements Runnable {
                 logger.warn(">>> [CPU DEADLOCK] Exhausted branch without finding a solution. Tearing down...");
                 consecutiveExtinctions++;
                 triggerBranchScrap();
-            } else {
-                if (poisonedIndex != -1) {
-                    logger.info(">>> [TABU] CPU successfully bypassed the dead end. Global Tabu lifted.");
-                    poisonedIndex = -1;
-                    poisonedPiece = -1;
-                }
             }
         } catch (InterruptedException e) {}
     }
@@ -551,34 +545,53 @@ public class EternitySolver implements Runnable {
 
         if (result.solved()) handleVictory(bestBoardOut);
 
-        if (result.newHighScore() > absoluteHighScore) {
-            int hash = Arrays.hashCode(bestBoardOut);
-            logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %d", result.newHighScore(), hash);
+        if (result.solved()) handleVictory(bestBoardOut);
 
+        // --- CORRECTED RESULT LOGIC: Check against LOCAL deepest step, not just Global ---
+        if (result.newHighScore() > deepestStep) {
+
+            // 1. Accept the GPU's local progress!
             deepestStep = result.newHighScore();
-            absoluteHighScore = deepestStep;
-            lastReportedDepth = absoluteHighScore;
             consecutiveGpuStagnation = 0;
+            consecutiveExtinctions = 0;
 
-            System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+            System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
+            updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
-            topBoards.offer(bestBoardOut, deepestStep);
-            updateDisplay(deepestStep, buildDisplayBoard(globalBestBoard));
+            // Log the local climb so you can watch it rise from 14 back to 200+
+            if (deepestStep > lastReportedDepth) {
+                logger.info(">>> [CLIMBING] Depth: %d / 256 | Board Hash: %08X", deepestStep, Arrays.hashCode(bestBoard));
+                lastReportedDepth = deepestStep;
+            }
 
-            uniqueMaxScoreHashes.clear();
-            uniqueMaxScoreHashes.add(hash);
+            // 2. ONLY if it beats the Global Record do we save to disk
+            if (deepestStep > absoluteHighScore) {
+                absoluteHighScore = deepestStep;
+                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
 
-            RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-            saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
-            analyzeFullBoardPotential(globalBestBoard);
+                int hash = Arrays.hashCode(globalBestBoard);
+                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", absoluteHighScore, hash);
+
+                uniqueMaxScoreHashes.clear();
+                uniqueMaxScoreHashes.add(hash);
+
+                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
+                saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                analyzeFullBoardPotential(globalBestBoard);
+            }
+
         } else {
+            // The GPU completely failed to beat the current local depth.
             consecutiveGpuStagnation++;
         }
 
+        // --- Seed generation for the next batch ---
         if (consecutiveGpuStagnation < 4) {
             seedPool.addAll(SeedSelector.selectBest(seeds, result.threadDepths(), getDynamicBatchSize(), new Random()));
             currentBatchSize.set(seedPool.size());
         } else {
+            logger.warn(">>> [!!!] Phase 2 GPU stagnated! Activating Teardown...");
+            consecutiveExtinctions++;
             triggerBranchScrap();
         }
     }
@@ -613,7 +626,7 @@ public class EternitySolver implements Runnable {
         }
         actualHoles = Math.clamp(actualHoles, 1, deepestStep - 5); // safety clamp
         List<int[]> variations = surgeon.excavateFrontier(
-                sourceBoard, numClones, actualHoles, tabuTenure, currentRepairIteration, deepestStep, buildOrder);
+                sourceBoard, numClones, actualHoles, currentRepairIteration, deepestStep, buildOrder);
 
         int scoreBefore = deepestStep;
         int[] bestBoardOut = new int[256];
@@ -711,29 +724,30 @@ public class EternitySolver implements Runnable {
             consecutiveGpuStagnation++;
         }
         if (consecutiveGpuStagnation >= 4) {
-            logger.warn(">>> [!!!] Surgeon stagnated! Activating Teardown...");
+            logger.warn(">>> [!!!] Phase 2 GPU stagnated! Activating Teardown...");
+            consecutiveExtinctions++; // Force the drop amount to grow!
             triggerBranchScrap();
         }
     }
 
-    void updateTabuList(int[] newBoard) {
-        int tenureLength = 5 + (absoluteHighScore / 25);
-        for (int i = 0; i < 256; i++) {
-            // BUG FIX: Only apply infinite Tabu ban if we are playing with locked pieces!
+//    void updateTabuList(int[] newBoard) {
+//        int tenureLength = 5 + (absoluteHighScore / 25);
+//        for (int i = 0; i < 256; i++) {
+//            // BUG FIX: Only apply infinite Tabu ban if we are playing with locked pieces!
+//
+//            if (this.lockCenter && (i == 135 || i == 221 || i == 45 || i == 210 || i == 34)) {
+//                tabuTenure[i] = Integer.MAX_VALUE;
+//                continue;
+//            }
+//            if (newBoard[i] != bestBoard[i] && newBoard[i] != -1) {
+//                tabuTenure[i] = currentRepairIteration + tenureLength;
+//            }
+//        }
+//    }
 
-            if (this.lockCenter && (i == 135 || i == 221 || i == 45 || i == 210 || i == 34)) {
-                tabuTenure[i] = Integer.MAX_VALUE;
-                continue;
-            }
-            if (newBoard[i] != bestBoard[i] && newBoard[i] != -1) {
-                tabuTenure[i] = currentRepairIteration + tenureLength;
-            }
-        }
-    }
-
-    void clearTabu() {
-        Arrays.fill(tabuTenure, 0);
-    }
+//    void clearTabu() {
+//        Arrays.fill(tabuTenure, 0);
+//    }
 
     private void analyzeFullBoardPotential(int[] recordBoard) {
         int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
@@ -881,134 +895,191 @@ public class EternitySolver implements Runnable {
         saveFullBoardVariant(simulatedBoard, absoluteHighScore, totalConflicts);
     }
 
+//    private void triggerBranchScrap() {
+//        consecutiveExtinctions++;
+//        String phaseName = this.useGpu ? "PHASE 3 (GPU)" : "CPU DEEP SEARCH";
+//        logger.info(">>> [!!!] DEAD END AT %s (Stagnation level: %d) [!!!]", phaseName, consecutiveExtinctions);
+//
+//        int minRetreat = 10 + (consecutiveExtinctions * 5);
+//        int maxRetreat = minRetreat + 15;
+//        int retreatAmount;
+//
+//        if (consecutiveExtinctions > 25 || absoluteHighScore == 0) {
+//            retreatAmount = absoluteHighScore;
+//        } else {
+//            Random rand = new Random();
+//            retreatAmount = minRetreat + rand.nextInt(maxRetreat - minRetreat + 1);
+//        }
+//
+//        int lockedPieces = Math.max(0, absoluteHighScore - retreatAmount);
+//
+//        if (consecutiveExtinctions > 25 || absoluteHighScore == 0) {
+//            lockedPieces = 0;
+//            retreatAmount = absoluteHighScore;
+//            consecutiveExtinctions = 0;
+//        }
+//
+//        lastReportedDepth = lockedPieces;
+//
+//        if (lockedPieces == 0) {
+//            // On full reset, ban the first piece AND randomise which early position
+//            // gets poisoned so CPU workers are forced down different structural paths.
+//            // Banning only position 0 is not enough — workers converge back to the
+//            // same board via a slightly different first step.
+//            int banDepth = Math.min(5 + consecutiveExtinctions, 20);
+//            int banStep  = new Random().nextInt(Math.max(1, banDepth));
+//            poisonedIndex = buildOrder[banStep];
+//            poisonedPiece = globalBestBoard[poisonedIndex];
+//
+//            if (poisonedPiece != -1) {
+//                int physId = -1;
+//                for (int i = 0; i < 1024; i++) {
+//                    if (inventory.allOrientations[i] == poisonedPiece) {
+//                        physId = inventory.physicalMapping[i] + 1;
+//                        break;
+//                    }
+//                }
+//                logger.info(">>> [GLOBAL TABU] Full reset! Banning physical piece #%d at buildOrder[%d] (pos %d).",
+//                        physId, banStep, poisonedIndex);
+//            }
+//        } else if (absoluteHighScore > lockedPieces + 5) {
+//            poisonedIndex = buildOrder[lockedPieces];
+//            poisonedPiece = globalBestBoard[poisonedIndex];
+//            logger.info(">>> [GLOBAL TABU] Poisoned Square Active! Piece %d is banned at index %d.", poisonedPiece, poisonedIndex);
+//        } else {
+//            poisonedIndex = -1;
+//            poisonedPiece = -1;
+//        }
+//
+//        // --- 1. RESET BOARD TO EMPTY ---
+//        Arrays.fill(flatResumeBoard, -1);
+//        // On full reset (lockedPieces == 0): also wipe bestBoard so the solver
+//        // doesn't silently re-anchor CPU workers to the stuck configuration.
+//        // globalBestBoard is preserved for record-keeping but not used as a base camp.
+//        if (lockedPieces == 0) {
+//            Arrays.fill(bestBoard, -1);
+//            applyStaticLocks(bestBoard);
+//            logger.info(">>> [FULL RESET] bestBoard wiped. Exploring fresh territory.");
+//        }
+//
+//        // --- 2. HARD-INJECT THE HINTS DIRECTLY FROM COLORS ---
+//        if (lockCenter) {
+//            flatResumeBoard[135] = targetPiece;
+//
+//            // Hard-coded edge definitions to bypass variable initialization issues
+//            // Format: {North, East, South, West, PositionIndex}
+//            int[][] officialHints = {
+//                    {8, 2, 3, 10, 221}, {3, 13, 6, 8, 45},
+//                    {13, 10, 11, 18, 210}, {10, 20, 18, 16, 34}
+//            };
+//
+//            for (int[] hint : officialHints) {
+//                int packed = -1;
+//                for(int oi=0; oi<1024; oi++) {
+//                    int p = inventory.allOrientations[oi];
+//                    // Look for the exact color match on all 4 sides
+//                    if (PieceUtils.getNorth(p) == hint[0] && PieceUtils.getEast(p) == hint[1] &&
+//                            PieceUtils.getSouth(p) == hint[2] && PieceUtils.getWest(p) == hint[3]) {
+//                        packed = p;
+//                        break;
+//                    }
+//                }
+//                if (packed != -1) {
+//                    flatResumeBoard[hint[4]] = packed;
+//                }
+//            }
+//        }
+//
+//// --- 3. RE-FILL PREVIOUS WORK ON TOP ---
+//        for (int step = 0; step < lockedPieces; step++) {
+//            int idx = buildOrder[step];
+//            if (lockCenter && idx == 135) continue;
+//
+//            // Only protect hint spots IF we are actually playing with hints!
+//            boolean isHint = false;
+//            if (lockCenter) {
+//                for(int h : HINT_POSITIONS) {
+//                    if(idx == h) {
+//                        isHint = true;
+//                        break;
+//                    }
+//                }
+//            }
+//            if(!isHint) {
+//                flatResumeBoard[idx] = globalBestBoard[idx];
+//            }
+//        }
+//
+//        // Final safety net
+//        applyStaticLocks(flatResumeBoard);
+//
+//        deepestStep = Math.max(0, lockedPieces);
+//        seedPool.clear();
+//        currentBatchSize.set(0);
+//        consecutiveGpuStagnation = 0;
+//        phaseCounter = 0; // RESET PHASE SCHEDULER
+////        clearTabu();
+//        topBoards.clear();
+//        // Force GUI to paint the hints immediately
+//        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
+//    }
+
     private void triggerBranchScrap() {
-        consecutiveExtinctions++;
-        String phaseName = this.useGpu ? "PHASE 3 (GPU)" : "CPU DEEP SEARCH";
-        logger.info(">>> [!!!] DEAD END AT %s (Stagnation level: %d) [!!!]", phaseName, consecutiveExtinctions);
+    // 1. CHUNK TEARDOWN (Breaks the Yo-Yo Loop)
+    // We always increment the extinction counter and drop by a large chunk (10+ pieces).
+    // This gives the CPU a wide enough space to actually find a new path.
+    consecutiveExtinctions++;
+    int dropAmount = 10 + (consecutiveExtinctions * 5);
+    int lockedPieces = Math.max(0, deepestStep - dropAmount);
 
-        int minRetreat = 10 + (consecutiveExtinctions * 5);
-        int maxRetreat = minRetreat + 15;
-        int retreatAmount;
-
-        if (consecutiveExtinctions > 25 || absoluteHighScore == 0) {
-            retreatAmount = absoluteHighScore;
-        } else {
-            Random rand = new Random();
-            retreatAmount = minRetreat + rand.nextInt(maxRetreat - minRetreat + 1);
+    // 2. THE SINGLE POISON BAN
+    if (lockedPieces > 0) {
+        poisonedIndex = buildOrder[lockedPieces];
+        poisonedPiece = bestBoard[poisonedIndex];
+        if (poisonedPiece == -1) {
+            poisonedPiece = flatResumeBoard[poisonedIndex]; // Fallback
         }
-
-        int lockedPieces = Math.max(0, absoluteHighScore - retreatAmount);
-
-        if (consecutiveExtinctions > 25 || absoluteHighScore == 0) {
-            lockedPieces = 0;
-            retreatAmount = absoluteHighScore;
-            consecutiveExtinctions = 0;
-        }
-
-        lastReportedDepth = lockedPieces;
-
-        if (lockedPieces == 0) {
-            // On full reset, ban the first piece AND randomise which early position
-            // gets poisoned so CPU workers are forced down different structural paths.
-            // Banning only position 0 is not enough — workers converge back to the
-            // same board via a slightly different first step.
-            int banDepth = Math.min(5 + consecutiveExtinctions, 20);
-            int banStep  = new Random().nextInt(Math.max(1, banDepth));
-            poisonedIndex = buildOrder[banStep];
-            poisonedPiece = globalBestBoard[poisonedIndex];
-
-            if (poisonedPiece != -1) {
-                int physId = -1;
-                for (int i = 0; i < 1024; i++) {
-                    if (inventory.allOrientations[i] == poisonedPiece) {
-                        physId = inventory.physicalMapping[i] + 1;
-                        break;
-                    }
-                }
-                logger.info(">>> [GLOBAL TABU] Full reset! Banning physical piece #%d at buildOrder[%d] (pos %d).",
-                        physId, banStep, poisonedIndex);
-            }
-        } else if (absoluteHighScore > lockedPieces + 5) {
-            poisonedIndex = buildOrder[lockedPieces];
-            poisonedPiece = globalBestBoard[poisonedIndex];
-            logger.info(">>> [GLOBAL TABU] Poisoned Square Active! Piece %d is banned at index %d.", poisonedPiece, poisonedIndex);
-        } else {
-            poisonedIndex = -1;
-            poisonedPiece = -1;
-        }
-
-        // --- 1. RESET BOARD TO EMPTY ---
-        Arrays.fill(flatResumeBoard, -1);
-        // On full reset (lockedPieces == 0): also wipe bestBoard so the solver
-        // doesn't silently re-anchor CPU workers to the stuck configuration.
-        // globalBestBoard is preserved for record-keeping but not used as a base camp.
-        if (lockedPieces == 0) {
-            Arrays.fill(bestBoard, -1);
-            applyStaticLocks(bestBoard);
-            logger.info(">>> [FULL RESET] bestBoard wiped. Exploring fresh territory.");
-        }
-
-        // --- 2. HARD-INJECT THE HINTS DIRECTLY FROM COLORS ---
-        if (lockCenter) {
-            flatResumeBoard[135] = targetPiece;
-
-            // Hard-coded edge definitions to bypass variable initialization issues
-            // Format: {North, East, South, West, PositionIndex}
-            int[][] officialHints = {
-                    {8, 2, 3, 10, 221}, {3, 13, 6, 8, 45},
-                    {13, 10, 11, 18, 210}, {10, 20, 18, 16, 34}
-            };
-
-            for (int[] hint : officialHints) {
-                int packed = -1;
-                for(int oi=0; oi<1024; oi++) {
-                    int p = inventory.allOrientations[oi];
-                    // Look for the exact color match on all 4 sides
-                    if (PieceUtils.getNorth(p) == hint[0] && PieceUtils.getEast(p) == hint[1] &&
-                            PieceUtils.getSouth(p) == hint[2] && PieceUtils.getWest(p) == hint[3]) {
-                        packed = p;
-                        break;
-                    }
-                }
-                if (packed != -1) {
-                    flatResumeBoard[hint[4]] = packed;
-                }
-            }
-        }
-
-// --- 3. RE-FILL PREVIOUS WORK ON TOP ---
-        for (int step = 0; step < lockedPieces; step++) {
-            int idx = buildOrder[step];
-            if (lockCenter && idx == 135) continue;
-
-            // Only protect hint spots IF we are actually playing with hints!
-            boolean isHint = false;
-            if (lockCenter) {
-                for(int h : HINT_POSITIONS) {
-                    if(idx == h) {
-                        isHint = true;
-                        break;
-                    }
-                }
-            }
-            if(!isHint) {
-                flatResumeBoard[idx] = globalBestBoard[idx];
-            }
-        }
-
-        // Final safety net
-        applyStaticLocks(flatResumeBoard);
-
-        deepestStep = Math.max(0, lockedPieces);
-        seedPool.clear();
-        currentBatchSize.set(0);
-        consecutiveGpuStagnation = 0;
-        phaseCounter = 0; // RESET PHASE SCHEDULER
-        clearTabu();
-        topBoards.clear();
-        // Force GUI to paint the hints immediately
-        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
+        logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping %d pieces to depth %d.", dropAmount, lockedPieces);
+    } else {
+        // BOTTOM OUT SAFETY
+        lockedPieces = 0;
+        poisonedIndex = -1;
+        poisonedPiece = -1;
+        consecutiveExtinctions = 0;
     }
+
+    // 3. REBUILD THE CPU MEMORY
+    Arrays.fill(flatResumeBoard, -1);
+    for (int step = 0; step < lockedPieces; step++) {
+        int idx = buildOrder[step];
+        boolean isStatic = (lockCenter && idx == 135);
+        if (lockCenter) {
+            for (int hPos : HINT_POSITIONS) {
+                if (idx == hPos) isStatic = true;
+            }
+        }
+        if (!isStatic) {
+            flatResumeBoard[idx] = bestBoard[idx];
+        }
+    }
+    applyStaticLocks(flatResumeBoard);
+
+    // 4. ERASE GHOST PIECES
+    for (int i = lockedPieces; i < 256; i++) {
+        int boardPos = buildOrder[i];
+        bestBoard[boardPos] = -1;
+    }
+
+    // 5. CLEAN ENGINE RESET
+    deepestStep = lockedPieces;
+    seedPool.clear();
+    currentBatchSize.set(0);
+    consecutiveGpuStagnation = 0;
+    phaseCounter = 0;
+
+    topBoards.clear();
+    updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
+}
 
     private void handleVictory(int[] winningBoard) {
         logger.info(">>> ETERNITY II SOLVED BY GPU PIPELINE!!! <<<");

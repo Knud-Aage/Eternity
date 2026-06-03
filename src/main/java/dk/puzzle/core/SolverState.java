@@ -11,14 +11,14 @@ public class SolverState implements Serializable {
     public final int score;
 
     // The "Memory" of the solver
-    public final int[] tabuTenure;
+//    public final int[] tabuTenure;
     public final Set<Integer> uniqueMaxScoreHashes;
     public final List<int[]> topBoardsRegistry;
 
-    public SolverState(int[][] bestBoard, int score, int[] tabuTenure, Set<Integer> uniqueHashes, List<int[]> registry) {
+    public SolverState(int[][] bestBoard, int score, Set<Integer> uniqueHashes, List<int[]> registry) {
         this.bestBoard = bestBoard;
         this.score = score;
-        this.tabuTenure = tabuTenure;
+//        this.tabuTenure = tabuTenure;
         this.uniqueMaxScoreHashes = uniqueHashes;
         this.topBoardsRegistry = registry;
     }

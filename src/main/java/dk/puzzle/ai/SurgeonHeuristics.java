@@ -168,7 +168,7 @@ public class SurgeonHeuristics {
      * @param buildOrder       The sequence of indices representing placement order.
      * @return A list of cloned boards with contiguous craters removed.
      */
-    public List<int[]> excavateFrontier(int[] bestBoard, int numClones, int numHoles, int[] tabuTenure, int currentIteration, int currentHighScore, int[] buildOrder) {
+    public List<int[]> excavateFrontier(int[] bestBoard, int numClones, int numHoles, int currentIteration, int currentHighScore, int[] buildOrder) {
         List<int[]> excavatedBoards = new ArrayList<>(numClones);
         Random rnd = new Random();
 
@@ -203,9 +203,9 @@ public class SurgeonHeuristics {
                     if (isLocked[current]) {
                         continue;
                     }
-                    if (tabuTenure[current] > currentIteration) {
-                        continue;
-                    }
+//                    if (tabuTenure[current] > currentIteration) {
+//                        continue;
+//                    }
 
                     toRemove.add(current);
                 }
