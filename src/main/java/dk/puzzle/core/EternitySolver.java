@@ -548,17 +548,25 @@ public class EternitySolver implements Runnable {
         if (result.solved()) handleVictory(bestBoardOut);
 
         // --- CORRECTED RESULT LOGIC: Check against LOCAL deepest step, not just Global ---
+// --- CORRECTED RESULT LOGIC: Check against LOCAL deepest step ---
         if (result.newHighScore() > deepestStep) {
 
             // 1. Accept the GPU's local progress!
             deepestStep = result.newHighScore();
             consecutiveGpuStagnation = 0;
-            consecutiveExtinctions = 0;
+
+            // --- BUG FIX: NO MORE PREMATURE CELEBRATION ---
+            // Remove the unconditional 'consecutiveExtinctions = 0;' that was here!
+            // We ONLY reset the escape counter if the branch is actually viable
+            // and climbs almost all the way back to the global record.
+            if (deepestStep >= absoluteHighScore - 5) {
+                consecutiveExtinctions = 0;
+            }
 
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
-            // Log the local climb so you can watch it rise from 14 back to 200+
+            // Log the local climb so you can watch it rise
             if (deepestStep > lastReportedDepth) {
                 logger.info(">>> [CLIMBING] Depth: %d / 256 | Board Hash: %08X", deepestStep, Arrays.hashCode(bestBoard));
                 lastReportedDepth = deepestStep;
