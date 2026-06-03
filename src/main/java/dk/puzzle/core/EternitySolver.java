@@ -584,7 +584,12 @@ public class EternitySolver implements Runnable {
                 uniqueMaxScoreHashes.add(hash);
 
                 RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-                saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                analyzeFullBoardPotential(globalBestBoard);
+                try {
+                    saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                } catch (Exception e) {
+                    logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
+                }
                 analyzeFullBoardPotential(globalBestBoard);
             }
 
@@ -1444,6 +1449,12 @@ public class EternitySolver implements Runnable {
                             absoluteHighScore = deepestStep;
                             System.arraycopy(localBoard, 0, globalBestBoard, 0, 256);
                             RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
+                            analyzeFullBoardPotential(globalBestBoard);
+                            try {
+                                saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                            } catch (Exception e) {
+                                logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
+                            }
                             consecutiveExtinctions = 0;
                             saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
                         }
