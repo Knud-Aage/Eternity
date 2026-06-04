@@ -13,6 +13,7 @@ import dk.puzzle.util.PieceUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import javax.swing.*;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
@@ -39,6 +40,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class EternitySolver implements Runnable {
 
+    private long lastDisplayUpdateTime = 0;
     public static final int SEED_DEPTH = 80;
     public static final int LNS_THRESHOLD = 200;
 
@@ -64,8 +66,8 @@ public class EternitySolver implements Runnable {
     private ExecutorService gpuExecutor; // Dedicated GPU thread for Context safety
     private final int numCores;
     volatile int userBatchSizeOverride = -1;
-    private final ConcurrentLinkedQueue<int[]> seedPool = new ConcurrentLinkedQueue<>();
-    private final AtomicInteger currentBatchSize = new AtomicInteger(0);
+    private final java.util.concurrent.LinkedBlockingQueue<int[]> seedPool = new java.util.concurrent.LinkedBlockingQueue<>();
+//    private final AtomicInteger currentBatchSize = new AtomicInteger(0);
     private int fatalGpuBugCount = 0;
     private final Object displayLock = new Object();
 
@@ -108,6 +110,13 @@ public class EternitySolver implements Runnable {
     volatile int stagnationLimitMinutes = 20;
     private volatile int poisonedIndex = -1;
     private volatile int poisonedPiece = -1;
+    /**
+     * The value of {@code consecutiveExtinctions} at which the current poison expires.
+     * The ban is lifted automatically when the extinction counter exceeds this value,
+     * ensuring the piece/position combination is reconsidered in future scrap cycles
+     * rather than being banned indefinitely.
+     */
+    private volatile int poisonExpiryExtinction = -1;
     private ScheduledExecutorService repairReporterScheduler;
 
     // HINT STRATEGY FIELDS
@@ -394,6 +403,10 @@ public class EternitySolver implements Runnable {
         logger.info(">>> Running 3-Phase Pipeline Orchestrator...");
         long lastPeriodicSave = System.currentTimeMillis();
 
+        // --- WATCHDOG MEMORY ---
+        long lastSeedGrowthTime = System.currentTimeMillis();
+        int lastSeedCount = 0;
+
         while (true) {
             try {
                 if (manualOverrideRequested) {
@@ -405,6 +418,30 @@ public class EternitySolver implements Runnable {
                 int activeBatch = getDynamicBatchSize();
                 if (userBatchSizeOverride > 0) activeBatch = userBatchSizeOverride;
 
+                // =========================================================
+                // --- THE ANTI-STARVATION WATCHDOG ---
+                // =========================================================
+                int currentSeeds = seedPool.size();
+                if (currentSeeds > lastSeedCount) {
+                    // The queue is actively growing. Reset the timer!
+                    lastSeedGrowthTime = System.currentTimeMillis();
+                    lastSeedCount = currentSeeds;
+                } else if (System.currentTimeMillis() - lastSeedGrowthTime > 5000) {
+                    // The queue hasn't grown in 5 seconds. The pipeline has jammed!
+                    if (currentSeeds > 0) {
+                        logger.warn(">>> Watchdog: Endgame Starvation! Forcing partial batch of " + currentSeeds + " to GPU.");
+                        runPhase2_GpuDeepDfs();
+                        seedPool.clear(); // Flush the queue
+                    } else {
+                        logger.warn(">>> Watchdog: Absolute Dead End at depth " + deepestStep + ". Forcing Teardown.");
+                        consecutiveExtinctions += 5;
+                        triggerBranchScrap();
+                    }
+                    // Reset watchdog after taking action
+                    lastSeedCount = 0;
+                    lastSeedGrowthTime = System.currentTimeMillis();
+                }
+
                 if (this.useGpu && this.gpuEngine != null) {
                     if (deepestStep >= LNS_THRESHOLD) {
                         phaseCounter++;
@@ -414,6 +451,13 @@ public class EternitySolver implements Runnable {
                         if (phaseCounter % refreshInterval == 0 && seedsReady) {
                             // Phase 2 runs more frequently when stuck
                             runPhase2_GpuDeepDfs();
+
+                            // --- SAFETY VALVE 1 ---
+                            if (seedPool.size() >= activeBatch) {
+                                logger.warn(">>> Phase 2 traffic jam (LNS Mode)! Force-clearing the pool.");
+                                seedPool.clear();
+                            }
+
                         } else if (!seedsReady) {
                             runPhase1_CpuSeedGen();
                         } else if (deepestStep >= absoluteHighScore - 10) {
@@ -424,6 +468,13 @@ public class EternitySolver implements Runnable {
                         }
                     } else if (seedPool.size() >= activeBatch) {
                         runPhase2_GpuDeepDfs();
+
+                        // --- SAFETY VALVE 2 ---
+                        if (seedPool.size() >= activeBatch) {
+                            logger.warn(">>> Phase 2 traffic jam (Standard Mode)! Force-clearing the pool.");
+                            seedPool.clear();
+                        }
+
                     } else {
                         runPhase1_CpuSeedGen();
                     }
@@ -453,6 +504,13 @@ public class EternitySolver implements Runnable {
                 logger.error(">>> [FATAL ERROR] PIPELINE CRASHED: ", e);
                 try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
             }
+            try {
+                Thread.sleep(10);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                logger.warn(">>> Orchestrator interrupted during breather.");
+                break;
+            }
         }
     }
 
@@ -474,7 +532,7 @@ public class EternitySolver implements Runnable {
             currentSeedDepth = Math.max(SEED_DEPTH, lockedPieces + userCpuHandoffDepth);
         }
 
-        currentBatchSize.set(seedPool.size());
+//        currentBatchSize.set(seedPool.size());
 
         try {
             int activeBatch = getDynamicBatchSize();
@@ -547,18 +605,12 @@ public class EternitySolver implements Runnable {
 
         if (result.solved()) handleVictory(bestBoardOut);
 
-        // --- CORRECTED RESULT LOGIC: Check against LOCAL deepest step, not just Global ---
-// --- CORRECTED RESULT LOGIC: Check against LOCAL deepest step ---
         if (result.newHighScore() > deepestStep) {
 
             // 1. Accept the GPU's local progress!
             deepestStep = result.newHighScore();
             consecutiveGpuStagnation = 0;
 
-            // --- BUG FIX: NO MORE PREMATURE CELEBRATION ---
-            // Remove the unconditional 'consecutiveExtinctions = 0;' that was here!
-            // We ONLY reset the escape counter if the branch is actually viable
-            // and climbs almost all the way back to the global record.
             if (deepestStep >= absoluteHighScore - 5) {
                 consecutiveExtinctions = 0;
             }
@@ -601,7 +653,7 @@ public class EternitySolver implements Runnable {
         // --- Seed generation for the next batch ---
         if (consecutiveGpuStagnation < 4) {
             seedPool.addAll(SeedSelector.selectBest(seeds, result.threadDepths(), getDynamicBatchSize(), new Random()));
-            currentBatchSize.set(seedPool.size());
+//            currentBatchSize.set(seedPool.size());
         } else {
             logger.warn(">>> [!!!] Phase 2 GPU stagnated! Activating Teardown...");
             consecutiveExtinctions++;
@@ -742,25 +794,6 @@ public class EternitySolver implements Runnable {
             triggerBranchScrap();
         }
     }
-
-//    void updateTabuList(int[] newBoard) {
-//        int tenureLength = 5 + (absoluteHighScore / 25);
-//        for (int i = 0; i < 256; i++) {
-//            // BUG FIX: Only apply infinite Tabu ban if we are playing with locked pieces!
-//
-//            if (this.lockCenter && (i == 135 || i == 221 || i == 45 || i == 210 || i == 34)) {
-//                tabuTenure[i] = Integer.MAX_VALUE;
-//                continue;
-//            }
-//            if (newBoard[i] != bestBoard[i] && newBoard[i] != -1) {
-//                tabuTenure[i] = currentRepairIteration + tenureLength;
-//            }
-//        }
-//    }
-
-//    void clearTabu() {
-//        Arrays.fill(tabuTenure, 0);
-//    }
 
     private void analyzeFullBoardPotential(int[] recordBoard) {
         int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
@@ -908,135 +941,6 @@ public class EternitySolver implements Runnable {
         saveFullBoardVariant(simulatedBoard, absoluteHighScore, totalConflicts);
     }
 
-//    private void triggerBranchScrap() {
-//        consecutiveExtinctions++;
-//        String phaseName = this.useGpu ? "PHASE 3 (GPU)" : "CPU DEEP SEARCH";
-//        logger.info(">>> [!!!] DEAD END AT %s (Stagnation level: %d) [!!!]", phaseName, consecutiveExtinctions);
-//
-//        int minRetreat = 10 + (consecutiveExtinctions * 5);
-//        int maxRetreat = minRetreat + 15;
-//        int retreatAmount;
-//
-//        if (consecutiveExtinctions > 25 || absoluteHighScore == 0) {
-//            retreatAmount = absoluteHighScore;
-//        } else {
-//            Random rand = new Random();
-//            retreatAmount = minRetreat + rand.nextInt(maxRetreat - minRetreat + 1);
-//        }
-//
-//        int lockedPieces = Math.max(0, absoluteHighScore - retreatAmount);
-//
-//        if (consecutiveExtinctions > 25 || absoluteHighScore == 0) {
-//            lockedPieces = 0;
-//            retreatAmount = absoluteHighScore;
-//            consecutiveExtinctions = 0;
-//        }
-//
-//        lastReportedDepth = lockedPieces;
-//
-//        if (lockedPieces == 0) {
-//            // On full reset, ban the first piece AND randomise which early position
-//            // gets poisoned so CPU workers are forced down different structural paths.
-//            // Banning only position 0 is not enough — workers converge back to the
-//            // same board via a slightly different first step.
-//            int banDepth = Math.min(5 + consecutiveExtinctions, 20);
-//            int banStep  = new Random().nextInt(Math.max(1, banDepth));
-//            poisonedIndex = buildOrder[banStep];
-//            poisonedPiece = globalBestBoard[poisonedIndex];
-//
-//            if (poisonedPiece != -1) {
-//                int physId = -1;
-//                for (int i = 0; i < 1024; i++) {
-//                    if (inventory.allOrientations[i] == poisonedPiece) {
-//                        physId = inventory.physicalMapping[i] + 1;
-//                        break;
-//                    }
-//                }
-//                logger.info(">>> [GLOBAL TABU] Full reset! Banning physical piece #%d at buildOrder[%d] (pos %d).",
-//                        physId, banStep, poisonedIndex);
-//            }
-//        } else if (absoluteHighScore > lockedPieces + 5) {
-//            poisonedIndex = buildOrder[lockedPieces];
-//            poisonedPiece = globalBestBoard[poisonedIndex];
-//            logger.info(">>> [GLOBAL TABU] Poisoned Square Active! Piece %d is banned at index %d.", poisonedPiece, poisonedIndex);
-//        } else {
-//            poisonedIndex = -1;
-//            poisonedPiece = -1;
-//        }
-//
-//        // --- 1. RESET BOARD TO EMPTY ---
-//        Arrays.fill(flatResumeBoard, -1);
-//        // On full reset (lockedPieces == 0): also wipe bestBoard so the solver
-//        // doesn't silently re-anchor CPU workers to the stuck configuration.
-//        // globalBestBoard is preserved for record-keeping but not used as a base camp.
-//        if (lockedPieces == 0) {
-//            Arrays.fill(bestBoard, -1);
-//            applyStaticLocks(bestBoard);
-//            logger.info(">>> [FULL RESET] bestBoard wiped. Exploring fresh territory.");
-//        }
-//
-//        // --- 2. HARD-INJECT THE HINTS DIRECTLY FROM COLORS ---
-//        if (lockCenter) {
-//            flatResumeBoard[135] = targetPiece;
-//
-//            // Hard-coded edge definitions to bypass variable initialization issues
-//            // Format: {North, East, South, West, PositionIndex}
-//            int[][] officialHints = {
-//                    {8, 2, 3, 10, 221}, {3, 13, 6, 8, 45},
-//                    {13, 10, 11, 18, 210}, {10, 20, 18, 16, 34}
-//            };
-//
-//            for (int[] hint : officialHints) {
-//                int packed = -1;
-//                for(int oi=0; oi<1024; oi++) {
-//                    int p = inventory.allOrientations[oi];
-//                    // Look for the exact color match on all 4 sides
-//                    if (PieceUtils.getNorth(p) == hint[0] && PieceUtils.getEast(p) == hint[1] &&
-//                            PieceUtils.getSouth(p) == hint[2] && PieceUtils.getWest(p) == hint[3]) {
-//                        packed = p;
-//                        break;
-//                    }
-//                }
-//                if (packed != -1) {
-//                    flatResumeBoard[hint[4]] = packed;
-//                }
-//            }
-//        }
-//
-//// --- 3. RE-FILL PREVIOUS WORK ON TOP ---
-//        for (int step = 0; step < lockedPieces; step++) {
-//            int idx = buildOrder[step];
-//            if (lockCenter && idx == 135) continue;
-//
-//            // Only protect hint spots IF we are actually playing with hints!
-//            boolean isHint = false;
-//            if (lockCenter) {
-//                for(int h : HINT_POSITIONS) {
-//                    if(idx == h) {
-//                        isHint = true;
-//                        break;
-//                    }
-//                }
-//            }
-//            if(!isHint) {
-//                flatResumeBoard[idx] = globalBestBoard[idx];
-//            }
-//        }
-//
-//        // Final safety net
-//        applyStaticLocks(flatResumeBoard);
-//
-//        deepestStep = Math.max(0, lockedPieces);
-//        seedPool.clear();
-//        currentBatchSize.set(0);
-//        consecutiveGpuStagnation = 0;
-//        phaseCounter = 0; // RESET PHASE SCHEDULER
-////        clearTabu();
-//        topBoards.clear();
-//        // Force GUI to paint the hints immediately
-//        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
-//    }
-
     private void triggerBranchScrap() {
     // 1. CHUNK TEARDOWN (Breaks the Yo-Yo Loop)
     // We always increment the extinction counter and drop by a large chunk (10+ pieces).
@@ -1046,18 +950,24 @@ public class EternitySolver implements Runnable {
     int lockedPieces = Math.max(0, deepestStep - dropAmount);
 
     // 2. THE SINGLE POISON BAN
+    // Poison lasts exactly one scrap cycle — it expires when consecutiveExtinctions
+    // increments past the current value, so the next reset is free to reconsider
+    // the banned piece/position in different structural contexts.
     if (lockedPieces > 0) {
         poisonedIndex = buildOrder[lockedPieces];
         poisonedPiece = bestBoard[poisonedIndex];
         if (poisonedPiece == -1) {
             poisonedPiece = flatResumeBoard[poisonedIndex]; // Fallback
         }
-        logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping %d pieces to depth %d.", dropAmount, lockedPieces);
+        poisonExpiryExtinction = consecutiveExtinctions; // expires next scrap cycle
+        logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping %d pieces to depth %d. Poison expires at extinction %d.",
+                dropAmount, lockedPieces, poisonExpiryExtinction + 1);
     } else {
         // BOTTOM OUT SAFETY
         lockedPieces = 0;
         poisonedIndex = -1;
         poisonedPiece = -1;
+        poisonExpiryExtinction = -1;
         consecutiveExtinctions = 0;
     }
 
@@ -1086,7 +996,7 @@ public class EternitySolver implements Runnable {
     // 5. CLEAN ENGINE RESET
     deepestStep = lockedPieces;
     seedPool.clear();
-    currentBatchSize.set(0);
+//    currentBatchSize.set(0);
     consecutiveGpuStagnation = 0;
     phaseCounter = 0;
 
@@ -1119,8 +1029,6 @@ public class EternitySolver implements Runnable {
     }
 
     private void reportSpeed() {
-        // BUG FIX: Remove 'if (isGpuBusy) return;' completely!
-
         long now = System.currentTimeMillis();
         long elapsed = now - lastThroughputReportTime;
         if (elapsed < 2000) return;
@@ -1128,20 +1036,23 @@ public class EternitySolver implements Runnable {
         long cpuTrials = globalCpuTrialCount.getAndSet(0);
         long gpuTrials = globalGpuTrialCount.getAndSet(0);
 
-        // If neither the CPU nor GPU have reported new completed trials, do nothing.
-        // Importantly, we DO NOT update the 'lastThroughputReportTime' here!
+        // --- DIAGNOSTIC HEARTBEAT ---
         if (cpuTrials == 0 && gpuTrials == 0) {
+            String status = isGpuBusy ? "[GPU PHASE 2/3] Kernel is executing..." : "[CPU PHASE 1] Workers are searching...";
+            logger.info(">>> [HEARTBEAT] 0 steps completed in the last 5s. Status: %s | Depth: %d", status, deepestStep);
+
+            // We must update the time here so it only beats every 5 seconds!
+            lastThroughputReportTime = now;
             return;
         }
 
         double cpuTps = cpuTrials / (elapsed / 1000.0);
         double gpuTps = gpuTrials / (elapsed / 1000.0);
 
-        int hash = boardHash(bestBoard);
+        int hash = Arrays.hashCode(bestBoard);
         logger.info("[SPEED] CPU: %,.0f/s  |  GPU: %,.0f/s  |  Pieces: %d  |  Hash: %08X",
                 cpuTps, gpuTps, deepestStep, hash);
 
-        // Only reset the timer after a successful log
         lastThroughputReportTime = now;
     }
 
@@ -1178,7 +1089,19 @@ public class EternitySolver implements Runnable {
         return displayBoard;
     }
 
+//    private void updateDisplay(int score, int[][] displayBoard) {
+//        long now = System.currentTimeMillis();
+//        if (now - lastDisplayUpdateTime < 10000) {
+//            return;
+//        }
+//        lastDisplayUpdateTime = now;
+//        Eternity.updateDisplay(score, this.absoluteHighScore, displayBoard);
+//    }
+
     private void updateDisplay(int score, int[][] displayBoard) {
+        if (score < absoluteHighScore) {
+            return;
+        }
         Eternity.updateDisplay(score, this.absoluteHighScore, displayBoard);
     }
 
@@ -1418,7 +1341,7 @@ public class EternitySolver implements Runnable {
         }
 
         private boolean solve(int step) {
-            if (manualOverrideRequested || (useGpu && currentBatchSize.get() >= activeBatch)) return false;
+            if (manualOverrideRequested || (useGpu && seedPool.size() >= activeBatch)) return false;
 
             if (step == 256) {
                 synchronized (displayLock) {
@@ -1466,7 +1389,7 @@ public class EternitySolver implements Runnable {
                 int[] seed = new int[256];
                 System.arraycopy(localBoard, 0, seed, 0, 256);
                 seedPool.add(seed);
-                currentBatchSize.incrementAndGet();
+//                currentBatchSize.incrementAndGet();
                 return false;
             }
 
@@ -1507,7 +1430,11 @@ public class EternitySolver implements Runnable {
 
                 if (eastReq != CompatibilityIndex.WILDCARD && PieceUtils.getEast(p) != eastReq) continue;
                 if (southReq != CompatibilityIndex.WILDCARD && PieceUtils.getSouth(p) != southReq) continue;
-                if (boardIdx == poisonedIndex && p == poisonedPiece) continue;
+                // Poison expires after one scrap cycle so the piece/position
+                // combination is reconsidered in fresh structural contexts.
+                if (boardIdx == poisonedIndex
+                        && p == poisonedPiece
+                        && consecutiveExtinctions <= poisonExpiryExtinction) continue;
 
                 if (passesLookahead(p, step, row, col, boardIdx)) {
                     localBoard[boardIdx] = p;

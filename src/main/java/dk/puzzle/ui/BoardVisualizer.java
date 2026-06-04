@@ -6,6 +6,7 @@ import javax.imageio.ImageIO;
 import javax.swing.*;
 import java.awt.*;
 import java.awt.geom.AffineTransform;
+import java.awt.geom.Area;
 import java.awt.image.BufferedImage;
 import java.io.File;
 import org.apache.logging.log4j.LogManager;
@@ -30,6 +31,20 @@ public class BoardVisualizer extends JPanel {
     // Pre-rotated images: [patternId 1-22][rotation 0=N, 1=E, 2=S, 3=W]
     private final BufferedImage[][] rotatedImages = new BufferedImage[23][4];
     private static final Logger logger = LogManager.getLogger(BoardVisualizer.class);
+
+    /**
+     * Cached clip Areas for the 4 triangles of a single tile, keyed by tile size.
+     * Rebuilt only when the tile size changes (i.e. window resize).
+     *
+     * <p>Using {@link Area} instead of raw {@link Polygon} avoids the expensive
+     * {@code Region.appendSpans} scanline conversion that Java2D performs on every
+     * {@code setClip(Polygon)} call. An Area is pre-converted to a region once
+     * and reused for all 256 tiles of the same size.</p>
+     *
+     * Layout: [rotIdx 0-3] = North/East/South/West triangle Area at (0,0)
+     */
+    private int cachedTileSize = -1;
+    private Area[] cachedClipAreas = null; // [4] triangles at origin
 
 
     /**
@@ -109,18 +124,24 @@ public class BoardVisualizer extends JPanel {
         int maxWidth = getWidth() - 40;
         int maxHeight = getHeight() - 40;
         int tileSize = Math.min(maxWidth / 16, maxHeight / 16);
+        if (tileSize <= 0) return;
+
+        // Rebuild clip cache only when tile size changes (window resize)
+        if (tileSize != cachedTileSize) {
+            rebuildClipCache(tileSize);
+        }
 
         int offsetX = (getWidth() - (16 * tileSize)) / 2;
         int offsetY = (getHeight() - (16 * tileSize)) / 2;
 
+        int wildcard = PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD,
+                PieceUtils.WILDCARD, PieceUtils.WILDCARD);
+
         for (int r = 0; r < 16; r++) {
-            if (board[r] == null) {
-                continue;
-            }
+            if (board[r] == null) continue;
             for (int c = 0; c < 16; c++) {
                 int p = board[r][c];
-                if (p != -1 && p != PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD, PieceUtils.WILDCARD,
-                        PieceUtils.WILDCARD)) {
+                if (p != -1 && p != wildcard) {
                     int x = offsetX + (c * tileSize);
                     int y = offsetY + (r * tileSize);
                     drawPiece(g2, x, y, tileSize, p);
@@ -129,24 +150,55 @@ public class BoardVisualizer extends JPanel {
         }
     }
 
+    /**
+     * Rebuilds the 4 cached triangle clip {@link Area} objects for the given tile size.
+     *
+     * <p>Called once on the first paint and again only when the window is resized.
+     * Each Area is defined at tile origin (0,0) and translated at draw time using
+     * {@link AffineTransform}, avoiding per-tile allocation and the expensive
+     * {@code Region.appendSpans} conversion that raw {@link Polygon} clips trigger.</p>
+     *
+     * @param size The new tile size in pixels.
+     */
+    private void rebuildClipCache(int size) {
+        int cx = size / 2;
+        int cy = size / 2;
+
+        // North triangle: top-left, top-right, centre
+        Polygon north = new Polygon(new int[]{0, size, cx}, new int[]{0, 0, cy}, 3);
+        // East triangle: top-right, bottom-right, centre
+        Polygon east  = new Polygon(new int[]{size, size, cx}, new int[]{0, size, cy}, 3);
+        // South triangle: bottom-left, bottom-right, centre
+        Polygon south = new Polygon(new int[]{0, size, cx}, new int[]{size, size, cy}, 3);
+        // West triangle: top-left, bottom-left, centre
+        Polygon west  = new Polygon(new int[]{0, 0, cx}, new int[]{0, size, cy}, 3);
+
+        // Convert to Area once — Java2D caches the scanline region internally
+        cachedClipAreas = new Area[]{
+            new Area(north), new Area(east), new Area(south), new Area(west)
+        };
+        cachedTileSize = size;
+    }
+
     private void drawPiece(Graphics2D g2, int tileX, int tileY, int size, int piece) {
         int n = PieceUtils.getNorth(piece);
         int e = PieceUtils.getEast(piece);
         int s = PieceUtils.getSouth(piece);
         int w = PieceUtils.getWest(piece);
 
-        int cx = tileX + size / 2;
-        int cy = tileY + size / 2;
+        // Translate the cached origin-based clip Areas to the tile position.
+        // This avoids allocating new Polygon objects and avoids the expensive
+        // Region.appendSpans scanline rebuild that raw Polygon clips trigger.
+        AffineTransform tx = AffineTransform.getTranslateInstance(tileX, tileY);
+        Area clipN = cachedClipAreas[0].createTransformedArea(tx);
+        Area clipE = cachedClipAreas[1].createTransformedArea(tx);
+        Area clipS = cachedClipAreas[2].createTransformedArea(tx);
+        Area clipW = cachedClipAreas[3].createTransformedArea(tx);
 
-        Polygon north = new Polygon(new int[]{tileX, tileX + size, cx}, new int[]{tileY, tileY, cy}, 3);
-        Polygon east = new Polygon(new int[]{tileX + size, tileX + size, cx}, new int[]{tileY, tileY + size, cy}, 3);
-        Polygon south = new Polygon(new int[]{tileX, tileX + size, cx}, new int[]{tileY + size, tileY + size, cy}, 3);
-        Polygon west = new Polygon(new int[]{tileX, tileX, cx}, new int[]{tileY, tileY + size, cy}, 3);
-
-        drawPatternTriangle(g2, n, north, tileX, tileY, size, 0); // 0 = North
-        drawPatternTriangle(g2, e, east, tileX, tileY, size, 1); // 1 = East
-        drawPatternTriangle(g2, s, south, tileX, tileY, size, 2); // 2 = South
-        drawPatternTriangle(g2, w, west, tileX, tileY, size, 3); // 3 = West
+        drawPatternTriangle(g2, n, clipN, tileX, tileY, size, 0); // North
+        drawPatternTriangle(g2, e, clipE, tileX, tileY, size, 1); // East
+        drawPatternTriangle(g2, s, clipS, tileX, tileY, size, 2); // South
+        drawPatternTriangle(g2, w, clipW, tileX, tileY, size, 3); // West
 
         // Draw a subtle border around the piece
         g2.setColor(new Color(30, 30, 30, 100));
@@ -156,7 +208,7 @@ public class BoardVisualizer extends JPanel {
         g2.drawLine(tileX, tileY + size, tileX + size, tileY);
     }
 
-    private void drawPatternTriangle(Graphics2D g2, int patternId, Polygon clip, int tileX, int tileY, int size,
+    private void drawPatternTriangle(Graphics2D g2, int patternId, Shape clip, int tileX, int tileY, int size,
                                      int rotIdx) {
         Shape oldClip = g2.getClip();
         g2.setClip(clip);
