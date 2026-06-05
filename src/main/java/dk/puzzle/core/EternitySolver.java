@@ -6,32 +6,19 @@ import dk.puzzle.gpu.GpuEngine;
 import dk.puzzle.io.BucasExporter;
 import dk.puzzle.io.CheckpointManager;
 import dk.puzzle.io.RecordManager;
-import static dk.puzzle.io.RecordManager.uploadToDrive;
 import dk.puzzle.model.CompatibilityIndex;
 import dk.puzzle.model.PieceInventory;
 import dk.puzzle.util.PieceUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
-import javax.swing.*;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Random;
-import java.util.Set;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
+
+import static dk.puzzle.io.RecordManager.uploadToDrive;
 
 /**
  * The central orchestrator for the Eternity II puzzle solver, managing a multiphase
@@ -41,6 +28,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class EternitySolver implements Runnable {
 
     private long lastDisplayUpdateTime = 0;
+    private long lastVisualUpdate = System.currentTimeMillis();
     public static final int SEED_DEPTH = 80;
     public static final int LNS_THRESHOLD = 200;
 
@@ -67,14 +55,14 @@ public class EternitySolver implements Runnable {
     private final int numCores;
     volatile int userBatchSizeOverride = -1;
     private final java.util.concurrent.LinkedBlockingQueue<int[]> seedPool = new java.util.concurrent.LinkedBlockingQueue<>();
-//    private final AtomicInteger currentBatchSize = new AtomicInteger(0);
+    //    private final AtomicInteger currentBatchSize = new AtomicInteger(0);
     private int fatalGpuBugCount = 0;
     private final Object displayLock = new Object();
 
     // Board State
     private final int[] flatResumeBoard = new int[256];
     private final boolean[] usedPhysicalPieces = new boolean[256];
-//    final int[] tabuTenure = new int[256];
+    //    final int[] tabuTenure = new int[256];
     final int[] buildOrder = new int[256];
     final int[] bestBoard = new int[256];
     final int[] globalBestBoard = new int[256];
@@ -121,21 +109,8 @@ public class EternitySolver implements Runnable {
 
     // HINT STRATEGY FIELDS
     private static final int[] HINT_POSITIONS = {221, 45, 210, 34};
-    private final int[] hintPackedValues = new int[] {-1, -1, -1, -1};
-    private final int[] hintPhysicalIndices = new int[] {-1, -1, -1, -1};
-    private int findPackedPiece(int physicalNumber, int targetRotation) {
-        int physIdx = physicalNumber - 1;
-        int foundCount = 0;
-        for (int oi = 0; oi < 1024; oi++) {
-            if (inventory.physicalMapping[oi] == physIdx) {
-                if (foundCount == targetRotation) {
-                    return inventory.allOrientations[oi];
-                }
-                foundCount++;
-            }
-        }
-        return -1;
-    }
+    private final int[] hintPackedValues = new int[]{-1, -1, -1, -1};
+    private final int[] hintPhysicalIndices = new int[]{-1, -1, -1, -1};
 
     private void loadCheckpointAndHints() {
         SolverState loadedState = CheckpointManager.loadSmartState(saveProfile);
@@ -158,7 +133,6 @@ public class EternitySolver implements Runnable {
             }
         }
 
-// --- THE MASTER SWITCH: COLOR-BASED INJECTION ---
         if (this.lockCenter) {
             int[][] officialHints = {
                     {8, 2, 3, 10}, {3, 13, 6, 8},
@@ -168,7 +142,7 @@ public class EternitySolver implements Runnable {
             for (int h = 0; h < 4; h++) {
                 int[] edges = officialHints[h];
                 int foundPacked = -1;
-                for(int oi=0; oi<1024; oi++) {
+                for (int oi = 0; oi < 1024; oi++) {
                     int p = inventory.allOrientations[oi];
                     if (PieceUtils.getNorth(p) == edges[0] && PieceUtils.getEast(p) == edges[1] &&
                             PieceUtils.getSouth(p) == edges[2] && PieceUtils.getWest(p) == edges[3]) {
@@ -226,9 +200,6 @@ public class EternitySolver implements Runnable {
             }
         }
 
-        // --- NEW: IMMUNIZE STATIC LOCKS FROM GPU OVERWRITES ---
-        // By pushing the fixed positions to the absolute start of the build order,
-        // the GPU (which starts at depth 14+) will never backtrack far enough to overwrite them.
         if (this.lockCenter) {
             List<Integer> newOrder = new ArrayList<>();
             newOrder.add(135); // Add Center
@@ -241,7 +212,9 @@ public class EternitySolver implements Runnable {
                 int pos = buildOrder[i];
                 boolean isStatic = (pos == 135);
                 for (int hPos : HINT_POSITIONS) {
-                    if (pos == hPos) isStatic = true;
+                    if (pos == hPos) {
+                        isStatic = true;
+                    }
                 }
                 if (!isStatic) {
                     newOrder.add(pos);
@@ -261,10 +234,14 @@ public class EternitySolver implements Runnable {
     }
 
     private void restoreBoardState(int[][] loaded) {
-        if (loaded == null) return;
+        if (loaded == null) {
+            return;
+        }
         int loadedCount = 0;
         for (int r = 0; r < 16; r++) {
-            if (loaded[r] == null) continue;
+            if (loaded[r] == null) {
+                continue;
+            }
             for (int c = 0; c < 16; c++) {
                 int p = loaded[r][c];
                 if (p != -1 && p != 0 && p != -2) {
@@ -286,12 +263,24 @@ public class EternitySolver implements Runnable {
         }
     }
 
-    public void setStagnationLimit(int minutes) { this.stagnationLimitMinutes = minutes; }
-    public void setBatchSizeOverride(int size) { this.userBatchSizeOverride = size; }
-    public void setExtinctionThreshold(double threshold) { this.extinctionThreshold = threshold; }
-    public void setTargetedHolesPercentage(double percentage) {
-        if (this.surgeon != null) this.surgeon.setTargetedHolesPercentage(percentage);
+    public void setStagnationLimit(int minutes) {
+        this.stagnationLimitMinutes = minutes;
     }
+
+    public void setBatchSizeOverride(int size) {
+        this.userBatchSizeOverride = size;
+    }
+
+    public void setExtinctionThreshold(double threshold) {
+        this.extinctionThreshold = threshold;
+    }
+
+    public void setTargetedHolesPercentage(double percentage) {
+        if (this.surgeon != null) {
+            this.surgeon.setTargetedHolesPercentage(percentage);
+        }
+    }
+
     public void triggerManualOverride(int targetBaseCamp) {
         this.manualBaseCampTarget = targetBaseCamp;
         this.manualOverrideRequested = true;
@@ -314,10 +303,18 @@ public class EternitySolver implements Runnable {
     }
 
     private int getDynamicBatchSize() {
-        if (deepestStep >= 200) return 250;
-        if (deepestStep >= 180) return 1000;
-        if (deepestStep >= 100) return 5000;
-        if (deepestStep < 50) return 5000;
+        if (deepestStep >= 200) {
+            return 250;
+        }
+        if (deepestStep >= 180) {
+            return 1000;
+        }
+        if (deepestStep >= 100) {
+            return 5000;
+        }
+        if (deepestStep < 50) {
+            return 5000;
+        }
         return 15000;
     }
 
@@ -330,7 +327,9 @@ public class EternitySolver implements Runnable {
             } catch (Throwable t) {
                 this.useGpu = false;
                 this.gpuEngine = null;
-                if (this.gpuExecutor != null) this.gpuExecutor.shutdownNow();
+                if (this.gpuExecutor != null) {
+                    this.gpuExecutor.shutdownNow();
+                }
                 logger.warn(">>> [HARDWARE] GPU initialization failed: " + t.getMessage());
             }
         }
@@ -358,7 +357,8 @@ public class EternitySolver implements Runnable {
         // 3. Hardware Buffer: Give the NVIDIA driver 500ms to physically flush the VRAM
         try {
             Thread.sleep(500);
-        } catch (InterruptedException ignored) {}
+        } catch (InterruptedException ignored) {
+        }
 
         // 4. Force Java to delete the old GpuEngine object from RAM
         System.gc();
@@ -371,7 +371,9 @@ public class EternitySolver implements Runnable {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             logger.info(">>> Shutdown hook: Saving final checkpoint...");
             synchronized (displayLock) {
-                if (repairReporterScheduler != null) repairReporterScheduler.shutdownNow();
+                if (repairReporterScheduler != null) {
+                    repairReporterScheduler.shutdownNow();
+                }
                 SolverState memoryToSave = new SolverState(
                         buildDisplayBoard(globalBestBoard),
                         absoluteHighScore,
@@ -403,7 +405,6 @@ public class EternitySolver implements Runnable {
         logger.info(">>> Running 3-Phase Pipeline Orchestrator...");
         long lastPeriodicSave = System.currentTimeMillis();
 
-        // --- WATCHDOG MEMORY ---
         long lastSeedGrowthTime = System.currentTimeMillis();
         int lastSeedCount = 0;
 
@@ -412,15 +413,17 @@ public class EternitySolver implements Runnable {
                 if (manualOverrideRequested) {
                     manualOverrideRequested = false;
                     retreat(manualBaseCampTarget, ">>> User Override...");
-                    try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ignored) {
+                    }
                 }
 
                 int activeBatch = getDynamicBatchSize();
-                if (userBatchSizeOverride > 0) activeBatch = userBatchSizeOverride;
+                if (userBatchSizeOverride > 0) {
+                    activeBatch = userBatchSizeOverride;
+                }
 
-                // =========================================================
-                // --- THE ANTI-STARVATION WATCHDOG ---
-                // =========================================================
                 int currentSeeds = seedPool.size();
                 if (currentSeeds > lastSeedCount) {
                     // The queue is actively growing. Reset the timer!
@@ -502,7 +505,10 @@ public class EternitySolver implements Runnable {
                 }
             } catch (Exception e) {
                 logger.error(">>> [FATAL ERROR] PIPELINE CRASHED: ", e);
-                try { Thread.sleep(5000); } catch (InterruptedException ignored) {}
+                try {
+                    Thread.sleep(5000);
+                } catch (InterruptedException ignored) {
+                }
             }
             try {
                 Thread.sleep(10);
@@ -519,7 +525,9 @@ public class EternitySolver implements Runnable {
 
         int lockedPieces = 0;
         for (int p : flatResumeBoard) {
-            if (p != -1 && p != -2) lockedPieces++;
+            if (p != -1 && p != -2) {
+                lockedPieces++;
+            }
         }
 
         // --- FAST GPU HANDOFF LOGIC ---
@@ -536,7 +544,9 @@ public class EternitySolver implements Runnable {
 
         try {
             int activeBatch = getDynamicBatchSize();
-            if (userBatchSizeOverride > 0) activeBatch = userBatchSizeOverride;
+            if (userBatchSizeOverride > 0) {
+                activeBatch = userBatchSizeOverride;
+            }
 
             List<CpuSearchWorker> workers = new ArrayList<>();
             for (int i = 0; i < numCores; i++) {
@@ -546,7 +556,10 @@ public class EternitySolver implements Runnable {
             List<Future<Boolean>> futures = executor.invokeAll(workers);
 
             for (Future<Boolean> f : futures) {
-                try { f.get(); } catch (ExecutionException e) {}
+                try {
+                    f.get();
+                } catch (ExecutionException e) {
+                }
             }
 
             if (this.useGpu && seedPool.isEmpty()) {
@@ -558,7 +571,8 @@ public class EternitySolver implements Runnable {
                 consecutiveExtinctions++;
                 triggerBranchScrap();
             }
-        } catch (InterruptedException e) {}
+        } catch (InterruptedException e) {
+        }
     }
 
     private void runPhase2_GpuDeepDfs() {
@@ -566,14 +580,20 @@ public class EternitySolver implements Runnable {
         methodStartTime = System.currentTimeMillis();
 
         int activeBatch = getDynamicBatchSize();
-        if (userBatchSizeOverride > 0) activeBatch = userBatchSizeOverride;
+        if (userBatchSizeOverride > 0) {
+            activeBatch = userBatchSizeOverride;
+        }
 
         List<int[]> seeds = new ArrayList<>();
         for (int i = 0; i < activeBatch; i++) {
             int[] s = seedPool.poll();
-            if (s != null) seeds.add(s);
+            if (s != null) {
+                seeds.add(s);
+            }
         }
-        if (seeds.isEmpty()) return;
+        if (seeds.isEmpty()) {
+            return;
+        }
 
         int[] bestBoardOut = new int[256];
         isGpuBusy = true;
@@ -601,9 +621,13 @@ public class EternitySolver implements Runnable {
         logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
                 Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
 
-        if (result.solved()) handleVictory(bestBoardOut);
+        if (result.solved()) {
+            handleVictory(bestBoardOut);
+        }
 
-        if (result.solved()) handleVictory(bestBoardOut);
+        if (result.solved()) {
+            handleVictory(bestBoardOut);
+        }
 
         if (result.newHighScore() > deepestStep) {
 
@@ -671,7 +695,9 @@ public class EternitySolver implements Runnable {
         totalRepairVariationsTested += numClones;
 
         int[] sourceBoard = topBoards.nextForRepair();
-        if (sourceBoard == null) sourceBoard = bestBoard;
+        if (sourceBoard == null) {
+            sourceBoard = bestBoard;
+        }
 
         // More holes when we're stuck deep — 5 holes at 209 pieces is not enough
         // to escape a structural dead end. Scale up with depth and stagnation.
@@ -729,7 +755,9 @@ public class EternitySolver implements Runnable {
         logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
                 Math.round((double) result.stepsTaken() * 1000) / Math.max(1, calculationElapsed));
 
-        if (result.solved()) handleVictory(bestBoardOut);
+        if (result.solved()) {
+            handleVictory(bestBoardOut);
+        }
         // --- 2. THE STRICT GPU ECHO FILTER ---
         // GpuEngine.java ONLY updates bestBoardOut if it strictly beats absoluteHighScore.
         // Therefore, we ignore EVERYTHING unless it beats the absolute global record.
@@ -810,7 +838,9 @@ public class EternitySolver implements Runnable {
                         break;
                     }
                 }
-                if (physicalId != -1) usedPhysical[physicalId] = true;
+                if (physicalId != -1) {
+                    usedPhysical[physicalId] = true;
+                }
             } else {
                 emptySpots.add(i);
             }
@@ -818,7 +848,9 @@ public class EternitySolver implements Runnable {
 
         List<Integer> unusedPhysIds = new ArrayList<>();
         for (int physId = 0; physId < 256; physId++) {
-            if (!usedPhysical[physId]) unusedPhysIds.add(physId);
+            if (!usedPhysical[physId]) {
+                unusedPhysIds.add(physId);
+            }
         }
 
         Collections.shuffle(unusedPhysIds);
@@ -842,23 +874,43 @@ public class EternitySolver implements Runnable {
                         boolean match = true;
 
                         // 1. MUST have border on the actual edges
-                        if (atNorthEdge && PieceUtils.getNorth(p) != 0) match = false;
-                        if (atSouthEdge && PieceUtils.getSouth(p) != 0) match = false;
-                        if (atWestEdge && PieceUtils.getWest(p) != 0) match = false;
-                        if (atEastEdge && PieceUtils.getEast(p) != 0) match = false;
+                        if (atNorthEdge && PieceUtils.getNorth(p) != 0) {
+                            match = false;
+                        }
+                        if (atSouthEdge && PieceUtils.getSouth(p) != 0) {
+                            match = false;
+                        }
+                        if (atWestEdge && PieceUtils.getWest(p) != 0) {
+                            match = false;
+                        }
+                        if (atEastEdge && PieceUtils.getEast(p) != 0) {
+                            match = false;
+                        }
 
                         // 2. MUST NOT have border on the inside! (The Missing Rule)
-                        if (!atNorthEdge && PieceUtils.getNorth(p) == 0) match = false;
-                        if (!atSouthEdge && PieceUtils.getSouth(p) == 0) match = false;
-                        if (!atWestEdge && PieceUtils.getWest(p) == 0) match = false;
-                        if (!atEastEdge && PieceUtils.getEast(p) == 0) match = false;
+                        if (!atNorthEdge && PieceUtils.getNorth(p) == 0) {
+                            match = false;
+                        }
+                        if (!atSouthEdge && PieceUtils.getSouth(p) == 0) {
+                            match = false;
+                        }
+                        if (!atWestEdge && PieceUtils.getWest(p) == 0) {
+                            match = false;
+                        }
+                        if (!atEastEdge && PieceUtils.getEast(p) == 0) {
+                            match = false;
+                        }
 
                         // 3. Check internal neighbors (Pass 1 only)
                         if (match && row > 0 && simulatedBoard[spot - 16] != -1) {
-                            if (PieceUtils.getNorth(p) != PieceUtils.getSouth(simulatedBoard[spot - 16])) match = false;
+                            if (PieceUtils.getNorth(p) != PieceUtils.getSouth(simulatedBoard[spot - 16])) {
+                                match = false;
+                            }
                         }
                         if (match && col > 0 && simulatedBoard[spot - 1] != -1) {
-                            if (PieceUtils.getWest(p) != PieceUtils.getEast(simulatedBoard[spot - 1])) match = false;
+                            if (PieceUtils.getWest(p) != PieceUtils.getEast(simulatedBoard[spot - 1])) {
+                                match = false;
+                            }
                         }
 
                         if (match) {
@@ -868,7 +920,9 @@ public class EternitySolver implements Runnable {
                         }
                     }
                 }
-                if (bestBrikIndex != -1) break;
+                if (bestBrikIndex != -1) {
+                    break;
+                }
             }
 
             // PASS 2: Fallback to EDGE ONLY match (Ignore internal neighbors, but strictly forbid inner borders)
@@ -881,16 +935,32 @@ public class EternitySolver implements Runnable {
                             boolean match = true;
 
                             // MUST have border on the actual edges
-                            if (atNorthEdge && PieceUtils.getNorth(p) != 0) match = false;
-                            if (atSouthEdge && PieceUtils.getSouth(p) != 0) match = false;
-                            if (atWestEdge && PieceUtils.getWest(p) != 0) match = false;
-                            if (atEastEdge && PieceUtils.getEast(p) != 0) match = false;
+                            if (atNorthEdge && PieceUtils.getNorth(p) != 0) {
+                                match = false;
+                            }
+                            if (atSouthEdge && PieceUtils.getSouth(p) != 0) {
+                                match = false;
+                            }
+                            if (atWestEdge && PieceUtils.getWest(p) != 0) {
+                                match = false;
+                            }
+                            if (atEastEdge && PieceUtils.getEast(p) != 0) {
+                                match = false;
+                            }
 
                             // MUST NOT have border on the inside!
-                            if (!atNorthEdge && PieceUtils.getNorth(p) == 0) match = false;
-                            if (!atSouthEdge && PieceUtils.getSouth(p) == 0) match = false;
-                            if (!atWestEdge && PieceUtils.getWest(p) == 0) match = false;
-                            if (!atEastEdge && PieceUtils.getEast(p) == 0) match = false;
+                            if (!atNorthEdge && PieceUtils.getNorth(p) == 0) {
+                                match = false;
+                            }
+                            if (!atSouthEdge && PieceUtils.getSouth(p) == 0) {
+                                match = false;
+                            }
+                            if (!atWestEdge && PieceUtils.getWest(p) == 0) {
+                                match = false;
+                            }
+                            if (!atEastEdge && PieceUtils.getEast(p) == 0) {
+                                match = false;
+                            }
 
                             if (match) {
                                 bestBrikIndex = i;
@@ -899,7 +969,9 @@ public class EternitySolver implements Runnable {
                             }
                         }
                     }
-                    if (bestBrikIndex != -1) break;
+                    if (bestBrikIndex != -1) {
+                        break;
+                    }
                 }
             }
 
@@ -923,86 +995,96 @@ public class EternitySolver implements Runnable {
             for (int col = 0; col < 16; col++) {
                 int idx = row * 16 + col;
                 int currentPiece = simulatedBoard[idx];
-                if (currentPiece == -1) continue;
+                if (currentPiece == -1) {
+                    continue;
+                }
                 if (col < 15) {
                     int eastNeighbor = simulatedBoard[idx + 1];
-                    if (eastNeighbor != -1 && PieceUtils.getEast(currentPiece) != PieceUtils.getWest(eastNeighbor)) totalConflicts++;
+                    if (eastNeighbor != -1 && PieceUtils.getEast(currentPiece) != PieceUtils.getWest(eastNeighbor)) {
+                        totalConflicts++;
+                    }
                 }
                 if (row < 15) {
                     int southNeighbor = simulatedBoard[idx + 16];
-                    if (southNeighbor != -1 && PieceUtils.getSouth(currentPiece) != PieceUtils.getNorth(southNeighbor)) totalConflicts++;
+                    if (southNeighbor != -1 && PieceUtils.getSouth(currentPiece) != PieceUtils.getNorth(southNeighbor)) {
+                        totalConflicts++;
+                    }
                 }
             }
         }
 
         logger.info(">>> [FULL BOARD SCAN] Simulated an edge-aware fully laid board. Total internal edge conflicts: %d / 480", totalConflicts);
-        if (totalConflicts < 30) logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
+        if (totalConflicts < 30) {
+            logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
+        }
 
         saveFullBoardVariant(simulatedBoard, absoluteHighScore, totalConflicts);
     }
 
     private void triggerBranchScrap() {
-    // 1. CHUNK TEARDOWN (Breaks the Yo-Yo Loop)
-    // We always increment the extinction counter and drop by a large chunk (10+ pieces).
-    // This gives the CPU a wide enough space to actually find a new path.
-    consecutiveExtinctions++;
-    int dropAmount = 10 + (consecutiveExtinctions * 5);
-    int lockedPieces = Math.max(0, deepestStep - dropAmount);
+        // 1. CHUNK TEARDOWN (Breaks the Yo-Yo Loop)
+        // We always increment the extinction counter and drop by a large chunk (10+ pieces).
+        // This gives the CPU a wide enough space to actually find a new path.
+        consecutiveExtinctions++;
+        int dropAmount = 10 + (consecutiveExtinctions * 5);
+        int lockedPieces = Math.max(0, deepestStep - dropAmount);
 
-    // 2. THE SINGLE POISON BAN
-    // Poison lasts exactly one scrap cycle — it expires when consecutiveExtinctions
-    // increments past the current value, so the next reset is free to reconsider
-    // the banned piece/position in different structural contexts.
-    if (lockedPieces > 0) {
-        poisonedIndex = buildOrder[lockedPieces];
-        poisonedPiece = bestBoard[poisonedIndex];
-        if (poisonedPiece == -1) {
-            poisonedPiece = flatResumeBoard[poisonedIndex]; // Fallback
+        // 2. THE SINGLE POISON BAN
+        // Poison lasts exactly one scrap cycle — it expires when consecutiveExtinctions
+        // increments past the current value, so the next reset is free to reconsider
+        // the banned piece/position in different structural contexts.
+        if (lockedPieces > 0) {
+            poisonedIndex = buildOrder[lockedPieces];
+            poisonedPiece = bestBoard[poisonedIndex];
+            if (poisonedPiece == -1) {
+                poisonedPiece = flatResumeBoard[poisonedIndex]; // Fallback
+            }
+            poisonExpiryExtinction = consecutiveExtinctions; // expires next scrap cycle
+            logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping %d pieces to depth %d. Poison expires at extinction %d.",
+                    dropAmount, lockedPieces, poisonExpiryExtinction + 1);
+        } else {
+            // BOTTOM OUT SAFETY
+            lockedPieces = 0;
+            poisonedIndex = -1;
+            poisonedPiece = -1;
+            poisonExpiryExtinction = -1;
+            consecutiveExtinctions = 0;
         }
-        poisonExpiryExtinction = consecutiveExtinctions; // expires next scrap cycle
-        logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping %d pieces to depth %d. Poison expires at extinction %d.",
-                dropAmount, lockedPieces, poisonExpiryExtinction + 1);
-    } else {
-        // BOTTOM OUT SAFETY
-        lockedPieces = 0;
-        poisonedIndex = -1;
-        poisonedPiece = -1;
-        poisonExpiryExtinction = -1;
-        consecutiveExtinctions = 0;
-    }
 
-    // 3. REBUILD THE CPU MEMORY
-    Arrays.fill(flatResumeBoard, -1);
-    for (int step = 0; step < lockedPieces; step++) {
-        int idx = buildOrder[step];
-        boolean isStatic = (lockCenter && idx == 135);
-        if (lockCenter) {
-            for (int hPos : HINT_POSITIONS) {
-                if (idx == hPos) isStatic = true;
+        // 3. REBUILD THE CPU MEMORY
+        Arrays.fill(flatResumeBoard, -1);
+        for (int step = 0; step < lockedPieces; step++) {
+            int idx = buildOrder[step];
+            boolean isStatic = (lockCenter && idx == 135);
+            if (lockCenter) {
+                for (int hPos : HINT_POSITIONS) {
+                    if (idx == hPos) {
+                        isStatic = true;
+                    }
+                }
+            }
+            if (!isStatic) {
+                flatResumeBoard[idx] = bestBoard[idx];
             }
         }
-        if (!isStatic) {
-            flatResumeBoard[idx] = bestBoard[idx];
+        applyStaticLocks(flatResumeBoard);
+
+        // 4. ERASE GHOST PIECES
+        for (int i = lockedPieces; i < 256; i++) {
+            int boardPos = buildOrder[i];
+            bestBoard[boardPos] = -1;
         }
-    }
-    applyStaticLocks(flatResumeBoard);
 
-    // 4. ERASE GHOST PIECES
-    for (int i = lockedPieces; i < 256; i++) {
-        int boardPos = buildOrder[i];
-        bestBoard[boardPos] = -1;
-    }
-
-    // 5. CLEAN ENGINE RESET
-    deepestStep = lockedPieces;
-    seedPool.clear();
+        // 5. CLEAN ENGINE RESET
+        deepestStep = lockedPieces;
+        seedPool.clear();
 //    currentBatchSize.set(0);
-    consecutiveGpuStagnation = 0;
-    phaseCounter = 0;
+        consecutiveGpuStagnation = 0;
+        phaseCounter = 0;
 
-    topBoards.clear();
-    updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
-}
+        topBoards.clear();
+        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
+    }
 
     private void handleVictory(int[] winningBoard) {
         logger.info(">>> ETERNITY II SOLVED BY GPU PIPELINE!!! <<<");
@@ -1031,20 +1113,12 @@ public class EternitySolver implements Runnable {
     private void reportSpeed() {
         long now = System.currentTimeMillis();
         long elapsed = now - lastThroughputReportTime;
-        if (elapsed < 2000) return;
+        if (elapsed < 2000) {
+            return;
+        }
 
         long cpuTrials = globalCpuTrialCount.getAndSet(0);
         long gpuTrials = globalGpuTrialCount.getAndSet(0);
-
-        // --- DIAGNOSTIC HEARTBEAT ---
-        if (cpuTrials == 0 && gpuTrials == 0) {
-            String status = isGpuBusy ? "[GPU PHASE 2/3] Kernel is executing..." : "[CPU PHASE 1] Workers are searching...";
-            logger.info(">>> [HEARTBEAT] 0 steps completed in the last 5s. Status: %s | Depth: %d", status, deepestStep);
-
-            // We must update the time here so it only beats every 5 seconds!
-            lastThroughputReportTime = now;
-            return;
-        }
 
         double cpuTps = cpuTrials / (elapsed / 1000.0);
         double gpuTps = gpuTrials / (elapsed / 1000.0);
@@ -1064,26 +1138,36 @@ public class EternitySolver implements Runnable {
         if (lockCenter) {
             bestBoard[135] = targetPiece;
             for (int h = 0; h < 4; h++) {
-                if (hintPackedValues[h] != -1) bestBoard[HINT_POSITIONS[h]] = hintPackedValues[h];
+                if (hintPackedValues[h] != -1) {
+                    bestBoard[HINT_POSITIONS[h]] = hintPackedValues[h];
+                }
             }
         }
         updateDisplay(countPieces(bestBoard), buildDisplayBoard(bestBoard));
-        if (logMessage != null) logger.info(logMessage);
+        if (logMessage != null) {
+            logger.info(logMessage);
+        }
     }
 
     int countPieces(int[] board) {
         int count = 0;
         for (int p : board) {
-            if (p != -1 && p != -2) count++;
+            if (p != -1 && p != -2) {
+                count++;
+            }
         }
         return count;
     }
 
     int[][] buildDisplayBoard(int[] sourceArray) {
         int[][] displayBoard = new int[16][16];
-        for (int i = 0; i < 16; i++) Arrays.fill(displayBoard[i], -1);
+        for (int i = 0; i < 16; i++) {
+            Arrays.fill(displayBoard[i], -1);
+        }
         for (int i = 0; i < 256; i++) {
-            if (sourceArray[i] == -1) continue;
+            if (sourceArray[i] == -1) {
+                continue;
+            }
             displayBoard[i / 16][i % 16] = sourceArray[i];
         }
         return displayBoard;
@@ -1098,18 +1182,36 @@ public class EternitySolver implements Runnable {
 //        Eternity.updateDisplay(score, this.absoluteHighScore, displayBoard);
 //    }
 
-    private void updateDisplay(int score, int[][] displayBoard) {
-        if (score < absoluteHighScore) {
-            return;
+    //    private void updateDisplay(int score, int[][] displayBoard) {
+//        if (score < absoluteHighScore) {
+//            return;
+//        }
+//        Eternity.updateDisplay(score, this.absoluteHighScore, displayBoard);
+//    }
+
+    private void updateDisplay(int depth, int[][] displayBoard) {
+        long now = System.currentTimeMillis();
+
+        boolean isNewRecord = depth >= absoluteHighScore;
+        boolean timeToRefresh = (now - lastVisualUpdate) >= 300_000;
+
+        if (!isNewRecord && !timeToRefresh) {
+            return; // Gate is closed!
         }
-        Eternity.updateDisplay(score, this.absoluteHighScore, displayBoard);
+
+        // If we passed the gate, update the timer
+        lastVisualUpdate = now;
+
+        Eternity.updateDisplay(depth, this.absoluteHighScore, displayBoard);
     }
 
     private void saveAndUploadBucasLink(int[] board, int score) {
         try {
             String bucasLink = BucasExporter.exportBoard(board);
             java.io.File folder = new java.io.File(saveProfile);
-            if (!folder.exists()) folder.mkdirs();
+            if (!folder.exists()) {
+                folder.mkdirs();
+            }
             java.io.File linkFile = new java.io.File(folder, "bucas_link_" + score + ".txt");
             try (java.io.FileWriter writer = new java.io.FileWriter(linkFile)) {
                 writer.write("Eternity II Record: " + score + " pieces\n");
@@ -1118,13 +1220,16 @@ public class EternitySolver implements Runnable {
                 writer.write(bucasLink + "\n");
             }
             uploadToDrive(linkFile, "text/plain", saveProfile);
-        } catch (Exception e) {}
+        } catch (Exception e) {
+        }
     }
 
     private void saveFullBoardVariant(int[] simulatedBoard, int baseScore, int conflicts) {
         String fullProfileFolder = saveProfile + "_FULL";
         java.io.File folder = new java.io.File(fullProfileFolder);
-        if (!folder.exists()) folder.mkdirs();
+        if (!folder.exists()) {
+            folder.mkdirs();
+        }
 
         String timeId = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss_SSS"));
         String baseFilename = "Errors" + conflicts + "_Base" + baseScore + "_" + timeId;
@@ -1142,7 +1247,9 @@ public class EternitySolver implements Runnable {
                         }
                     }
                     line.append(physId + 1);
-                    if (col < 15) line.append(",");
+                    if (col < 15) {
+                        line.append(",");
+                    }
                 }
                 writer.println(line);
             }
@@ -1173,17 +1280,23 @@ public class EternitySolver implements Runnable {
             for (int col = 0; col < 16; col++) {
                 int idx = row * 16 + col;
                 int p = board[idx];
-                if (p == -1 || p == -2) continue;
+                if (p == -1 || p == -2) {
+                    continue;
+                }
                 if (col < 15) {
                     int eastP = board[idx + 1];
                     if (eastP != -1 && eastP != -2) {
-                        if (PieceUtils.getEast(p) != PieceUtils.getWest(eastP)) return false;
+                        if (PieceUtils.getEast(p) != PieceUtils.getWest(eastP)) {
+                            return false;
+                        }
                     }
                 }
                 if (row < 15) {
                     int southP = board[idx + 16];
                     if (southP != -1 && southP != -2) {
-                        if (PieceUtils.getSouth(p) != PieceUtils.getNorth(southP)) return false;
+                        if (PieceUtils.getSouth(p) != PieceUtils.getNorth(southP)) {
+                            return false;
+                        }
                     }
                 }
             }
@@ -1197,16 +1310,22 @@ public class EternitySolver implements Runnable {
             for (int col = 0; col < 16; col++) {
                 int idx = row * 16 + col;
                 int p = rescuedBoard[idx];
-                if (p == -1 || p == -2) continue;
+                if (p == -1 || p == -2) {
+                    continue;
+                }
 
                 boolean conflict = false;
                 if (col < 15) {
                     int eastP = rescuedBoard[idx + 1];
-                    if (eastP != -1 && eastP != -2 && PieceUtils.getEast(p) != PieceUtils.getWest(eastP)) conflict = true;
+                    if (eastP != -1 && eastP != -2 && PieceUtils.getEast(p) != PieceUtils.getWest(eastP)) {
+                        conflict = true;
+                    }
                 }
                 if (row < 15) {
                     int southP = rescuedBoard[idx + 16];
-                    if (southP != -1 && southP != -2 && PieceUtils.getSouth(p) != PieceUtils.getNorth(southP)) conflict = true;
+                    if (southP != -1 && southP != -2 && PieceUtils.getSouth(p) != PieceUtils.getNorth(southP)) {
+                        conflict = true;
+                    }
                 }
 
                 if (conflict) {
@@ -1225,7 +1344,9 @@ public class EternitySolver implements Runnable {
         }
         int validPieces = 0;
         for (int i = 0; i < 256; i++) {
-            if (rescuedBoard[i] != -1 && rescuedBoard[i] != -2) validPieces++;
+            if (rescuedBoard[i] != -1 && rescuedBoard[i] != -2) {
+                validPieces++;
+            }
         }
         System.arraycopy(rescuedBoard, 0, corruptedBoard, 0, 256);
         return validPieces;
@@ -1250,22 +1371,30 @@ public class EternitySolver implements Runnable {
     private void generateSpiralOrder() {
         int top = 0, bottom = 15, left = 0, right = 15, idx = 0;
         while (top <= bottom && left <= right) {
-            for (int j = left; j <= right; j++) buildOrder[idx++] = top * 16 + j;
+            for (int j = left; j <= right; j++) {
+                buildOrder[idx++] = top * 16 + j;
+            }
             top++;
-            for (int i = top; i <= bottom; i++) buildOrder[idx++] = i * 16 + right;
+            for (int i = top; i <= bottom; i++) {
+                buildOrder[idx++] = i * 16 + right;
+            }
             right--;
             if (top <= bottom) {
-                for (int j = right; j >= left; j--) buildOrder[idx++] = bottom * 16 + j;
+                for (int j = right; j >= left; j--) {
+                    buildOrder[idx++] = bottom * 16 + j;
+                }
                 bottom--;
             }
             if (left <= right) {
-                for (int i = bottom; i >= top; i--) buildOrder[idx++] = i * 16 + left;
+                for (int i = bottom; i >= top; i--) {
+                    buildOrder[idx++] = i * 16 + left;
+                }
                 left++;
             }
         }
     }
 
-    public enum BuildStrategy { TYPEWRITER, SPIRAL }
+    public enum BuildStrategy {TYPEWRITER, SPIRAL}
 
     class TopBoardRegistry {
         private final List<int[]> registry = new ArrayList<>();
@@ -1274,12 +1403,20 @@ public class EternitySolver implements Runnable {
 
         public synchronized void offer(int[] board, int score) {
             int boardHash = Arrays.hashCode(board);
-            for (int[] existing : registry) if (Arrays.hashCode(existing) == boardHash) return;
-            if (registry.size() < MAX_CAPACITY) registry.add(Arrays.copyOf(board, 256));
+            for (int[] existing : registry) {
+                if (Arrays.hashCode(existing) == boardHash) {
+                    return;
+                }
+            }
+            if (registry.size() < MAX_CAPACITY) {
+                registry.add(Arrays.copyOf(board, 256));
+            }
         }
 
         public synchronized int[] nextForRepair() {
-            if (registry.isEmpty()) return null;
+            if (registry.isEmpty()) {
+                return null;
+            }
             int[] board = registry.get(currentIndex);
             currentIndex = (currentIndex + 1) % registry.size();
             return board;
@@ -1290,7 +1427,9 @@ public class EternitySolver implements Runnable {
             currentIndex = 0;
         }
 
-        public List<int[]> getRawRegistry() { return registry; }
+        public List<int[]> getRawRegistry() {
+            return registry;
+        }
     }
 
     private class CpuSearchWorker implements Callable<Boolean> {
@@ -1320,7 +1459,9 @@ public class EternitySolver implements Runnable {
             }
             if (lockCenter) {
                 localBoard[135] = targetPiece;
-                if (centerPhysicalIdx != -1) localUsed[centerPhysicalIdx] = true;
+                if (centerPhysicalIdx != -1) {
+                    localUsed[centerPhysicalIdx] = true;
+                }
                 for (int h = 0; h < 4; h++) {
                     int packed = hintPackedValues[h];
                     if (packed != -1) {
@@ -1341,7 +1482,9 @@ public class EternitySolver implements Runnable {
         }
 
         private boolean solve(int step) {
-            if (manualOverrideRequested || (useGpu && seedPool.size() >= activeBatch)) return false;
+            if (manualOverrideRequested || (useGpu && seedPool.size() >= activeBatch)) {
+                return false;
+            }
 
             if (step == 256) {
                 synchronized (displayLock) {
@@ -1394,7 +1537,9 @@ public class EternitySolver implements Runnable {
             }
 
             int boardIdx = buildOrder[step];
-            if (localBoard[boardIdx] != -1 || (lockCenter && boardIdx == 135)) return solve(step + 1);
+            if (localBoard[boardIdx] != -1 || (lockCenter && boardIdx == 135)) {
+                return solve(step + 1);
+            }
 
             int row = boardIdx / 16;
             int col = boardIdx % 16;
@@ -1409,32 +1554,46 @@ public class EternitySolver implements Runnable {
             if (localResumeBoard[boardIdx] != -1) {
                 int resumeP = localResumeBoard[boardIdx];
                 for (int oi = candidates.nextSetBit(0); oi >= 0; oi = candidates.nextSetBit(oi + 1)) {
-                    if (inventory.allOrientations[oi] != resumeP) candidates.clear(oi);
+                    if (inventory.allOrientations[oi] != resumeP) {
+                        candidates.clear(oi);
+                    }
                 }
             }
 
             int candidateCount = candidates.cardinality();
-            if (candidateCount == 0) return false;
+            if (candidateCount == 0) {
+                return false;
+            }
 
             int[] orientIdxs = new int[candidateCount];
             int k = 0;
-            for (int oi = candidates.nextSetBit(0); oi >= 0; oi = candidates.nextSetBit(oi + 1)) orientIdxs[k++] = oi;
+            for (int oi = candidates.nextSetBit(0); oi >= 0; oi = candidates.nextSetBit(oi + 1)) {
+                orientIdxs[k++] = oi;
+            }
             int offset = rnd.nextInt(candidateCount);
 
             for (int i = 0; i < candidateCount; i++) {
-                if (useGpu && seedPool.size() >= activeBatch) return false;
+                if (useGpu && seedPool.size() >= activeBatch) {
+                    return false;
+                }
 
                 int orientationIdx = orientIdxs[(i + offset) % candidateCount];
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
 
-                if (eastReq != CompatibilityIndex.WILDCARD && PieceUtils.getEast(p) != eastReq) continue;
-                if (southReq != CompatibilityIndex.WILDCARD && PieceUtils.getSouth(p) != southReq) continue;
+                if (eastReq != CompatibilityIndex.WILDCARD && PieceUtils.getEast(p) != eastReq) {
+                    continue;
+                }
+                if (southReq != CompatibilityIndex.WILDCARD && PieceUtils.getSouth(p) != southReq) {
+                    continue;
+                }
                 // Poison expires after one scrap cycle so the piece/position
                 // combination is reconsidered in fresh structural contexts.
                 if (boardIdx == poisonedIndex
                         && p == poisonedPiece
-                        && consecutiveExtinctions <= poisonExpiryExtinction) continue;
+                        && consecutiveExtinctions <= poisonExpiryExtinction) {
+                    continue;
+                }
 
                 if (passesLookahead(p, step, row, col, boardIdx)) {
                     localBoard[boardIdx] = p;
@@ -1442,7 +1601,9 @@ public class EternitySolver implements Runnable {
                     int ghost = localResumeBoard[boardIdx];
                     localResumeBoard[boardIdx] = -1;
 
-                    if (solve(step + 1)) return true;
+                    if (solve(step + 1)) {
+                        return true;
+                    }
 
                     localBoard[boardIdx] = -1;
                     localUsed[physicalIdx] = false;
@@ -1462,7 +1623,9 @@ public class EternitySolver implements Runnable {
                 java.util.BitSet southCandidates = compatIndex.candidatesFor(reqN, reqE, reqS, reqW);
                 compatIndex.andNotUsed(southCandidates, localUsed);
 
-                if (southCandidates.isEmpty()) return false;
+                if (southCandidates.isEmpty()) {
+                    return false;
+                }
                 if (step > 40 && row < 14 && localBoard[idx + 32] == -1) {
                     boolean secondaryFound = false;
                     for (int i = southCandidates.nextSetBit(0); i >= 0; i = southCandidates.nextSetBit(i + 1)) {
@@ -1473,7 +1636,9 @@ public class EternitySolver implements Runnable {
                             break;
                         }
                     }
-                    if (!secondaryFound) return false;
+                    if (!secondaryFound) {
+                        return false;
+                    }
                 }
             }
 
