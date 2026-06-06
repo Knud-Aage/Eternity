@@ -29,9 +29,10 @@ public class EternitySolver implements Runnable {
 
     private long lastDisplayUpdateTime = 0;
     private long lastVisualUpdate = System.currentTimeMillis();
-    public static final int SEED_DEPTH = 80;
+    public static final int SEED_DEPTH = 110;
     public static final int LNS_THRESHOLD = 200;
-
+    private final ConcurrentHashMap<Integer, Integer> hashStrikeCount = new ConcurrentHashMap<>();
+    private final Set<Integer> poisonedHashes = ConcurrentHashMap.newKeySet();
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
 
     // GUI configurable parameters
@@ -430,17 +431,25 @@ public class EternitySolver implements Runnable {
                     lastSeedGrowthTime = System.currentTimeMillis();
                     lastSeedCount = currentSeeds;
                 } else if (System.currentTimeMillis() - lastSeedGrowthTime > 5000) {
-                    // The queue hasn't grown in 5 seconds. The pipeline has jammed!
+
                     if (currentSeeds > 0) {
-                        logger.warn(">>> Watchdog: Endgame Starvation! Forcing partial batch of " + currentSeeds + " to GPU.");
+                        logger.warn(">>> Watchdog: Endgame Starvation! Forcing partial batch...");
                         runPhase2_GpuDeepDfs();
-                        seedPool.clear(); // Flush the queue
+                        seedPool.clear();
                     } else {
-                        logger.warn(">>> Watchdog: Absolute Dead End at depth " + deepestStep + ". Forcing Teardown.");
-                        consecutiveExtinctions += 5;
-                        triggerBranchScrap();
+                        // 1. Get the hash of the board we are currently stuck on
+                        int currentDeadEndHash = Arrays.hashCode(bestBoard);
+
+                        boolean wasPoisoned = checkPoisonAndRetreat(currentDeadEndHash, deepestStep);
+
+                        // 3. If it wasn't poisoned, do the normal 5-piece retreat.
+                        if (!wasPoisoned) {
+                            logger.warn(">>> Watchdog: Normal Dead End at depth " + deepestStep);
+                            consecutiveExtinctions += 5;
+                            triggerBranchScrap();
+                        }
                     }
-                    // Reset watchdog after taking action
+
                     lastSeedCount = 0;
                     lastSeedGrowthTime = System.currentTimeMillis();
                 }
@@ -520,6 +529,19 @@ public class EternitySolver implements Runnable {
         }
     }
 
+    /**
+     * Executes Phase 1 of the solving process, which runs a CPU-based search to generate initial board seeds.
+     * <p>
+     * This method performs the following steps:
+     * <ul>
+     *   <li>Resets the tracking of used physical pieces.</li>
+     *   <li>Counts the number of locked (already placed) pieces on the board.</li>
+     *   <li>Determines the CPU search depth dynamically (handling fast GPU handoff logic).</li>
+     *   <li>Spawns parallel {@link CpuSearchWorker} instances across all CPU cores to search for and populate the seed pool.</li>
+     *   <li>Handles deadlocks or branch exhaustions by checking if the seed pool is empty or if the CPU search has finished
+     *       without finding a solution, triggering a branch scrap when appropriate.</li>
+     * </ul>
+     */
     private void runPhase1_CpuSeedGen() {
         Arrays.fill(usedPhysicalPieces, false);
 
@@ -823,6 +845,104 @@ public class EternitySolver implements Runnable {
         }
     }
 
+    private boolean checkPoisonAndRetreat(int currentBoardHash, int currentDepth) {
+        // Only bother poisoning deep endgame boards (e.g., 200+)
+        if (currentDepth < 200) return false;
+
+        // If this board is already poisoned, instantly reject it!
+        if (poisonedHashes.contains(currentBoardHash)) {
+            logger.warn(">>> POISONED BOARD DETECTED! (" + currentBoardHash + "). Executing Nuclear Retreat!");
+            executeNuclearRetreat(currentDepth);
+            return true; // Tell the Watchdog we handled it
+        }
+
+        // Add a "strike" to this board hash
+        int strikes = hashStrikeCount.getOrDefault(currentBoardHash, 0) + 1;
+        hashStrikeCount.put(currentBoardHash, strikes);
+
+        // 3 Strikes and it's permanently poisoned!
+        if (strikes >= 3) {
+            logger.error(">>> GRAVITY WELL DETECTED! Poisoning hash: " + currentBoardHash);
+            poisonedHashes.add(currentBoardHash);
+            executeNuclearRetreat(currentDepth);
+            return true; // Tell the Watchdog we handled it
+        }
+
+        // It wasn't poisoned yet, just added a strike.
+        return false;
+    }
+
+    private String generateHashForBoard(int[] boardArray) {
+        if (boardArray == null) return "EMPTY_BOARD";
+
+        // Converts the entire array into a single 32-bit integer hash,
+        // then formats it as a nice, readable Hex String (like "8A90D2FC")
+        return Integer.toHexString(java.util.Arrays.hashCode(boardArray)).toUpperCase();
+    }
+
+    private void executeNuclearRetreat(int currentDepth) {
+        // A normal teardown might remove 5-10 pieces.
+        // To escape a gravity well, we must destroy the foundation of the well.
+        int nuclearTargetDepth = Math.max(150, currentDepth - 35);
+        logger.warn(">>> NUCLEAR RETREAT: Tearing board down to depth " + nuclearTargetDepth);
+
+        // 1. Manually sync deepestStep
+        deepestStep = nuclearTargetDepth;
+
+        // 2. Wipe the top of the local trap memory
+        for (int s = deepestStep; s < 256; s++) {
+            bestBoard[buildOrder[s]] = -1;
+        }
+
+        // 3. Rebuild the CPU Worker start board (flatResumeBoard) to match the new depth
+        Arrays.fill(flatResumeBoard, -1);
+        for (int step = 0; step < deepestStep; step++) {
+            int idx = buildOrder[step];
+            boolean isStatic = (lockCenter && idx == 135);
+            if (lockCenter) {
+                for (int hPos : HINT_POSITIONS) {
+                    if (idx == hPos) isStatic = true;
+                }
+            }
+            if (!isStatic) {
+                flatResumeBoard[idx] = bestBoard[idx];
+            }
+        }
+        applyStaticLocks(flatResumeBoard);
+
+        // 4. THE ENTROPY INJECTION ("The Jiggle")
+        // Punch a few random holes in the foundation to scramble the deterministic pathfinder
+        injectEntropy(nuclearTargetDepth);
+
+        // 5. Cleanup and UI update
+        seedPool.clear();
+        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
+    }
+
+    private void injectEntropy(int currentDepth) {
+        java.util.Random rand = new java.util.Random();
+        int piecesToRip = rand.nextInt(3) + 1; // Rip 1 to 3 random pieces
+
+        for (int i = 0; i < piecesToRip; i++) {
+            int randomDepthToRip = currentDepth - rand.nextInt(15); // Pick a piece near the edge
+            if (randomDepthToRip > 0 && randomDepthToRip < 256) {
+                int boardPos = buildOrder[randomDepthToRip];
+
+                // Protect static locks (Center + Hints) from being ripped out
+                boolean isStatic = (lockCenter && boardPos == 135);
+                for (int hPos : HINT_POSITIONS) {
+                    if (boardPos == hPos) isStatic = true;
+                }
+
+                if (!isStatic) {
+                    flatResumeBoard[boardPos] = -1; // Punch a hole in the CPU start board
+                    bestBoard[boardPos] = -1;       // Erase it from local memory
+                    consecutiveExtinctions++;
+                }
+            }
+        }
+        logger.info(">>> Injected Entropy: Randomly removed " + piecesToRip + " internal pieces to scramble the pathfinder.");
+    }
     private void analyzeFullBoardPotential(int[] recordBoard) {
         int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
         List<Integer> emptySpots = new ArrayList<>();
@@ -1475,7 +1595,7 @@ public class EternitySolver implements Runnable {
         }
 
         @Override
-        public Boolean call() throws Exception {
+        public Boolean call() {
             boolean result = solve(0);
             globalCpuTrialCount.addAndGet(localTrialCount);
             return result;
