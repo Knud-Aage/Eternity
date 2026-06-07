@@ -4,54 +4,10 @@ import java.util.*;
 
 /**
  * Selects seed boards for the next GPU search round using a stratified
- * population strategy designed to prevent population collapse.
- *
- * <h2>Why stratification matters at depth 110+</h2>
- * <p>When all seeds share the same pieces in the first 30-40 positions
- * (descended from the same {@code globalBestBoard}), the GPU always
- * converges to the same local optimum regardless of how many seeds are
- * provided. This is called <em>population collapse</em> and is the main
- * reason solvers stall at the same score for long periods.</p>
- *
- * <h2>Three-tier selection strategy</h2>
- * <ul>
- *   <li><b>Elite (20%):</b> highest-scoring seeds, kept exactly as-is.</li>
- *   <li><b>Diverse (50%):</b> seeds with Hamming distance &gt; 25 from all
- *       elite seeds in the first {@code DIVERSITY_DEPTH} build-order positions.
- *       Picked by score within that constraint.</li>
- *   <li><b>Random-restart (30%):</b> seeds that share zero pieces in the
- *       first {@code POISON_DEPTH} build-order positions with the reference
- *       board. Breaks population collapse completely.</li>
- * </ul>
- *
- * <h2>Edge-consistency guarantee</h2>
- * <p>Every returned seed is validated by {@link #isEdgeConsistent}. Seeds
- * with internal edge conflicts are silently dropped — they would cause
- * {@code verifyBoardStrict} rejections in Phase 2.</p>
+ * population strategy dynamically scaled for the deep endgame.
  */
 public class SeedSelector {
 
-    /**
-     * Number of build-order positions used when computing Hamming distance.
-     * Covers roughly the first third of the board — the region that most
-     * strongly determines the final structural outcome.
-     */
-    private static final int DIVERSITY_DEPTH = 40;
-
-    /**
-     * Minimum Hamming distance (in {@link #DIVERSITY_DEPTH} positions) that
-     * a seed must have from all elite seeds to qualify for the diverse tier.
-     * Seeds below this threshold are too similar to the elite to add value.
-     */
-    private static final int MIN_HAMMING_DISTANCE = 25;
-
-    /**
-     * Number of build-order positions checked for the random-restart tier.
-     * Seeds must share zero pieces here with the reference board.
-     */
-    private static final int POISON_DEPTH = 30;
-
-    // Position weights: centre cells are hardest, border cells are easiest.
     private static final int[] POSITION_WEIGHT = buildPositionWeights();
 
     private static int[] buildPositionWeights() {
@@ -62,23 +18,11 @@ public class SeedSelector {
             int distFromEdge = Math.min(
                     Math.min(row, 15 - row),
                     Math.min(col, 15 - col));
-            w[i] = distFromEdge + 1; // 1 (border) to 8 (centre)
+            w[i] = distFromEdge + 1;
         }
         return w;
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Public API
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * Scores a board based on placement depth, position quality, and
-     * constraint pressure.
-     *
-     * @param board        256-element array; -1 indicates an empty cell.
-     * @param depthReached Number of pieces placed as reported by the GPU thread.
-     * @return             Combined score — higher is better.
-     */
     public static int scoreBoard(int[] board, int depthReached) {
         int posScore = 0;
         int dangerPenalty = 0;
@@ -87,8 +31,6 @@ public class SeedSelector {
             if (board[i] != -1) {
                 posScore += POSITION_WEIGHT[i];
             } else {
-                // Penalise empty cells that are heavily surrounded —
-                // they indicate structural dead ends nearby.
                 int row = i / 16;
                 int col = i % 16;
                 int filled = 0;
@@ -99,18 +41,9 @@ public class SeedSelector {
                 if (filled >= 3) dangerPenalty += (filled - 2) * 5;
             }
         }
-
-        // depthReached carries the most weight — it is the GPU's own
-        // measure of how far down the search tree this seed reached.
         return depthReached * 100 + posScore * 2 - dangerPenalty;
     }
 
-    /**
-     * Validates that a board has no internal edge conflicts between placed pieces.
-     *
-     * @param board 256-element board array.
-     * @return {@code true} if all adjacent placed pieces have matching edges.
-     */
     public static boolean isEdgeConsistent(int[] board) {
         for (int i = 0; i < 256; i++) {
             if (board[i] == -1) continue;
@@ -132,84 +65,18 @@ public class SeedSelector {
     }
 
     /**
-     * Computes the Hamming distance between two boards over the first
-     * {@code depth} positions in the given build order.
-     *
-     * <p>Two positions are considered different if the physical piece numbers
-     * differ, ignoring rotation. This measures structural divergence in the
-     * region that most strongly determines the final board outcome.</p>
-     *
-     * @param a          First board (256-element array).
-     * @param b          Second board (256-element array).
-     * @param buildOrder Build-order position sequence.
-     * @param depth      Number of build-order positions to compare.
-     * @return           Number of positions where the physical pieces differ.
+     * Computes the absolute Hamming distance across the ENTIRE board.
      */
-    public static int hammingDistance(int[] a, int[] b, int[] buildOrder, int depth) {
+    public static int hammingDistance(int[] a, int[] b) {
         int diff = 0;
-        for (int step = 0; step < depth && step < buildOrder.length; step++) {
-            int idx = buildOrder[step];
-            int pa = a[idx];
-            int pb = b[idx];
-            if (pa == -1 || pb == -1) {
-                if (pa != pb) diff++; // one empty, one not = different
-                continue;
+        for (int i = 0; i < 256; i++) {
+            if (a[i] != -1 && b[i] != -1 && a[i] != b[i]) {
+                diff++;
             }
-            // Compare only the raw packed value — rotation differences
-            // between the same physical piece also count as different
-            // since they produce different edge exposures.
-            if (pa != pb) diff++;
         }
         return diff;
     }
 
-    /**
-     * Returns true if {@code candidate} shares zero pieces with
-     * {@code reference} in the first {@code POISON_DEPTH} build-order
-     * positions. Used to identify genuine random-restart seeds.
-     *
-     * @param candidate  Seed board to test.
-     * @param reference  Reference board (typically {@code globalBestBoard}).
-     * @param buildOrder Build-order position sequence.
-     * @return           {@code true} if no overlap in the poison zone.
-     */
-    public static boolean isRandomRestart(int[] candidate, int[] reference,
-                                          int[] buildOrder) {
-        for (int step = 0; step < POISON_DEPTH && step < buildOrder.length; step++) {
-            int idx = buildOrder[step];
-            if (candidate[idx] != -1 && candidate[idx] == reference[idx]) {
-                return false; // shares at least one piece — not a fresh restart
-            }
-        }
-        return true;
-    }
-
-    /**
-     * Selects seeds for the next GPU round using a three-tier stratified strategy.
-     *
-     * <p>Tier breakdown:</p>
-     * <ul>
-     *   <li><b>Elite (20%):</b> top seeds by score, copied directly.</li>
-     *   <li><b>Diverse (50%):</b> seeds with Hamming distance &gt;
-     *       {@link #MIN_HAMMING_DISTANCE} from all elite seeds.</li>
-     *   <li><b>Random-restart (30%):</b> seeds sharing zero pieces with
-     *       {@code referenceBoard} in the first {@link #POISON_DEPTH}
-     *       positions — breaks population collapse.</li>
-     * </ul>
-     *
-     * <p>All returned seeds are edge-consistent. If a tier cannot be filled
-     * (e.g. not enough diverse seeds in the pool), the shortfall is filled
-     * from the elite tier to ensure {@code targetCount} is always returned.</p>
-     *
-     * @param allBoards      All seed boards from the previous GPU round.
-     * @param threadDepths   GPU-reported max depth per thread (same order).
-     * @param targetCount    Number of seeds to return.
-     * @param buildOrder     Build-order position sequence from the solver.
-     * @param referenceBoard The current best board — used to identify
-     *                       random-restart seeds. Pass {@code globalBestBoard}.
-     * @param random         Random source for sampling within tiers.
-     * @return               Selected seeds, all edge-consistent.
-     */
     public static List<int[]> selectBest(
             List<int[]> allBoards,
             int[] threadDepths,
@@ -221,27 +88,49 @@ public class SeedSelector {
         int n = allBoards.size();
         if (n == 0) return new ArrayList<>();
 
-        // ── Score all boards ──────────────────────────────────────────────
+        // ── 1. Auto-Detect the Active CPU Frontier ──
+        // Since all seeds come from the same CPU batch, we find how many
+        // pieces are permanently locked by comparing the first and last seed.
+        int[] firstSeed = allBoards.get(0);
+        int[] lastSeed = allBoards.get(n - 1);
+        int lockedPieces = 0;
+        for (int i = 0; i < 256; i++) {
+            int idx = buildOrder[i];
+            if (firstSeed[idx] != -1 && firstSeed[idx] == lastSeed[idx]) {
+                lockedPieces++;
+            } else {
+                break;
+            }
+        }
+
+        // Count how many pieces the CPU actually added on top of the lock
+        int piecesPlacedByCpu = 0;
+        for (int i = lockedPieces; i < 256; i++) {
+            if (firstSeed[buildOrder[i]] != -1) piecesPlacedByCpu++;
+        }
+
+        // Dynamic thresholds: If CPU only placed 4 pieces, min diverse distance is 2.
+        int dynamicMinHamming = Math.max(1, piecesPlacedByCpu / 2);
+
+        // ── 2. Score and Sort ──
         int[] scores = new int[n];
         for (int i = 0; i < n; i++) {
             scores[i] = scoreBoard(allBoards.get(i),
                     i < threadDepths.length ? threadDepths[i] : 0);
         }
 
-        // Sort indices by score descending
         Integer[] indices = new Integer[n];
         for (int i = 0; i < n; i++) indices[i] = i;
         Arrays.sort(indices, (a, b) -> scores[b] - scores[a]);
 
-        // ── Tier sizes ────────────────────────────────────────────────────
-        int eliteCount   = Math.max(1, targetCount * 20 / 100); // 20%
-        int diverseCount = Math.max(1, targetCount * 50 / 100); // 50%
-        int restartCount = targetCount - eliteCount - diverseCount; // 30%
+        int eliteCount   = Math.max(1, targetCount * 20 / 100);
+        int diverseCount = Math.max(1, targetCount * 50 / 100);
+        int restartCount = targetCount - eliteCount - diverseCount;
 
         List<int[]> result    = new ArrayList<>(targetCount);
         List<int[]> eliteList = new ArrayList<>(eliteCount);
 
-        // ── TIER 1: Elite — top seeds by score ───────────────────────────
+        // ── TIER 1: Elite ──
         for (int i = 0; i < indices.length && eliteList.size() < eliteCount; i++) {
             int[] board = allBoards.get(indices[i]);
             if (isEdgeConsistent(board)) {
@@ -251,9 +140,7 @@ public class SeedSelector {
             }
         }
 
-        // ── TIER 2: Diverse — Hamming distance > MIN from all elite ──────
-        // Walk candidates in score order; accept only those sufficiently
-        // different from every elite seed already selected.
+        // ── TIER 2: Diverse ──
         int diverseFilled = 0;
         for (int i = 0; i < indices.length && diverseFilled < diverseCount; i++) {
             int[] board = allBoards.get(indices[i]);
@@ -261,8 +148,7 @@ public class SeedSelector {
 
             boolean sufficientlyDiverse = true;
             for (int[] elite : eliteList) {
-                if (hammingDistance(board, elite, buildOrder, DIVERSITY_DEPTH)
-                        < MIN_HAMMING_DISTANCE) {
+                if (hammingDistance(board, elite) < dynamicMinHamming) {
                     sufficientlyDiverse = false;
                     break;
                 }
@@ -273,8 +159,7 @@ public class SeedSelector {
             }
         }
 
-        // ── TIER 3: Random-restart — zero overlap with referenceBoard ────
-        // Shuffle indices so we don't always pick the same restart seeds.
+        // ── TIER 3: Random-restart ──
         List<Integer> shuffled = new ArrayList<>(Arrays.asList(indices));
         Collections.shuffle(shuffled, random);
 
@@ -283,15 +168,26 @@ public class SeedSelector {
             if (restartFilled >= restartCount) break;
             int[] board = allBoards.get(idx);
             if (!isEdgeConsistent(board)) continue;
-            if (referenceBoard != null
-                    && isRandomRestart(board, referenceBoard, buildOrder)) {
-                result.add(Arrays.copyOf(board, 256));
-                restartFilled++;
+
+            if (referenceBoard != null) {
+                boolean isRestart = true;
+                // Check ONLY the active frontier zone. A true restart must
+                // disagree with the local trap right where the CPU started branching.
+                for (int step = lockedPieces; step < lockedPieces + piecesPlacedByCpu && step < 256; step++) {
+                    int boardIdx = buildOrder[step];
+                    if (board[boardIdx] != -1 && board[boardIdx] == referenceBoard[boardIdx]) {
+                        isRestart = false; // It copied the trap!
+                        break;
+                    }
+                }
+                if (isRestart) {
+                    result.add(Arrays.copyOf(board, 256));
+                    restartFilled++;
+                }
             }
         }
 
-        // ── Fallback: fill any shortfall from elite ───────────────────────
-        // Happens when the pool lacks enough diverse or restart seeds.
+        // ── Fallback ──
         int eliteIdx = 0;
         while (result.size() < targetCount && eliteIdx < indices.length) {
             int[] board = allBoards.get(indices[eliteIdx++]);

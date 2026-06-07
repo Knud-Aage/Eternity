@@ -465,15 +465,11 @@ public class EternitySolver implements Runnable {
 
                         int refreshInterval = (consecutiveExtinctions > 10) ? 2 : 4;
                         if (phaseCounter % refreshInterval == 0 && seedsReady) {
-                            // Phase 2 runs more frequently when stuck
                             runPhase2_GpuDeepDfs();
-
-                            // --- SAFETY VALVE 1 ---
                             if (seedPool.size() >= activeBatch) {
                                 logger.warn(">>> Phase 2 traffic jam (LNS Mode)! Force-clearing the pool.");
                                 seedPool.clear();
                             }
-
                         } else if (!seedsReady) {
                             runPhase1_CpuSeedGen();
                         } else if (deepestStep >= absoluteHighScore - 10) {
@@ -484,24 +480,23 @@ public class EternitySolver implements Runnable {
                         }
                     } else if (seedPool.size() >= activeBatch) {
                         runPhase2_GpuDeepDfs();
-
-                        // --- SAFETY VALVE 2 ---
                         if (seedPool.size() >= activeBatch) {
                             logger.warn(">>> Phase 2 traffic jam (Standard Mode)! Force-clearing the pool.");
                             seedPool.clear();
                         }
-
                     } else {
                         runPhase1_CpuSeedGen();
                     }
                 } else {
-                    if (deepestStep >= LNS_THRESHOLD) {
-                        logger.info(">>> [CPU MODE] Skipping Surgeon mode (GPU only). Triggering CPU Teardown...");
-                        consecutiveExtinctions += 15;
-                        triggerBranchScrap();
-                    } else {
-                        runPhase1_CpuSeedGen();
-                    }
+                    runPhase1_CpuSeedGen();
+
+//                    if (deepestStep >= LNS_THRESHOLD) {
+//                        logger.info(">>> [CPU MODE] Skipping Surgeon mode (GPU only). Triggering CPU Teardown...");
+//                        consecutiveExtinctions += 15;
+//                        triggerBranchScrap();
+//                    } else {
+//                        runPhase1_CpuSeedGen();
+//                    }
                 }
 
                 if (System.currentTimeMillis() - lastPeriodicSave > 300_000) {
@@ -549,6 +544,9 @@ public class EternitySolver implements Runnable {
     private void runPhase1_CpuSeedGen() {
         Arrays.fill(usedPhysicalPieces, false);
 
+        if (!useGpu) {
+            currentSeedDepth = 256;
+        }
         int lockedPieces = 0;
         for (int p : flatResumeBoard) {
             if (p != -1 && p != -2) {
@@ -1293,8 +1291,6 @@ public class EternitySolver implements Runnable {
 
         // --- DIAGNOSTIC HEARTBEAT ---
         if (cpuTrials == 0 && gpuTrials == 0) {
-//            String status = isGpuBusy ? "[GPU PHASE 2/3] Kernel is executing..." : "[CPU PHASE 1] Workers are searching...";
-//            logger.info(">>> [HEARTBEAT] 0 steps completed in the last 5s. Status: %s | Depth: %d", status, deepestStep);
             lastThroughputReportTime = now;
             return;
         }
