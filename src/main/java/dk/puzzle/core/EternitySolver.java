@@ -80,6 +80,10 @@ public class EternitySolver implements Runnable {
     // Metrics and Progress Tracking
     private final AtomicLong globalCpuTrialCount = new AtomicLong(0);
     private final AtomicLong globalGpuTrialCount = new AtomicLong(0);
+    private final java.util.concurrent.atomic.AtomicInteger eliteWins = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final java.util.concurrent.atomic.AtomicInteger diverseWins = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final java.util.concurrent.atomic.AtomicInteger restartWins = new java.util.concurrent.atomic.AtomicInteger(0);
+    private volatile int highestP2DepthThisCycle = 0;
     private final Set<Integer> uniqueMaxScoreHashes = ConcurrentHashMap.newKeySet();
     private volatile int currentSeedDepth = SEED_DEPTH;
     volatile int absoluteHighScore = 0;
@@ -534,12 +538,12 @@ public class EternitySolver implements Runnable {
      * <p>
      * This method performs the following steps:
      * <ul>
-     *   <li>Resets the tracking of used physical pieces.</li>
-     *   <li>Counts the number of locked (already placed) pieces on the board.</li>
-     *   <li>Determines the CPU search depth dynamically (handling fast GPU handoff logic).</li>
-     *   <li>Spawns parallel {@link CpuSearchWorker} instances across all CPU cores to search for and populate the seed pool.</li>
-     *   <li>Handles deadlocks or branch exhaustions by checking if the seed pool is empty or if the CPU search has finished
-     *       without finding a solution, triggering a branch scrap when appropriate.</li>
+     * <li>Resets the tracking of used physical pieces.</li>
+     * <li>Counts the number of locked (already placed) pieces on the board.</li>
+     * <li>Determines the CPU search depth dynamically (handling fast GPU handoff logic).</li>
+     * <li>Spawns parallel {@link CpuSearchWorker} instances across all CPU cores to search for and populate the seed pool.</li>
+     * <li>Handles deadlocks or branch exhaustions by checking if the seed pool is empty or if the CPU search has finished
+     * without finding a solution, triggering a branch scrap when appropriate.</li>
      * </ul>
      */
     private void runPhase1_CpuSeedGen() {
@@ -553,13 +557,24 @@ public class EternitySolver implements Runnable {
         }
 
         // --- FAST GPU HANDOFF LOGIC ---
+        int dynamicOffset;
+        if (lockedPieces >= 190) {
+            dynamicOffset = 2; // Endgame: CPU barely touches it, let the GPU brute-force!
+        } else if (lockedPieces >= 150) {
+            dynamicOffset = 4; // Late game
+        } else {
+            dynamicOffset = userCpuHandoffDepth; // Default (usually 8)
+        }
+
         if (lockedPieces == 0) {
             currentSeedDepth = 14;
             logger.info(">>> [PHASE 1] Empty board. Setting fast GPU handoff depth to: " + currentSeedDepth);
         } else if (lockedPieces < SEED_DEPTH) {
-            currentSeedDepth = lockedPieces + userCpuHandoffDepth;
+            // Note: If you ever start from 0 again, you actually want the CPU to reach SEED_DEPTH (110)
+            // before handing off, to prevent GPU warp divergence.
+            currentSeedDepth = Math.max(SEED_DEPTH, lockedPieces + dynamicOffset);
         } else {
-            currentSeedDepth = Math.max(SEED_DEPTH, lockedPieces + userCpuHandoffDepth);
+            currentSeedDepth = lockedPieces + dynamicOffset;
         }
 
 //        currentBatchSize.set(seedPool.size());
@@ -635,6 +650,35 @@ public class EternitySolver implements Runnable {
         }
 
         applyStaticLocks(bestBoardOut);
+        // --- ANALYZE BATCH SEED PERFORMANCE ---
+        int maxDepthInBatch = 0;
+        int bestSeedIndex = 0;
+        int[] threadDepths = result.threadDepths();
+
+        for (int i = 0; i < threadDepths.length; i++) {
+            if (threadDepths[i] > maxDepthInBatch) {
+                maxDepthInBatch = threadDepths[i];
+                bestSeedIndex = i;
+            }
+        }
+
+        if (maxDepthInBatch > highestP2DepthThisCycle) {
+            highestP2DepthThisCycle = maxDepthInBatch;
+        }
+
+        // Classify the winning seed based on its position in the stratified tiers
+        // Elite = first 20%, Diverse = next 50%, Random-Restart = remaining 30%
+        int totalSeeds = seeds.size();
+        if (totalSeeds > 0) {
+            double relativePosition = (double) bestSeedIndex / totalSeeds;
+            if (relativePosition <= 0.20) {
+                eliteWins.incrementAndGet();
+            } else if (relativePosition <= 0.70) {
+                diverseWins.incrementAndGet();
+            } else {
+                restartWins.incrementAndGet();
+            }
+        }
         globalGpuTrialCount.addAndGet(result.stepsTaken());
         isGpuBusy = false;
 
@@ -698,7 +742,14 @@ public class EternitySolver implements Runnable {
 
         // --- Seed generation for the next batch ---
         if (consecutiveGpuStagnation < 4) {
-            seedPool.addAll(SeedSelector.selectBest(seeds, result.threadDepths(), getDynamicBatchSize(), new Random()));
+            seedPool.addAll(SeedSelector.selectBest(
+                    seeds,
+                    result.threadDepths(),
+                    getDynamicBatchSize(),
+                    buildOrder,
+                    bestBoard,
+                    new Random()
+            ));
 //            currentBatchSize.set(seedPool.size());
         } else {
             logger.warn(">>> [!!!] Phase 2 GPU stagnated! Activating Teardown...");
@@ -1240,12 +1291,40 @@ public class EternitySolver implements Runnable {
         long cpuTrials = globalCpuTrialCount.getAndSet(0);
         long gpuTrials = globalGpuTrialCount.getAndSet(0);
 
+        // --- DIAGNOSTIC HEARTBEAT ---
+        if (cpuTrials == 0 && gpuTrials == 0) {
+//            String status = isGpuBusy ? "[GPU PHASE 2/3] Kernel is executing..." : "[CPU PHASE 1] Workers are searching...";
+//            logger.info(">>> [HEARTBEAT] 0 steps completed in the last 5s. Status: %s | Depth: %d", status, deepestStep);
+            lastThroughputReportTime = now;
+            return;
+        }
+
         double cpuTps = cpuTrials / (elapsed / 1000.0);
         double gpuTps = gpuTrials / (elapsed / 1000.0);
 
         int hash = Arrays.hashCode(bestBoard);
+
+        // Print the primary throughput speed
         logger.info("[SPEED] CPU: %,.0f/s  |  GPU: %,.0f/s  |  Pieces: %d  |  Hash: %08X",
                 cpuTps, gpuTps, deepestStep, hash);
+
+        // --- PRINT POPULATION PERFORMANCE STATS ---
+        int totalWins = eliteWins.get() + diverseWins.get() + restartWins.get();
+        if (totalWins > 0) {
+            logger.info("[EVOLUTION] Batch Winner Distribution -> Elite: %d%% | Diverse: %d%% | Restarts: %d%% | Peak P2 Depth: %d",
+                    (eliteWins.get() * 100) / totalWins,
+                    (diverseWins.get() * 100) / totalWins,
+                    (restartWins.get() * 100) / totalWins,
+                    highestP2DepthThisCycle);
+            System.out.printf("[EVOLUTION] Batch Winner Distribution -> Elite: %d%% | Diverse: %d%% | Restarts: %d%% | Peak P2 Depth: %d%n",
+                    (eliteWins.get() * 100) / totalWins,
+                    (diverseWins.get() * 100) / totalWins,
+                    (restartWins.get() * 100) / totalWins,
+                    highestP2DepthThisCycle);
+        }
+
+        // Reset the peak tracker for the next report window
+        highestP2DepthThisCycle = deepestStep;
 
         lastThroughputReportTime = now;
     }
