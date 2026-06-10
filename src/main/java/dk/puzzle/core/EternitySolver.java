@@ -37,6 +37,8 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class EternitySolver implements Runnable {
 
+    // --- VARIANT TRACKER ---
+    private final Set<Integer> savedVariantHashes = ConcurrentHashMap.newKeySet();
     public static final int SEED_DEPTH = 110;
     public static final int LNS_THRESHOLD = 200;
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
@@ -57,7 +59,7 @@ public class EternitySolver implements Runnable {
     private final PieceInventory inventory;
     private final CompatibilityIndex compatIndex;
     private final boolean lockCenter;
-
+    private long lastVanguardLogTime = 0;
     // Threading and Concurrency
     private final ExecutorService executor;
     private final int numCores;
@@ -114,6 +116,14 @@ public class EternitySolver implements Runnable {
     private volatile boolean isGpuBusy = false;
     private volatile int poisonedIndex = -1;
     private volatile int poisonedPiece = -1;
+    private volatile int absolutePeakDepth = 0;
+    private volatile int trueStagnationCounter = 0;
+    private long lastForcedGuiUpdate = 0;
+
+    // --- STAGNATION TRACKING VARIABLES ---
+    private volatile int cpuStagnationCounter = 0;
+    private volatile int lastPeakDepth = 0;
+
     /**
      * The value of {@code consecutiveExtinctions} at which the current poison expires.
      * The ban is lifted automatically when the extinction counter exceeds this value,
@@ -455,10 +465,10 @@ public class EternitySolver implements Runnable {
 
                             boolean wasPoisoned = checkPoisonAndRetreat(currentDeadEndHash, deepestStep);
 
-                            // 3. If it wasn't poisoned, do the normal 5-piece retreat.
+                            // 3. If it wasn't poisoned, do the normal retreat.
                             if (!wasPoisoned) {
                                 logger.warn(">>> Watchdog: Normal Dead End at depth " + deepestStep);
-                                consecutiveExtinctions += 5;
+                                consecutiveExtinctions++; // CHANGED FROM += 5
                                 triggerBranchScrap();
                             }
                         }
@@ -470,29 +480,36 @@ public class EternitySolver implements Runnable {
 
                 if (this.useGpu && this.gpuEngine != null) {
                     if (deepestStep >= LNS_THRESHOLD) {
-                        phaseCounter++;
                         boolean seedsReady = seedPool.size() >= activeBatch;
 
+                        // phaseCounter counts only Phase 3 completions.
+                        // Phase 2 refresh fires every refreshInterval Phase 3 rounds.
+                        // When stuck (>10 extinctions) Phase 2 runs every 2nd round.
                         int refreshInterval = (consecutiveExtinctions > 10) ? 2 : 4;
                         if (phaseCounter % refreshInterval == 0 && seedsReady) {
+                            // Scheduled Phase 2 exploration round
                             runPhase2_GpuDeepDfs();
                             if (seedPool.size() >= activeBatch) {
                                 logger.warn(">>> Phase 2 traffic jam (LNS Mode)! Force-clearing the pool.");
                                 seedPool.clear();
+                                triggerBranchScrap();
                             }
+                            // Do NOT increment here — only Phase 3 runs count
                         } else if (!seedsReady) {
+                            // Seed pool dry — refill before next Phase 2 round
                             runPhase1_CpuSeedGen();
-                        } else if (deepestStep >= absoluteHighScore - 10) {
-                            runPhase3_GpuSurgeon();
-                            phaseCounter++;
+                            // Do NOT increment here — seed-gen rounds don't count
                         } else {
-                            phaseCounter = 0;
+                            // Normal Phase 3 repair round
+                            runPhase3_GpuSurgeon();
+                            phaseCounter++; // Only Phase 3 runs advance the counter
                         }
                     } else if (seedPool.size() >= activeBatch) {
                         runPhase2_GpuDeepDfs();
                         if (seedPool.size() >= activeBatch) {
                             logger.warn(">>> Phase 2 traffic jam (Standard Mode)! Force-clearing the pool.");
                             seedPool.clear();
+                            triggerBranchScrap();
                         }
                     } else {
                         runPhase1_CpuSeedGen();
@@ -566,6 +583,8 @@ public class EternitySolver implements Runnable {
             }
         }
 
+        deepestStep = lockedPieces;
+
         // --- FAST GPU HANDOFF LOGIC ---
         int dynamicOffset;
         if (lockedPieces >= 190) {
@@ -588,7 +607,25 @@ public class EternitySolver implements Runnable {
         }
 
 //        currentBatchSize.set(seedPool.size());
+        Set<Integer> dominantFrontierPieces = new java.util.HashSet<>();
 
+        // We must ban a MASSIVE chunk of the poisoned tree, not just the first step!
+        // This forces the CPU to build a radically alien foundation.
+        int banLength = 15;
+        int frontierEnd = Math.min(256, lockedPieces + banLength);
+
+        for (int i = lockedPieces; i < frontierEnd; i++) {
+            int idx = buildOrder[i];
+            int p = bestBoard[idx];
+            if (p != -1 && p != -2) {
+                for (int oi = 0; oi < 1024; oi++) {
+                    if (inventory.allOrientations[oi] == p) {
+                        dominantFrontierPieces.add(inventory.physicalMapping[oi]);
+                        break;
+                    }
+                }
+            }
+        }
         try {
             int activeBatch = getDynamicBatchSize();
             if (userBatchSizeOverride > 0) {
@@ -596,8 +633,23 @@ public class EternitySolver implements Runnable {
             }
 
             List<CpuSearchWorker> workers = new ArrayList<>();
+
             for (int i = 0; i < numCores; i++) {
-                workers.add(new CpuSearchWorker(activeBatch));
+                if (!dominantFrontierPieces.isEmpty()) {
+                    // Vanguard workers must survive for 'banLength' steps without touching ANY of the poisoned pieces!
+                    workers.add(new CpuSearchWorker(activeBatch, dominantFrontierPieces, lockedPieces, lockedPieces + banLength));
+                } else {
+                    workers.add(new CpuSearchWorker(activeBatch, null, 0, 0));
+                }
+            }
+
+            if (!dominantFrontierPieces.isEmpty()) {
+                long now = System.currentTimeMillis();
+                if (now - lastVanguardLogTime > 10000) {
+                    logger.info(">>> [GENETIC EXPLORATION] 100%% Vanguard Threads. Hard-banning the next %d poisoned pieces at depth %d.",
+                            dominantFrontierPieces.size(), lockedPieces);
+                    lastVanguardLogTime = now;
+                }
             }
 
             List<Future<Boolean>> futures = executor.invokeAll(workers);
@@ -694,12 +746,8 @@ public class EternitySolver implements Runnable {
 
         // --- CALCULATION USING CLASS-LEVEL FIELD ---
         long elapsed = System.currentTimeMillis() - methodStartTime;
-        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
-                Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
-
-        if (result.solved()) {
-            handleVictory(bestBoardOut);
-        }
+//        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
+//                Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
 
         if (result.solved()) {
             handleVictory(bestBoardOut);
@@ -717,6 +765,14 @@ public class EternitySolver implements Runnable {
 
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
+
+            if (deepestStep > 211) {
+                int hash = Arrays.hashCode(bestBoard);
+                if (savedVariantHashes.add(hash)) { // .add() returns true only if it's a NEW hash!
+                    logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
+                    analyzeFullBoardPotential(bestBoard, deepestStep);
+                }
+            }
 
             // Log the local climb so you can watch it rise
             if (deepestStep > lastReportedDepth) {
@@ -737,7 +793,6 @@ public class EternitySolver implements Runnable {
                 uniqueMaxScoreHashes.add(hash);
 
                 RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-                analyzeFullBoardPotential(globalBestBoard);
                 try {
                     saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
                 } catch (Exception e) {
@@ -837,29 +892,22 @@ public class EternitySolver implements Runnable {
         // using a unique name and a direct System call.
         long calculationElapsed = System.currentTimeMillis() - start;
 
-        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
+        logger.info(">>> GPU Phase 3 (Surgeon) complete. Steps taken per second: %,d",
                 Math.round((double) result.stepsTaken() * 1000) / Math.max(1, calculationElapsed));
 
         if (result.solved()) {
             handleVictory(bestBoardOut);
         }
-        // --- 2. THE STRICT GPU ECHO FILTER ---
-        // GpuEngine.java ONLY updates bestBoardOut if it strictly beats absoluteHighScore.
-        // Therefore, we ignore EVERYTHING unless it beats the absolute global record.
-        if (result.newHighScore() > absoluteHighScore) {
-
-            int hash = Arrays.hashCode(bestBoardOut);
-            logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %d", result.newHighScore(), hash);
-            System.out.printf(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %d%n", result.newHighScore(),
-                    hash);
+        // --- 2. ACCEPT ANY LOCAL PROGRESS ---
+        // Phase 3 must act on ANY improvement over deepestStep, not just
+        // absolute records. Without this it cannot build momentum through
+        // 213 -> 214 -> 215 -> 216 incrementally.
+        if (result.newHighScore() > deepestStep) {
 
             if (!verifyBoardStrict(bestBoardOut)) {
-                logger.error(">>> [FATAL GPU BUG] The GPU returned a board with an illegal edge conflict!");
+                logger.error(">>> [FATAL GPU BUG] Phase 3 returned a board with an illegal edge conflict!");
                 int piecesPlaced = countPieces(bestBoardOut);
-
                 if (piecesPlaced >= 240) {
-                    logger.info(">>> [RESCUE] High-score board (" + piecesPlaced + ") detected. Executing emergency " +
-                            "surgery...");
                     int validPieces = rescueBoard(bestBoardOut);
                     if (validPieces > deepestStep) {
                         deepestStep = validPieces;
@@ -869,43 +917,55 @@ public class EternitySolver implements Runnable {
                     }
                 } else {
                     fatalGpuBugCount++;
-                    if (fatalGpuBugCount > 50) {
-                        triggerBranchScrap();
-                        fatalGpuBugCount = 0;
-                    }
+                    if (fatalGpuBugCount > 50) { triggerBranchScrap(); fatalGpuBugCount = 0; }
                 }
                 return;
             }
 
-            // --- 3. APPLY NEW GLOBAL RECORD ---
+            // --- 3. APPLY LOCAL PROGRESS ---
             deepestStep = result.newHighScore();
-            absoluteHighScore = deepestStep;
-            lastReportedDepth = absoluteHighScore;
-
             consecutiveGpuStagnation = 0;
             consecutiveExtinctions = 0;
 
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
-            System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
-
             topBoards.offer(bestBoardOut, deepestStep);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
-            uniqueMaxScoreHashes.clear();
-            uniqueMaxScoreHashes.add(hash);
+            if (deepestStep > 211) {
+                int hash = Arrays.hashCode(bestBoard);
+                if (savedVariantHashes.add(hash)) {
+                    logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
+                    analyzeFullBoardPotential(bestBoard, deepestStep);
+                }
+            }
 
-            RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-            saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
-            analyzeFullBoardPotential(globalBestBoard);
+            logger.info(">>> [PHASE 3 PROGRESS] Depth: %d / 256 | Hash: %08X",
+                    deepestStep, Arrays.hashCode(bestBoard));
+
+            // Only save to disk when beating the absolute global record
+            if (deepestStep > absoluteHighScore) {
+                absoluteHighScore = deepestStep;
+                lastReportedDepth = absoluteHighScore;
+                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+
+                int hash = Arrays.hashCode(globalBestBoard);
+                uniqueMaxScoreHashes.clear();
+                uniqueMaxScoreHashes.add(hash);
+
+                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X",
+                        absoluteHighScore, hash);
+
+                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
+                saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                analyzeFullBoardPotential(globalBestBoard);
+            }
 
         } else {
-            // The GPU failed to beat the absolute global high score.
-            // The bestBoardOut array is stale. Ignore it and increment stagnation.
             consecutiveGpuStagnation++;
         }
         if (consecutiveGpuStagnation >= 4) {
-            logger.warn(">>> [!!!] Phase 2 GPU stagnated! Activating Teardown...");
-            consecutiveExtinctions++; // Force the drop amount to grow!
+            logger.warn(">>> [!!!] Phase 3 stagnated (4 rounds). Activating Teardown...");
+            consecutiveExtinctions++;
             triggerBranchScrap();
         }
     }
@@ -1021,7 +1081,10 @@ public class EternitySolver implements Runnable {
     }
 
     private void analyzeFullBoardPotential(int[] recordBoard) {
-        int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
+        analyzeFullBoardPotential(recordBoard, absoluteHighScore);
+    }
+
+    private void analyzeFullBoardPotential(int[] recordBoard, int baseScore) {        int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
         List<Integer> emptySpots = new ArrayList<>();
         boolean[] usedPhysical = new boolean[256];
 
@@ -1210,82 +1273,93 @@ public class EternitySolver implements Runnable {
             logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
         }
 
-        saveFullBoardVariant(simulatedBoard, absoluteHighScore, totalConflicts);
+        saveFullBoardVariant(simulatedBoard, baseScore, totalConflicts);
     }
 
     private void triggerBranchScrap() {
-        // 1. CHUNK TEARDOWN (Breaks the Yo-Yo Loop)
-        // We always increment the extinction counter and drop by a large chunk (10+ pieces).
-        // This gives the CPU a wide enough space to actually find a new path.
         consecutiveExtinctions++;
-        int dropAmount;
-        if (this.useGpu) {
-            // GPU EXPLOSION: Escapes Gravity Wells
-            dropAmount = 10 + (consecutiveExtinctions * 5);
-        } else {
-            // CPU DFS BACKTRACK: Gentle, methodical peeling
-            // Only drop 2 pieces so the CPU systematically explores the exact edge of the canopy
-            dropAmount = 2;
-        }
-        int lockedPieces = Math.max(0, deepestStep - dropAmount);
 
-        // 2. THE SINGLE POISON BAN
-        // Poison lasts exactly one scrap cycle — it expires when consecutiveExtinctions
-        // increments past the current value, so the next reset is free to reconsider
-        // the banned piece/position in different structural contexts.
-        if (lockedPieces > 0) {
-            poisonedIndex = buildOrder[lockedPieces];
-            poisonedPiece = bestBoard[poisonedIndex];
-            if (poisonedPiece == -1) {
-                poisonedPiece = flatResumeBoard[poisonedIndex]; // Fallback
+        // --- TRUE STAGNATION TRACKER (GPU) ---
+        // Climbing back to an old trap is NOT progress!
+        if (deepestStep > absolutePeakDepth) {
+            absolutePeakDepth = deepestStep;
+            trueStagnationCounter = 0; // We broke the ALL-TIME record! Reset the bomb.
+        } else {
+            trueStagnationCounter++;   // Stuck in a Yo-Yo loop.
+        }
+
+        // --- STAGNATION DETECTION (CPU ONLY) ---
+        if (!this.useGpu) {
+            if (Math.abs(deepestStep - lastPeakDepth) <= 15) {
+                cpuStagnationCounter++;
+            } else {
+                cpuStagnationCounter = 0;
+                lastPeakDepth = deepestStep;
             }
-            poisonExpiryExtinction = consecutiveExtinctions; // expires next scrap cycle
-            logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping %d pieces to depth %d. Poison expires at " +
-                            "extinction %d.",
-                    dropAmount, lockedPieces, poisonExpiryExtinction + 1);
-        } else {
-            // BOTTOM OUT SAFETY
-            lockedPieces = 0;
-            poisonedIndex = -1;
-            poisonedPiece = -1;
-            poisonExpiryExtinction = -1;
-            consecutiveExtinctions = 0;
         }
 
-        // 3. REBUILD THE CPU MEMORY
-        Arrays.fill(flatResumeBoard, -1);
-        for (int step = 0; step < lockedPieces; step++) {
-            int idx = buildOrder[step];
-            boolean isStatic = (lockCenter && idx == 135);
-            if (lockCenter) {
-                for (int hPos : HINT_POSITIONS) {
-                    if (idx == hPos) {
-                        isStatic = true;
-                        break;
-                    }
+        // --- CALCULATE THE CURRENT FOUNDATION ---
+        int currentBaseCamp = 0;
+        for (int p : flatResumeBoard) {
+            if (p != -1 && p != -2) currentBaseCamp++;
+        }
+        if (currentBaseCamp == 0) currentBaseCamp = deepestStep;
+
+        int lockedPieces;
+
+        if (this.useGpu) {
+            // --- ELASTIC GPU TEARDOWN ---
+            if (trueStagnationCounter > 4) {
+                // [GENETIC RESET]: The foundation is poisoned!
+                // Subtract from the BASE CAMP, not the peak, so we dig deeper every time!
+                int dropAmount = 40;
+                lockedPieces = Math.max(0, currentBaseCamp - dropAmount);
+                trueStagnationCounter = 0;
+                logger.warn(">>> [GENETIC RESET] Tunnel collapse! Purging deep foundation to depth " + lockedPieces);
+            } else if (trueStagnationCounter > 2) {
+                // Medium retreat (Subtract from the Peak)
+                lockedPieces = Math.max(0, deepestStep - 40);
+            } else {
+                // Fast backtrack (Subtract from the Peak)
+                lockedPieces = Math.max(0, deepestStep - (15 + (trueStagnationCounter * 2)));
+            }
+        } else {
+            // --- ELASTIC CPU TEARDOWN ---
+            int dropAmount;
+            if (cpuStagnationCounter > 20) {
+                dropAmount = 15; // Massive retreat
+                cpuStagnationCounter = 0; // Reset after explosion
+            } else if (cpuStagnationCounter > 10) {
+                dropAmount = 8;  // Medium retreat
+            } else if (cpuStagnationCounter > 5) {
+                dropAmount = 4;  // Small retreat
+            } else {
+                dropAmount = 2;  // Normal efficient backtracking
+            }
+            lockedPieces = Math.max(0, deepestStep - dropAmount);
+        }
+
+// --- EXECUTE THE TEARDOWN ---
+        int newTargetDepth = Math.max(0, lockedPieces);
+        int piecesDropped = deepestStep - newTargetDepth;
+
+        logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping " + piecesDropped + " pieces to depth " + newTargetDepth + ".");
+
+        // CRITICAL: Update the ghost tracker
+        deepestStep = newTargetDepth;
+
+        // --- THE UNIVERSAL TEARDOWN OVERRIDE ---
+        // Physically strip the pieces off the board right now!
+        // This guarantees the Orchestrator steps backwards even if the loop tries to skip it.
+        for (int i = newTargetDepth; i < 256; i++) {
+            if (i < buildOrder.length) {
+                int pos = buildOrder[i];
+                // Strip the piece, but strictly preserve any permanent hints (-2)
+                if (flatResumeBoard[pos] != -2) {
+                    flatResumeBoard[pos] = -1;
                 }
             }
-            if (!isStatic) {
-                flatResumeBoard[idx] = bestBoard[idx];
-            }
         }
-        applyStaticLocks(flatResumeBoard);
-
-        // 4. ERASE GHOST PIECES
-        for (int i = lockedPieces; i < 256; i++) {
-            int boardPos = buildOrder[i];
-            bestBoard[boardPos] = -1;
-        }
-
-        // 5. CLEAN ENGINE RESET
-        deepestStep = lockedPieces;
-        seedPool.clear();
-//    currentBatchSize.set(0);
-        consecutiveGpuStagnation = 0;
-        phaseCounter = 0;
-
-        topBoards.clear();
-        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
     }
 
     private void handleVictory(int[] winningBoard) {
@@ -1358,6 +1432,21 @@ public class EternitySolver implements Runnable {
         highestP2DepthThisCycle = deepestStep;
 
         lastThroughputReportTime = now;
+
+        // --- LIVE FEED UI OVERRIDE ---
+        if (now - lastForcedGuiUpdate > 60000) { // 60,000 milliseconds = 1 minute
+            lastForcedGuiUpdate = now;
+
+            // 1. Create a safe copy of the active CPU base camp
+            int[] liveBoardCopy = new int[256];
+            System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
+
+            logger.info(">>> [VISUALIZER] Pushing live base camp to screen...");
+
+            // 2. Convert to 2D and force the GUI to draw it!
+            // We bypass the gated updateDisplay() method and talk directly to the Eternity GUI class
+            Eternity.updateDisplay(deepestStep, this.absoluteHighScore, buildDisplayBoard(liveBoardCopy));
+        }
     }
 
     void retreat(int targetStep, String logMessage) {
@@ -1672,8 +1761,17 @@ public class EternitySolver implements Runnable {
         private final int activeBatch;
         private long localTrialCount = 0;
 
-        public CpuSearchWorker(int activeBatch) {
+        // --- NEW VANGUARD EXPLORATION FIELDS ---
+        private final Set<Integer> bannedPhysicalPieces;
+        private final int banStartStep;
+        private final int banEndStep;
+
+        public CpuSearchWorker(int activeBatch, Set<Integer> bannedPieces, int banStart, int banEnd) {
             this.activeBatch = activeBatch;
+            this.bannedPhysicalPieces = bannedPieces;
+            this.banStartStep = banStart;
+            this.banEndStep = banEnd;
+
             System.arraycopy(flatResumeBoard, 0, localBoard, 0, 256);
             System.arraycopy(flatResumeBoard, 0, localResumeBoard, 0, 256);
             System.arraycopy(usedPhysicalPieces, 0, localUsed, 0, 256);
@@ -1818,17 +1916,16 @@ public class EternitySolver implements Runnable {
                 int p = inventory.allOrientations[orientationIdx];
                 int physicalIdx = inventory.physicalMapping[orientationIdx];
 
+                // --- VANGUARD EXPLORATION LOGIC ---
+                // If this is a Vanguard Worker in the active frontier, mathematically forbid
+                // placing the pieces that make up the current local trap!
+                if (bannedPhysicalPieces != null && step >= banStartStep && step < banEndStep) {
+                    if (bannedPhysicalPieces.contains(physicalIdx)) {
+                        continue;
+                    }
+                }
+
                 if (eastReq != CompatibilityIndex.WILDCARD && PieceUtils.getEast(p) != eastReq) {
-                    continue;
-                }
-                if (southReq != CompatibilityIndex.WILDCARD && PieceUtils.getSouth(p) != southReq) {
-                    continue;
-                }
-                // Poison expires after one scrap cycle so the piece/position
-                // combination is reconsidered in fresh structural contexts.
-                if (boardIdx == poisonedIndex
-                        && p == poisonedPiece
-                        && consecutiveExtinctions <= poisonExpiryExtinction) {
                     continue;
                 }
 
