@@ -598,9 +598,10 @@ public class EternitySolver implements Runnable {
         if (lockedPieces == 0) {
             currentSeedDepth = 14;
             logger.info(">>> [PHASE 1] Empty board. Setting fast GPU handoff depth to: " + currentSeedDepth);
+        } else if (this.lockCenter && lockedPieces < SEED_DEPTH) {
+            currentSeedDepth = lockedPieces + dynamicOffset;
         } else if (lockedPieces < SEED_DEPTH) {
-            // Note: If you ever start from 0 again, you actually want the CPU to reach SEED_DEPTH (110)
-            // before handing off, to prevent GPU warp divergence.
+            // Unconstrained: The board is wide open, CPU can easily reach 110.
             currentSeedDepth = Math.max(SEED_DEPTH, lockedPieces + dynamicOffset);
         } else {
             currentSeedDepth = lockedPieces + dynamicOffset;
@@ -766,7 +767,7 @@ public class EternitySolver implements Runnable {
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
-            if (deepestStep > 211) {
+            if (deepestStep > 198) {
                 int hash = Arrays.hashCode(bestBoard);
                 if (savedVariantHashes.add(hash)) { // .add() returns true only if it's a NEW hash!
                     logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
@@ -931,7 +932,7 @@ public class EternitySolver implements Runnable {
             topBoards.offer(bestBoardOut, deepestStep);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
-            if (deepestStep > 211) {
+            if (deepestStep > 198) {
                 int hash = Arrays.hashCode(bestBoard);
                 if (savedVariantHashes.add(hash)) {
                     logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
@@ -1414,14 +1415,12 @@ public class EternitySolver implements Runnable {
         // --- PRINT POPULATION PERFORMANCE STATS ---
         int totalWins = eliteWins.get() + diverseWins.get() + restartWins.get();
         if (totalWins > 0) {
-            logger.info("[EVOLUTION] Batch Winner Distribution -> Elite: %d%% | Diverse: %d%% | Restarts: %d%% | Peak" +
-                            " P2 Depth: %d",
+            logger.info("[EVOLUTION] Batch Winner Distribution -> Elite: %d%% | Diverse: %d%% | Restarts: %d%% | Peak P2 Depth: %d",
                     (eliteWins.get() * 100) / totalWins,
                     (diverseWins.get() * 100) / totalWins,
                     (restartWins.get() * 100) / totalWins,
                     highestP2DepthThisCycle);
-            System.out.printf("[EVOLUTION] Batch Winner Distribution -> Elite: %d%% | Diverse: %d%% | Restarts: %d%% " +
-                            "| Peak P2 Depth: %d%n",
+            System.out.printf("[EVOLUTION] Batch Winner Distribution -> Elite: %d%% | Diverse: %d%% | Restarts: %d%% | Peak P2 Depth: %d%n",
                     (eliteWins.get() * 100) / totalWins,
                     (diverseWins.get() * 100) / totalWins,
                     (restartWins.get() * 100) / totalWins,
@@ -1437,14 +1436,13 @@ public class EternitySolver implements Runnable {
         if (now - lastForcedGuiUpdate > 60000) { // 60,000 milliseconds = 1 minute
             lastForcedGuiUpdate = now;
 
-            // 1. Create a safe copy of the active CPU base camp
+            // 1. Create a safe copy of the active GPU peak (NOT the base camp!)
             int[] liveBoardCopy = new int[256];
             System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
 
-            logger.info(">>> [VISUALIZER] Pushing live base camp to screen...");
+            logger.info(">>> [VISUALIZER] Pushing live peak board to screen...");
 
             // 2. Convert to 2D and force the GUI to draw it!
-            // We bypass the gated updateDisplay() method and talk directly to the Eternity GUI class
             Eternity.updateDisplay(deepestStep, this.absoluteHighScore, buildDisplayBoard(liveBoardCopy));
         }
     }
