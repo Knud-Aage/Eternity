@@ -208,6 +208,36 @@ public class Eternity {
                 controlPanel.add(Box.createVerticalStrut(10));
                 controlPanel.add(stagSlider);
 
+                // --- NEW: DEEP VARIANT SAVE THRESHOLD SLIDER ---
+                JLabel thresholdLabel = new JLabel("Save Variants At Depth: 198");
+                thresholdLabel.setFont(labelFont);
+                thresholdLabel.setForeground(textColor);
+                thresholdLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                // Range from 190 to 250, default starting at 198
+                JSlider thresholdSlider = new JSlider(JSlider.HORIZONTAL, 190, 250, 198);
+                thresholdSlider.setBackground(new Color(40, 42, 45));
+                thresholdSlider.setMajorTickSpacing(10);
+                thresholdSlider.setMinorTickSpacing(2);
+                thresholdSlider.setPaintTicks(true);
+                thresholdSlider.setPaintLabels(true);
+
+                thresholdSlider.addChangeListener(e -> {
+                    int val = thresholdSlider.getValue();
+                    thresholdLabel.setText("Save Variants At Depth: " + val);
+
+                    // Only send the command to the solver when the user stops dragging
+                    if (!thresholdSlider.getValueIsAdjusting()) {
+                        pbpSolver.setVariantSaveThreshold(val);
+                    }
+                });
+
+                controlPanel.add(Box.createVerticalStrut(30));
+                controlPanel.add(thresholdLabel);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(thresholdSlider);
+                // ------------------------------------------------
+
                 frame.add(controlPanel, BorderLayout.EAST);
                 }
 

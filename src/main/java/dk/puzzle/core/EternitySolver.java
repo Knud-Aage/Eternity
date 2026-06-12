@@ -15,12 +15,7 @@ import org.apache.logging.log4j.Logger;
 
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Random;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -39,6 +34,7 @@ public class EternitySolver implements Runnable {
 
     // --- VARIANT TRACKER ---
     private final Set<Integer> savedVariantHashes = ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.atomic.AtomicInteger variantSaveThreshold = new java.util.concurrent.atomic.AtomicInteger(198);
     public static final int SEED_DEPTH = 110;
     public static final int LNS_THRESHOLD = 200;
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
@@ -767,7 +763,7 @@ public class EternitySolver implements Runnable {
             System.arraycopy(bestBoardOut, 0, bestBoard, 0, 256);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
-            if (deepestStep > 198) {
+            if (deepestStep > variantSaveThreshold.get()) {
                 int hash = Arrays.hashCode(bestBoard);
                 if (savedVariantHashes.add(hash)) { // .add() returns true only if it's a NEW hash!
                     logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
@@ -932,7 +928,7 @@ public class EternitySolver implements Runnable {
             topBoards.offer(bestBoardOut, deepestStep);
             updateDisplay(deepestStep, buildDisplayBoard(bestBoard));
 
-            if (deepestStep > 198) {
+            if (deepestStep > variantSaveThreshold.get()) {
                 int hash = Arrays.hashCode(bestBoard);
                 if (savedVariantHashes.add(hash)) {
                     logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
@@ -1440,7 +1436,7 @@ public class EternitySolver implements Runnable {
             int[] liveBoardCopy = new int[256];
             System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
 
-            logger.info(">>> [VISUALIZER] Pushing live peak board to screen...");
+//            logger.info(">>> [VISUALIZER] Pushing live peak board to screen...");
 
             // 2. Convert to 2D and force the GUI to draw it!
             Eternity.updateDisplay(deepestStep, this.absoluteHighScore, buildDisplayBoard(liveBoardCopy));
@@ -1669,6 +1665,14 @@ public class EternitySolver implements Runnable {
         }
         System.arraycopy(rescuedBoard, 0, corruptedBoard, 0, 256);
         return validPieces;
+    }
+
+    /**
+     * Allows the GUI to dynamically change the depth at which full-board variants are saved.
+     */
+    public void setVariantSaveThreshold(int newThreshold) {
+        this.variantSaveThreshold.set(newThreshold);
+        logger.info(">>> [CONFIG] Variant Save Threshold updated to: " + newThreshold);
     }
 
     /**
@@ -1928,21 +1932,66 @@ public class EternitySolver implements Runnable {
                 }
 
                 if (passesLookahead(p, step, row, col, boardIdx)) {
+                    // 1. Temporarily place the piece to change the board state
                     localBoard[boardIdx] = p;
                     localUsed[physicalIdx] = true;
                     int ghost = localResumeBoard[boardIdx];
                     localResumeBoard[boardIdx] = -1;
+                    // 2. >>> THE RADAR SWEEP (With Claude's Depth Optimization) <<<
+                    // Skip the expensive sweep in the wide-open early game.
+                    // Activate the radar only when the board becomes heavily constrained (Depth 100+)
+                    if (step < 100 || isTopologicallyViable(localBoard, localUsed)) {
 
-                    if (solve(step + 1)) {
-                        return true;
+                        // 3. The geometry is safe! Take the next step.
+                        if (solve(step + 1)) {
+                            return true;
+                        }
                     }
 
+                    // 4. Backtrack (either because solve failed, or the radar detected a trap)
                     localBoard[boardIdx] = -1;
                     localUsed[physicalIdx] = false;
                     localResumeBoard[boardIdx] = ghost;
                 }
             }
             return false;
+        }
+
+        /**
+         * DYNAMIC LOOKAHEAD HEURISTIC
+         * Scans the unplaced board. If any empty cell has 0 valid candidates left in the
+         * remaining inventory, the current branch is topologically dead.
+         */
+        private boolean isTopologicallyViable(int[] localBoard, boolean[] localUsed) {
+            // Sweep the entire board looking for empty spaces
+            for (int i = 0; i < 256; i++) {
+                if (localBoard[i] == -1) {
+                    int r = i / 16;
+                    int c = i % 16;
+
+                    // Identify the mandatory edges surrounding this empty hole
+                    int nReq = (r == 0) ? 0 : (localBoard[i - 16] != -1 ? PieceUtils.getSouth(localBoard[i - 16]) : CompatibilityIndex.WILDCARD);
+                    int sReq = (r == 15) ? 0 : (localBoard[i + 16] != -1 ? PieceUtils.getNorth(localBoard[i + 16]) : CompatibilityIndex.WILDCARD);
+                    int wReq = (c == 0) ? 0 : (localBoard[i - 1] != -1 ? PieceUtils.getEast(localBoard[i - 1]) : CompatibilityIndex.WILDCARD);
+                    int eReq = (c == 15) ? 0 : (localBoard[i + 1] != -1 ? PieceUtils.getWest(localBoard[i + 1]) : CompatibilityIndex.WILDCARD);
+
+                    // Optimization: If the hole is sitting in wide-open space, skip it to save CPU cycles
+                    if (nReq == CompatibilityIndex.WILDCARD && sReq == CompatibilityIndex.WILDCARD &&
+                            eReq == CompatibilityIndex.WILDCARD && wReq == CompatibilityIndex.WILDCARD) {
+                        continue;
+                    }
+
+                    // Query the index using your existing mechanics
+                    java.util.BitSet futureCandidates = compatIndex.candidatesFor(nReq, eReq, sReq, wReq);
+                    compatIndex.andNotUsed(futureCandidates, localUsed);
+
+                    // If this specific hole has ZERO pieces left that can fit, the branch is dead!
+                    if (futureCandidates.isEmpty()) {
+                        return false;
+                    }
+                }
+            }
+            return true; // The board geometry is mathematically safe
         }
 
         private boolean passesLookahead(int p, int step, int row, int col, int idx) {
