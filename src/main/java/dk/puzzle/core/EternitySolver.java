@@ -115,6 +115,8 @@ public class EternitySolver implements Runnable {
     private volatile int absolutePeakDepth = 0;
     private volatile int trueStagnationCounter = 0;
     private long lastForcedGuiUpdate = 0;
+    private volatile int banStartStep = 0;
+    private volatile int banEndStep = 0;
 
     // --- STAGNATION TRACKING VARIABLES ---
     private volatile int cpuStagnationCounter = 0;
@@ -443,6 +445,7 @@ public class EternitySolver implements Runnable {
                 if (userBatchSizeOverride > 0) {
                     activeBatch = userBatchSizeOverride;
                 }
+
                 if (this.useGpu) {
                     int currentSeeds = seedPool.size();
                     if (currentSeeds > lastSeedCount) {
@@ -451,22 +454,43 @@ public class EternitySolver implements Runnable {
                         lastSeedCount = currentSeeds;
                     } else if (System.currentTimeMillis() - lastSeedGrowthTime > 5000) {
 
-                        if (currentSeeds > 0) {
-                            logger.warn(">>> Watchdog: Endgame Starvation! Forcing partial batch...");
-                            runPhase2_GpuDeepDfs();
+                        logger.warn(">>> Watchdog: Endgame Starvation Triggered! Executing immediate retreat.");
+
+                        // 1. Clear the queue instantly so we don't waste time processing a dead branch
+                        if (seedPool != null) {
                             seedPool.clear();
-                        } else {
-                            // 1. Get the hash of the board we are currently stuck on
-                            int currentDeadEndHash = Arrays.hashCode(bestBoard);
+                        }
 
-                            boolean wasPoisoned = checkPoisonAndRetreat(currentDeadEndHash, deepestStep);
+                        // 2. EXECUTE THE SMART RETREAT!
+                        int currentDeadEndHash = Arrays.hashCode(bestBoard);
+                        boolean wasPoisoned = checkPoisonAndRetreat(currentDeadEndHash, deepestStep);
 
-                            // 3. If it wasn't poisoned, do the normal retreat.
-                            if (!wasPoisoned) {
-                                logger.warn(">>> Watchdog: Normal Dead End at depth " + deepestStep);
-                                consecutiveExtinctions++; // CHANGED FROM += 5
-                                triggerBranchScrap();
+                        if (!wasPoisoned) {
+                            int deadEndDepth = deepestStep;
+
+                            // Calculate which row the engine died on (16 pieces per row)
+                            int failedRow = deadEndDepth / 16;
+
+                            // Roll back 2 full rows.
+                            int rollbackRow = Math.max(1, failedRow - 2);
+                            int newSeedDepth = rollbackRow * 16;
+
+                            logger.warn(String.format(">>> [SMART RETREAT] Starved at depth %d. Rolling Base Camp to Row %d (Depth %d)",
+                                    deadEndDepth, rollbackRow, newSeedDepth));
+
+                            // Sync the depth so the engine knows where it is
+                            deepestStep = newSeedDepth;
+
+                            // Erase the CPU start board down to the rollback row
+                            for (int i = newSeedDepth; i < 256; i++) {
+                                if (i < buildOrder.length) {
+                                    int pos = buildOrder[i];
+                                    if (flatResumeBoard[pos] != -2) {
+                                        flatResumeBoard[pos] = -1;
+                                    }
+                                }
                             }
+                            consecutiveExtinctions++;
                         }
 
                         lastSeedCount = 0;
@@ -512,14 +536,6 @@ public class EternitySolver implements Runnable {
                     }
                 } else {
                     runPhase1_CpuSeedGen();
-
-//                    if (deepestStep >= LNS_THRESHOLD) {
-//                        logger.info(">>> [CPU MODE] Skipping Surgeon mode (GPU only). Triggering CPU Teardown...");
-//                        consecutiveExtinctions += 15;
-//                        triggerBranchScrap();
-//                    } else {
-//                        runPhase1_CpuSeedGen();
-//                    }
                 }
 
                 if (System.currentTimeMillis() - lastPeriodicSave > 300_000) {
@@ -559,7 +575,7 @@ public class EternitySolver implements Runnable {
      * <li>Resets the tracking of used physical pieces.</li>
      * <li>Counts the number of locked (already placed) pieces on the board.</li>
      * <li>Determines the CPU search depth dynamically (handling fast GPU handoff logic).</li>
-     * <li>Spawns parallel {@link CpuSearchWorker} instances across all CPU cores to search for and populate the seed
+     * <li>Spawns parallel {@link CpuSearchWorker} instances across all currentSeedDepthCPU cores to search for and populate the seed
      * pool.</li>
      * <li>Handles deadlocks or branch exhaustions by checking if the seed pool is empty or if the CPU search has
      * finished
@@ -591,8 +607,8 @@ public class EternitySolver implements Runnable {
             dynamicOffset = userCpuHandoffDepth; // Default (usually 8)
         }
 
-        if (lockedPieces == 0) {
-            currentSeedDepth = 14;
+        if (lockedPieces <= 5) {
+            currentSeedDepth = 16;
             logger.info(">>> [PHASE 1] Empty board. Setting fast GPU handoff depth to: " + currentSeedDepth);
         } else if (this.lockCenter && lockedPieces < SEED_DEPTH) {
             currentSeedDepth = lockedPieces + dynamicOffset;
@@ -967,6 +983,35 @@ public class EternitySolver implements Runnable {
         }
     }
 
+//    private boolean checkPoisonAndRetreat(int currentBoardHash, int currentDepth) {
+//        // Only bother poisoning deep endgame boards (e.g., 200+)
+//        if (currentDepth < 200) {
+//            return false;
+//        }
+//
+//        // If this board is already poisoned, instantly reject it!
+//        if (poisonedHashes.contains(currentBoardHash)) {
+//            logger.warn(">>> POISONED BOARD DETECTED! (" + currentBoardHash + "). Executing Nuclear Retreat!");
+//            executeNuclearRetreat(currentDepth);
+//            return true; // Tell the Watchdog we handled it
+//        }
+//
+//        // Add a "strike" to this board hash
+//        int strikes = hashStrikeCount.getOrDefault(currentBoardHash, 0) + 1;
+//        hashStrikeCount.put(currentBoardHash, strikes);
+//
+//        // 3 Strikes and it's permanently poisoned!
+//        if (strikes >= 3) {
+//            logger.error(">>> GRAVITY WELL DETECTED! Poisoning hash: " + currentBoardHash);
+//            poisonedHashes.add(currentBoardHash);
+//            executeNuclearRetreat(currentDepth);
+//            return true; // Tell the Watchdog we handled it
+//        }
+//
+//        // It wasn't poisoned yet, just added a strike.
+//        return false;
+//    }
+
     private boolean checkPoisonAndRetreat(int currentBoardHash, int currentDepth) {
         // Only bother poisoning deep endgame boards (e.g., 200+)
         if (currentDepth < 200) {
@@ -1006,46 +1051,78 @@ public class EternitySolver implements Runnable {
         return Integer.toHexString(java.util.Arrays.hashCode(boardArray)).toUpperCase();
     }
 
+//    private void executeNuclearRetreat(int currentDepth) {
+//        // A normal teardown might remove 5-10 pieces.
+//        // To escape a gravity well, we must destroy the foundation of the well.
+//        int nuclearTargetDepth = Math.max(150, currentDepth - 35);
+//        logger.warn(">>> NUCLEAR RETREAT: Tearing board down to depth " + nuclearTargetDepth);
+//
+//        // 1. Manually sync deepestStep
+//        deepestStep = nuclearTargetDepth;
+//
+//        // 2. Wipe the top of the local trap memory
+//        for (int s = deepestStep; s < 256; s++) {
+//            bestBoard[buildOrder[s]] = -1;
+//        }
+//
+//        // 3. Rebuild the CPU Worker start board (flatResumeBoard) to match the new depth
+//        Arrays.fill(flatResumeBoard, -1);
+//        for (int step = 0; step < deepestStep; step++) {
+//            int idx = buildOrder[step];
+//            boolean isStatic = (lockCenter && idx == 135);
+//            if (lockCenter) {
+//                for (int hPos : HINT_POSITIONS) {
+//                    if (idx == hPos) {
+//                        isStatic = true;
+//                        break;
+//                    }
+//                }
+//            }
+//            if (!isStatic) {
+//                flatResumeBoard[idx] = bestBoard[idx];
+//            }
+//        }
+//        applyStaticLocks(flatResumeBoard);
+//
+//        // 4. THE ENTROPY INJECTION ("The Jiggle")
+//        // Punch a few random holes in the foundation to scramble the deterministic pathfinder
+//        injectEntropy(nuclearTargetDepth);
+//
+//        // 5. Cleanup and UI update
+//        seedPool.clear();
+//        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
+//    }
+
     private void executeNuclearRetreat(int currentDepth) {
-        // A normal teardown might remove 5-10 pieces.
-        // To escape a gravity well, we must destroy the foundation of the well.
-        int nuclearTargetDepth = Math.max(150, currentDepth - 35);
-        logger.warn(">>> NUCLEAR RETREAT: Tearing board down to depth " + nuclearTargetDepth);
+        // Calculate which row the engine died on (16 pieces per row)
+        int failedRow = currentDepth / 16;
 
-        // 1. Manually sync deepestStep
-        deepestStep = nuclearTargetDepth;
+        // Roll back 2 full rows (Minimum row 1 to protect the highly constrained grey border!)
+        int rollbackRow = Math.max(1, failedRow - 2);
+        int newSeedDepth = rollbackRow * 16;
 
-        // 2. Wipe the top of the local trap memory
-        for (int s = deepestStep; s < 256; s++) {
-            bestBoard[buildOrder[s]] = -1;
-        }
+        logger.info(">>> [GENETIC EXPLORATION] 100% Vanguard Threads. Hard-banning the next 16 poisoned pieces at depth {}.", newSeedDepth);
 
-        // 3. Rebuild the CPU Worker start board (flatResumeBoard) to match the new depth
-        Arrays.fill(flatResumeBoard, -1);
-        for (int step = 0; step < deepestStep; step++) {
-            int idx = buildOrder[step];
-            boolean isStatic = (lockCenter && idx == 135);
-            if (lockCenter) {
-                for (int hPos : HINT_POSITIONS) {
-                    if (idx == hPos) {
-                        isStatic = true;
-                        break;
-                    }
+        // 1. Sync the depth so the engine knows where it is
+        deepestStep = newSeedDepth;
+
+        // 2. Erase the CPU start board down to the new deep base camp
+        for (int i = newSeedDepth; i < 256; i++) {
+            if (i < buildOrder.length) {
+                int pos = buildOrder[i];
+                // Preserve static hint locks (-2)
+                if (flatResumeBoard[pos] != -2) {
+                    flatResumeBoard[pos] = -1;
                 }
             }
-            if (!isStatic) {
-                flatResumeBoard[idx] = bestBoard[idx];
-            }
         }
-        applyStaticLocks(flatResumeBoard);
 
-        // 4. THE ENTROPY INJECTION ("The Jiggle")
-        // Punch a few random holes in the foundation to scramble the deterministic pathfinder
-        injectEntropy(nuclearTargetDepth);
-
-        // 5. Cleanup and UI update
-        seedPool.clear();
-        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
+        // 3. Clear the GPU queue and trigger the Vanguard threads to rebuild the branch
+        if (seedPool != null) {
+            seedPool.clear();
+        }
+        consecutiveExtinctions++;
+        triggerBranchScrap();
     }
 
     private void injectEntropy(int currentDepth) {
@@ -1337,7 +1414,7 @@ public class EternitySolver implements Runnable {
         }
 
 // --- EXECUTE THE TEARDOWN ---
-        int newTargetDepth = Math.max(0, lockedPieces);
+        int newTargetDepth = Math.max(0, lockedPieces - 16);
         int piecesDropped = deepestStep - newTargetDepth;
 
         logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping " + piecesDropped + " pieces to depth " + newTargetDepth + ".");
@@ -1759,6 +1836,9 @@ public class EternitySolver implements Runnable {
         private final int[] localBoard = new int[256];
         private final int[] localResumeBoard = new int[256];
         private final boolean[] localUsed = new boolean[256];
+        // Eternity II har farver fra 0 (grå kant) op til 22. Vi laver plads til 24 for en sikkerheds skyld.
+        private int[] inventoryColorsLeft = new int[24];
+        private int[] openEdgesOnBoard = new int[24];
         private final Random rnd = new Random();
         private final int activeBatch;
         private long localTrialCount = 0;
@@ -1804,6 +1884,7 @@ public class EternitySolver implements Runnable {
                     }
                 }
             }
+            initColorBudget();
         }
 
         @Override
@@ -1931,16 +2012,56 @@ public class EternitySolver implements Runnable {
                     continue;
                 }
 
-                if (passesLookahead(p, step, row, col, boardIdx)) {
+                // >>> NEW: PARITY CHECK (COLOR BUDGET) LOGIC <<<
+
+                // Extract the 4 colors of the candidate piece
+                int nC = PieceUtils.getNorth(p);
+                int eC = PieceUtils.getEast(p);
+                int sC = PieceUtils.getSouth(p);
+                int wC = PieceUtils.getWest(p);
+
+                // 1. DECREASE SUPPLY: The piece leaves the inventory
+                inventoryColorsLeft[nC]--;
+                inventoryColorsLeft[eC]--;
+                inventoryColorsLeft[sC]--;
+                inventoryColorsLeft[wC]--;
+
+                // 2. UPDATE DEMAND (Open Edges):
+                // If a neighbor is empty (-1), we CREATE an open edge (demand goes up).
+                // If a neighbor is present, we CLOSE an open edge (demand goes down).
+                if (row > 0 && localBoard[boardIdx - 16] == -1) openEdgesOnBoard[nC]++;
+                else if (row > 0) openEdgesOnBoard[nC]--;
+
+                if (col < 15 && localBoard[boardIdx + 1] == -1) openEdgesOnBoard[eC]++;
+                else if (col < 15) openEdgesOnBoard[eC]--;
+
+                if (row < 15 && localBoard[boardIdx + 16] == -1) openEdgesOnBoard[sC]++;
+                else if (row < 15) openEdgesOnBoard[sC]--;
+
+                if (col > 0 && localBoard[boardIdx - 1] == -1) openEdgesOnBoard[wC]++;
+                else if (col > 0) openEdgesOnBoard[wC]--;
+
+                // 3. PARITY CHECK (The Early Pruning Gate)
+                boolean isColorBudgetSafe = true;
+                // We only check the colors we just modified to save CPU cycles
+                if (openEdgesOnBoard[nC] > inventoryColorsLeft[nC] ||
+                    openEdgesOnBoard[eC] > inventoryColorsLeft[eC] ||
+                    openEdgesOnBoard[sC] > inventoryColorsLeft[sC] ||
+                    openEdgesOnBoard[wC] > inventoryColorsLeft[wC]) {
+                    isColorBudgetSafe = false; // PATH IS MATHEMATICALLY DEAD!
+                }
+
+                // Proceed ONLY if the color budget is safe AND the local lookahead passes
+                if (isColorBudgetSafe && passesLookahead(p, step, row, col, boardIdx)) {
+
                     // 1. Temporarily place the piece to change the board state
                     localBoard[boardIdx] = p;
                     localUsed[physicalIdx] = true;
                     int ghost = localResumeBoard[boardIdx];
                     localResumeBoard[boardIdx] = -1;
-                    // 2. >>> THE RADAR SWEEP (With Claude's Depth Optimization) <<<
-                    // Skip the expensive sweep in the wide-open early game.
-                    // Activate the radar only when the board becomes heavily constrained (Depth 100+)
-                    if (step < 100 || isTopologicallyViable(localBoard, localUsed)) {
+
+                    // 2. >>> THE RADAR SWEEP <<<
+                    if (step < 150 || isTopologicallyViable(localBoard, localUsed)) {
 
                         // 3. The geometry is safe! Take the next step.
                         if (solve(step + 1)) {
@@ -1948,15 +2069,75 @@ public class EternitySolver implements Runnable {
                         }
                     }
 
-                    // 4. Backtrack (either because solve failed, or the radar detected a trap)
+                    // 4. Backtrack geometry
                     localBoard[boardIdx] = -1;
                     localUsed[physicalIdx] = false;
                     localResumeBoard[boardIdx] = ghost;
                 }
+                // 5. BACKTRACK PARITY: Revert the Supply and Demand arrays
+                inventoryColorsLeft[nC]++;
+                inventoryColorsLeft[eC]++;
+                inventoryColorsLeft[sC]++;
+                inventoryColorsLeft[wC]++;
+
+                if (row > 0 && localBoard[boardIdx - 16] == -1) openEdgesOnBoard[nC]--;
+                else if (row > 0) openEdgesOnBoard[nC]++;
+
+                if (col < 15 && localBoard[boardIdx + 1] == -1) openEdgesOnBoard[eC]--;
+                else if (col < 15) openEdgesOnBoard[eC]++;
+
+                if (row < 15 && localBoard[boardIdx + 16] == -1) openEdgesOnBoard[sC]--;
+                else if (row < 15) openEdgesOnBoard[sC]++;
+
+                if (col > 0 && localBoard[boardIdx - 1] == -1) openEdgesOnBoard[wC]--;
+                else if (col > 0) openEdgesOnBoard[wC]++;
             }
             return false;
         }
 
+        /**
+         * Initializes the color budget for this specific thread.
+         * Calculates total supply in the inventory and adjusts for any
+         * pieces already locked on the board (Center/Hints).
+         */
+        private void initColorBudget() {
+            java.util.Arrays.fill(inventoryColorsLeft, 0);
+            java.util.Arrays.fill(openEdgesOnBoard, 0);
+
+            // 1. Calculate total global supply
+            for (int i = 0; i < 256; i++) {
+                int p = inventory.allOrientations[inventory.physicalMapping[i]];
+                inventoryColorsLeft[PieceUtils.getNorth(p)]++;
+                inventoryColorsLeft[PieceUtils.getEast(p)]++;
+                inventoryColorsLeft[PieceUtils.getSouth(p)]++;
+                inventoryColorsLeft[PieceUtils.getWest(p)]++;
+            }
+
+            // 2. Adjust supply and calculate DEMAND based on the current Base Camp
+            for (int i = 0; i < 256; i++) {
+                int p = localBoard[i];
+                if (p != -1) {
+                    int r = i / 16;
+                    int c = i % 16;
+                    int nC = PieceUtils.getNorth(p);
+                    int eC = PieceUtils.getEast(p);
+                    int sC = PieceUtils.getSouth(p);
+                    int wC = PieceUtils.getWest(p);
+
+                    // Deduct from inventory (Piece is already on the board)
+                    inventoryColorsLeft[nC]--;
+                    inventoryColorsLeft[eC]--;
+                    inventoryColorsLeft[sC]--;
+                    inventoryColorsLeft[wC]--;
+
+                    // Calculate demand: If the neighbor is an empty space (-1), we need a color!
+                    if (r > 0 && localBoard[i - 16] == -1) openEdgesOnBoard[nC]++;
+                    if (c < 15 && localBoard[i + 1] == -1) openEdgesOnBoard[eC]++;
+                    if (r < 15 && localBoard[i + 16] == -1) openEdgesOnBoard[sC]++;
+                    if (c > 0 && localBoard[i - 1] == -1) openEdgesOnBoard[wC]++;
+                }
+            }
+        }
         /**
          * DYNAMIC LOOKAHEAD HEURISTIC
          * Scans the unplaced board. If any empty cell has 0 valid candidates left in the
