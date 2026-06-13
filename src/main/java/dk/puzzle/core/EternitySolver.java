@@ -202,7 +202,6 @@ public class EternitySolver implements Runnable {
 
         if (loadedState != null) {
             restoreBoardState(loadedState.bestBoard);
-//            System.arraycopy(loadedState.tabuTenure, 0, this.tabuTenure, 0, 256);
             this.uniqueMaxScoreHashes.addAll(loadedState.uniqueMaxScoreHashes);
             for (int[] historicBoard : loadedState.topBoardsRegistry) {
                 this.topBoards.offer(historicBoard, loadedState.score);
@@ -219,33 +218,65 @@ public class EternitySolver implements Runnable {
         }
 
         if (this.lockCenter) {
-            int[][] officialHints = {
-                    {8, 2, 3, 10}, {3, 13, 6, 8},
-                    {13, 10, 11, 18}, {10, 20, 18, 16}
-            };
+            // Mapping the exact dataset configuration provided:
+            // HINT_POSITIONS array is {221, 45, 210, 34}
+            // Pos 221 (Row 13, Col 13) -> Piece 249, Rot 1
+            // Pos 45  (Row 2,  Col 13) -> Piece 255, Rot 0
+            // Pos 210 (Row 13, Col 2)  -> Piece 181, Rot 0
+            // Pos 34  (Row 2,  Col 2)  -> Piece 208, Rot 0
+
+            int[] exactHintIds = {249, 255, 181, 208};
+            int[] exactHintRots = {1, 0, 0, 0};
 
             for (int h = 0; h < 4; h++) {
-                int[] edges = officialHints[h];
+                int physId = exactHintIds[h] - 1; // -1 to convert 1-indexed Piece ID to 0-indexed physical array
+                int targetRot = exactHintRots[h];
+
                 int foundPacked = -1;
                 for (int oi = 0; oi < 1024; oi++) {
-                    int p = inventory.allOrientations[oi];
-                    if (PieceUtils.getNorth(p) == edges[0] && PieceUtils.getEast(p) == edges[1] &&
-                            PieceUtils.getSouth(p) == edges[2] && PieceUtils.getWest(p) == edges[3]) {
-                        foundPacked = p;
-                        hintPhysicalIndices[h] = inventory.physicalMapping[oi]; // Save physical ID for CPU Worker!
+                    if (inventory.physicalMapping[oi] == physId && (oi % 4) == targetRot) {
+                        foundPacked = inventory.allOrientations[oi];
                         break;
                     }
                 }
 
                 if (foundPacked != -1) {
                     hintPackedValues[h] = foundPacked;
+                    hintPhysicalIndices[h] = physId;
+
                     bestBoard[HINT_POSITIONS[h]] = foundPacked;
                     globalBestBoard[HINT_POSITIONS[h]] = foundPacked;
                     flatResumeBoard[HINT_POSITIONS[h]] = foundPacked;
+
+                    logger.info(">>> [HINT LOCKED] Successfully locked Hint " + (h+1) + " (Piece " + exactHintIds[h] + ") at position " + HINT_POSITIONS[h]);
+                } else {
+                    logger.error(">>> [FATAL CONFIG] Could not find Piece " + exactHintIds[h] + " in inventory!");
                 }
             }
-            flatResumeBoard[135] = targetPiece;
-            logger.info(">>> [CENTER] Center piece and hints locked.");
+
+            // --- Override and lock the Center Piece exactly as specified ---
+            // Pos 135 (Row 8, Col 7) -> Center Piece 139, Rot 3
+            int centerPhysId = 139 - 1;
+            int centerRot = 3;
+            int centerPacked = -1;
+
+            for (int oi = 0; oi < 1024; oi++) {
+                if (inventory.physicalMapping[oi] == centerPhysId && (oi % 4) == centerRot) {
+                    centerPacked = inventory.allOrientations[oi];
+                    break;
+                }
+            }
+
+            if (centerPacked != -1) {
+                flatResumeBoard[135] = centerPacked;
+                bestBoard[135] = centerPacked;
+                globalBestBoard[135] = centerPacked;
+                this.centerPhysicalIdx = centerPhysId; // Ensure CPU worker marks it as used!
+                logger.info(">>> [CENTER LOCKED] Successfully locked Center (Piece 139) at position 135");
+            } else {
+                logger.error(">>> [FATAL CONFIG] Could not find Center Piece 139 in inventory!");
+            }
+
         } else {
             Arrays.fill(hintPackedValues, -1);
             Arrays.fill(hintPhysicalIndices, -1);
@@ -253,7 +284,6 @@ public class EternitySolver implements Runnable {
         }
         updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
     }
-
     private void restoreBoardState(int[][] loaded) {
         if (loaded == null) {
             return;
@@ -485,12 +515,24 @@ public class EternitySolver implements Runnable {
                             for (int i = newSeedDepth; i < 256; i++) {
                                 if (i < buildOrder.length) {
                                     int pos = buildOrder[i];
-                                    if (flatResumeBoard[pos] != -2) {
+
+                                    // Properly calculate if this specific position is a static lock
+                                    boolean isStatic = (lockCenter && pos == 135);
+                                    if (lockCenter) {
+                                        for (int hPos : HINT_POSITIONS) {
+                                            if (pos == hPos) {
+                                                isStatic = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    // Only erase the piece if it is NOT the center or a hint!
+                                    if (!isStatic) {
                                         flatResumeBoard[pos] = -1;
                                     }
                                 }
-                            }
-                            consecutiveExtinctions++;
+                            }                            consecutiveExtinctions++;
                         }
 
                         lastSeedCount = 0;
@@ -595,7 +637,7 @@ public class EternitySolver implements Runnable {
             }
         }
 
-        deepestStep = lockedPieces;
+//        deepestStep = lockedPieces;
 
         // --- FAST GPU HANDOFF LOGIC ---
         int dynamicOffset;
@@ -1422,14 +1464,24 @@ public class EternitySolver implements Runnable {
         // CRITICAL: Update the ghost tracker
         deepestStep = newTargetDepth;
 
-        // --- THE UNIVERSAL TEARDOWN OVERRIDE ---
-        // Physically strip the pieces off the board right now!
-        // This guarantees the Orchestrator steps backwards even if the loop tries to skip it.
+// --- THE UNIVERSAL TEARDOWN OVERRIDE ---
         for (int i = newTargetDepth; i < 256; i++) {
             if (i < buildOrder.length) {
                 int pos = buildOrder[i];
-                // Strip the piece, but strictly preserve any permanent hints (-2)
-                if (flatResumeBoard[pos] != -2) {
+
+                // Properly calculate if this specific position is a static lock
+                boolean isStatic = (lockCenter && pos == 135);
+                if (lockCenter) {
+                    for (int hPos : HINT_POSITIONS) {
+                        if (pos == hPos) {
+                            isStatic = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Only erase the piece if it is NOT the center or a hint!
+                if (!isStatic) {
                     flatResumeBoard[pos] = -1;
                 }
             }
