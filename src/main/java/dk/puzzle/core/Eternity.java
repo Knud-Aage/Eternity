@@ -88,16 +88,6 @@ public class Eternity {
             solverTask = new EternitySolver(inventory, targetPiece, useGpu, strategy, lockCenter);
         }
 
-//        if (usePbp) {
-//            EternitySolver.BuildStrategy strategy = useSpiral ?
-//                    EternitySolver.BuildStrategy.SPIRAL :
-//                    EternitySolver.BuildStrategy.TYPEWRITER;
-//
-//            solverTask = new EternitySolver(inventory, targetPiece, useGpu, strategy, lockCenter);
-//        } else {
-//            logger.info("Macro solver not implemented in this main.");
-//        }
-
         if (solverTask != null) {
             Thread solverThread = new Thread(solverTask, "SolverThread");
             solverThread.start();

@@ -282,7 +282,7 @@ public class EternitySolver implements Runnable {
             Arrays.fill(hintPhysicalIndices, -1);
             logger.info(">>> [UNCONSTRAINED] Checkbox is off. Running completely without Center Piece or Hints!");
         }
-        updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
+//        updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
     }
     private void restoreBoardState(int[][] loaded) {
         if (loaded == null) {
@@ -502,7 +502,7 @@ public class EternitySolver implements Runnable {
                             int failedRow = deadEndDepth / 16;
 
                             // Roll back 2 full rows.
-                            int rollbackRow = Math.max(1, failedRow - 2);
+                            int rollbackRow = Math.max(1, failedRow - 4);
                             int newSeedDepth = rollbackRow * 16;
 
                             logger.warn(String.format(">>> [SMART RETREAT] Starved at depth %d. Rolling Base Camp to Row %d (Depth %d)",
@@ -637,7 +637,7 @@ public class EternitySolver implements Runnable {
             }
         }
 
-//        deepestStep = lockedPieces;
+        deepestStep = lockedPieces;
 
         // --- FAST GPU HANDOFF LOGIC ---
         int dynamicOffset;
@@ -1025,35 +1025,6 @@ public class EternitySolver implements Runnable {
         }
     }
 
-//    private boolean checkPoisonAndRetreat(int currentBoardHash, int currentDepth) {
-//        // Only bother poisoning deep endgame boards (e.g., 200+)
-//        if (currentDepth < 200) {
-//            return false;
-//        }
-//
-//        // If this board is already poisoned, instantly reject it!
-//        if (poisonedHashes.contains(currentBoardHash)) {
-//            logger.warn(">>> POISONED BOARD DETECTED! (" + currentBoardHash + "). Executing Nuclear Retreat!");
-//            executeNuclearRetreat(currentDepth);
-//            return true; // Tell the Watchdog we handled it
-//        }
-//
-//        // Add a "strike" to this board hash
-//        int strikes = hashStrikeCount.getOrDefault(currentBoardHash, 0) + 1;
-//        hashStrikeCount.put(currentBoardHash, strikes);
-//
-//        // 3 Strikes and it's permanently poisoned!
-//        if (strikes >= 3) {
-//            logger.error(">>> GRAVITY WELL DETECTED! Poisoning hash: " + currentBoardHash);
-//            poisonedHashes.add(currentBoardHash);
-//            executeNuclearRetreat(currentDepth);
-//            return true; // Tell the Watchdog we handled it
-//        }
-//
-//        // It wasn't poisoned yet, just added a strike.
-//        return false;
-//    }
-
     private boolean checkPoisonAndRetreat(int currentBoardHash, int currentDepth) {
         // Only bother poisoning deep endgame boards (e.g., 200+)
         if (currentDepth < 200) {
@@ -1093,54 +1064,12 @@ public class EternitySolver implements Runnable {
         return Integer.toHexString(java.util.Arrays.hashCode(boardArray)).toUpperCase();
     }
 
-//    private void executeNuclearRetreat(int currentDepth) {
-//        // A normal teardown might remove 5-10 pieces.
-//        // To escape a gravity well, we must destroy the foundation of the well.
-//        int nuclearTargetDepth = Math.max(150, currentDepth - 35);
-//        logger.warn(">>> NUCLEAR RETREAT: Tearing board down to depth " + nuclearTargetDepth);
-//
-//        // 1. Manually sync deepestStep
-//        deepestStep = nuclearTargetDepth;
-//
-//        // 2. Wipe the top of the local trap memory
-//        for (int s = deepestStep; s < 256; s++) {
-//            bestBoard[buildOrder[s]] = -1;
-//        }
-//
-//        // 3. Rebuild the CPU Worker start board (flatResumeBoard) to match the new depth
-//        Arrays.fill(flatResumeBoard, -1);
-//        for (int step = 0; step < deepestStep; step++) {
-//            int idx = buildOrder[step];
-//            boolean isStatic = (lockCenter && idx == 135);
-//            if (lockCenter) {
-//                for (int hPos : HINT_POSITIONS) {
-//                    if (idx == hPos) {
-//                        isStatic = true;
-//                        break;
-//                    }
-//                }
-//            }
-//            if (!isStatic) {
-//                flatResumeBoard[idx] = bestBoard[idx];
-//            }
-//        }
-//        applyStaticLocks(flatResumeBoard);
-//
-//        // 4. THE ENTROPY INJECTION ("The Jiggle")
-//        // Punch a few random holes in the foundation to scramble the deterministic pathfinder
-//        injectEntropy(nuclearTargetDepth);
-//
-//        // 5. Cleanup and UI update
-//        seedPool.clear();
-//        updateDisplay(deepestStep, buildDisplayBoard(flatResumeBoard));
-//    }
-
     private void executeNuclearRetreat(int currentDepth) {
         // Calculate which row the engine died on (16 pieces per row)
         int failedRow = currentDepth / 16;
 
         // Roll back 2 full rows (Minimum row 1 to protect the highly constrained grey border!)
-        int rollbackRow = Math.max(1, failedRow - 2);
+        int rollbackRow = Math.max(1, failedRow - 4);
         int newSeedDepth = rollbackRow * 16;
 
         logger.info(">>> [GENETIC EXPLORATION] 100% Vanguard Threads. Hard-banning the next 16 poisoned pieces at depth {}.", newSeedDepth);
@@ -1550,6 +1479,13 @@ public class EternitySolver implements Runnable {
                     (diverseWins.get() * 100) / totalWins,
                     (restartWins.get() * 100) / totalWins,
                     highestP2DepthThisCycle);
+            // --- LIVE GPU ACTION FEED ---
+            // Grab the GPU's peak mutation board before the Watchdog touches it
+            int[] liveBoardCopy = new int[256];
+            System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
+            // Force the UI to draw the GPU's highest depth from this specific batch
+            Eternity.updateDisplay(highestP2DepthThisCycle, this.absoluteHighScore, buildDisplayBoard(liveBoardCopy));
+
         }
 
         // Reset the peak tracker for the next report window
@@ -1564,11 +1500,6 @@ public class EternitySolver implements Runnable {
             // 1. Create a safe copy of the active GPU peak (NOT the base camp!)
             int[] liveBoardCopy = new int[256];
             System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
-
-//            logger.info(">>> [VISUALIZER] Pushing live peak board to screen...");
-
-            // 2. Convert to 2D and force the GUI to draw it!
-            Eternity.updateDisplay(deepestStep, this.absoluteHighScore, buildDisplayBoard(liveBoardCopy));
         }
     }
 
@@ -1614,22 +1545,6 @@ public class EternitySolver implements Runnable {
         }
         return displayBoard;
     }
-
-//    private void updateDisplay(int score, int[][] displayBoard) {
-//        long now = System.currentTimeMillis();
-//        if (now - lastDisplayUpdateTime < 10000) {
-//            return;
-//        }
-//        lastDisplayUpdateTime = now;
-//        Eternity.updateDisplay(score, this.absoluteHighScore, displayBoard);
-//    }
-
-    //    private void updateDisplay(int score, int[][] displayBoard) {
-//        if (score < absoluteHighScore) {
-//            return;
-//        }
-//        Eternity.updateDisplay(score, this.absoluteHighScore, displayBoard);
-//    }
 
     private void updateDisplay(int depth, int[][] displayBoard) {
         long now = System.currentTimeMillis();
@@ -1975,7 +1890,7 @@ public class EternitySolver implements Runnable {
                     if (step > deepestStep) {
                         deepestStep = step;
                         System.arraycopy(localBoard, 0, bestBoard, 0, 256);
-                        updateDisplay(deepestStep, buildDisplayBoard(localBoard));
+//                        updateDisplay(deepestStep, buildDisplayBoard(localBoard));
                         if (!useGpu && deepestStep > absoluteHighScore) {
                             absoluteHighScore = deepestStep;
                             System.arraycopy(localBoard, 0, globalBestBoard, 0, 256);
