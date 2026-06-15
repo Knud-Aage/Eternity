@@ -47,7 +47,7 @@ public class EternitySolver implements Runnable {
     //    final int[] tabuTenure = new int[256];
     final int[] buildOrder = new int[256];
     final int[] bestBoard = new int[256];
-    final int[] globalBestBoard = new int[256];
+//    final int[] globalBestBoard = new int[256];
     final TopBoardRegistry topBoards = new TopBoardRegistry();
     private final ConcurrentHashMap<Integer, Integer> hashStrikeCount = new ConcurrentHashMap<>();
     private final Set<Integer> poisonedHashes = ConcurrentHashMap.newKeySet();
@@ -63,7 +63,6 @@ public class EternitySolver implements Runnable {
             new java.util.concurrent.LinkedBlockingQueue<>();
     private final Object displayLock = new Object();
     // Board State
-    private final int[] flatResumeBoard = new int[256];
     private final boolean[] usedPhysicalPieces = new boolean[256];
     // Puzzle Specifics
     private final int targetPiece;
@@ -84,7 +83,6 @@ public class EternitySolver implements Runnable {
     private final int[] hintPhysicalIndices = new int[]{-1, -1, -1, -1};
     private final long lastDisplayUpdateTime = 0;
     volatile int userBatchSizeOverride = -1;
-    volatile int absoluteHighScore = 0;
     volatile int deepestStep = 0;
     volatile boolean manualOverrideRequested = false;
     volatile int manualBaseCampTarget = 0;
@@ -121,7 +119,7 @@ public class EternitySolver implements Runnable {
     // --- STAGNATION TRACKING VARIABLES ---
     private volatile int cpuStagnationCounter = 0;
     private volatile int lastPeakDepth = 0;
-
+    private final BoardStateManager stateManager = new BoardStateManager();
     /**
      * The value of {@code consecutiveExtinctions} at which the current poison expires.
      * The ban is lifted automatically when the extinction counter exceeds this value,
@@ -134,8 +132,8 @@ public class EternitySolver implements Runnable {
     public EternitySolver(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                           boolean lockCenter) {
         Arrays.fill(bestBoard, -1);
-        Arrays.fill(globalBestBoard, -1);
-        Arrays.fill(flatResumeBoard, -1);
+        Arrays.fill(stateManager.getGlobalBestBoardCopy(), -1);
+//        Arrays.fill(flatResumeBoard, -1);
 
         this.inventory = inventory;
         this.targetPiece = trueCenterPiece;
@@ -245,8 +243,8 @@ public class EternitySolver implements Runnable {
                     hintPhysicalIndices[h] = physId;
 
                     bestBoard[HINT_POSITIONS[h]] = foundPacked;
-                    globalBestBoard[HINT_POSITIONS[h]] = foundPacked;
-                    flatResumeBoard[HINT_POSITIONS[h]] = foundPacked;
+                    stateManager.getGlobalBestBoardCopy()[HINT_POSITIONS[h]] = foundPacked;
+                    stateManager.getFlatResumeBoardCopy()[HINT_POSITIONS[h]] = foundPacked;
 
                     logger.info(">>> [HINT LOCKED] Successfully locked Hint " + (h+1) + " (Piece " + exactHintIds[h] + ") at position " + HINT_POSITIONS[h]);
                 } else {
@@ -268,9 +266,9 @@ public class EternitySolver implements Runnable {
             }
 
             if (centerPacked != -1) {
-                flatResumeBoard[135] = centerPacked;
+                stateManager.getFlatResumeBoardCopy()[135] = centerPacked;
                 bestBoard[135] = centerPacked;
-                globalBestBoard[135] = centerPacked;
+                stateManager.getGlobalBestBoardCopy()[135] = centerPacked;
                 this.centerPhysicalIdx = centerPhysId; // Ensure CPU worker marks it as used!
                 logger.info(">>> [CENTER LOCKED] Successfully locked Center (Piece 139) at position 135");
             } else {
@@ -297,20 +295,20 @@ public class EternitySolver implements Runnable {
                 int p = loaded[r][c];
                 if (p != -1 && p != 0 && p != -2) {
                     bestBoard[r * 16 + c] = p;
-                    globalBestBoard[r * 16 + c] = p;
+                    stateManager.getGlobalBestBoardCopy()[r * 16 + c] = p;
                     loadedCount++;
                 }
             }
         }
         if (loadedCount > 0) {
-            this.absoluteHighScore = loadedCount;
+            stateManager.setAbsoluteHighScore(loadedCount);
             this.deepestStep = loadedCount;
             if (lockCenter) {
                 bestBoard[135] = targetPiece;
-                globalBestBoard[135] = targetPiece;
+                stateManager.getGlobalBestBoardCopy()[135] = targetPiece;
             }
-            System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
-            updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
+            System.arraycopy(bestBoard, 0, stateManager.getFlatResumeBoardCopy(), 0, 256);
+            updateDisplay(stateManager.getAbsoluteHighScore(), buildDisplayBoard(stateManager.getGlobalBestBoardCopy()));
         }
     }
 
@@ -345,7 +343,7 @@ public class EternitySolver implements Runnable {
 
         logger.info("Starting Solver Orchestrator...");
 
-        if (this.absoluteHighScore > 0) {
+        if (stateManager.getAbsoluteHighScore() > 0) {
             logger.info(">>> [BOOT] Checkpoint detected! Setting up Base Camp to resume search...");
             triggerBranchScrap();
         }
@@ -427,8 +425,8 @@ public class EternitySolver implements Runnable {
                     repairReporterScheduler.shutdownNow();
                 }
                 SolverState memoryToSave = new SolverState(
-                        buildDisplayBoard(globalBestBoard),
-                        absoluteHighScore,
+                        buildDisplayBoard(stateManager.getGlobalBestBoardCopy()),
+                        stateManager.getAbsoluteHighScore(),
                         this.uniqueMaxScoreHashes,
                         this.topBoards.getRawRegistry()
                 );
@@ -483,6 +481,9 @@ public class EternitySolver implements Runnable {
                         lastSeedGrowthTime = System.currentTimeMillis();
                         lastSeedCount = currentSeeds;
                     } else if (System.currentTimeMillis() - lastSeedGrowthTime > 5000) {
+                        int[] liveBoardCopy = new int[256];
+                        System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
+                        Eternity.updateDisplay(highestP2DepthThisCycle, stateManager.getAbsoluteHighScore(), buildDisplayBoard(liveBoardCopy));
 
                         logger.warn(">>> Watchdog: Endgame Starvation Triggered! Executing immediate retreat.");
 
@@ -529,10 +530,11 @@ public class EternitySolver implements Runnable {
 
                                     // Only erase the piece if it is NOT the center or a hint!
                                     if (!isStatic) {
-                                        flatResumeBoard[pos] = -1;
+                                        stateManager.getFlatResumeBoardCopy()[pos] = -1;
                                     }
                                 }
-                            }                            consecutiveExtinctions++;
+                            }
+                            consecutiveExtinctions++;
                         }
 
                         lastSeedCount = 0;
@@ -583,8 +585,8 @@ public class EternitySolver implements Runnable {
                 if (System.currentTimeMillis() - lastPeriodicSave > 300_000) {
                     synchronized (displayLock) {
                         SolverState memoryToSave = new SolverState(
-                                buildDisplayBoard(globalBestBoard),
-                                absoluteHighScore,
+                                buildDisplayBoard(stateManager.getGlobalBestBoardCopy()),
+                                stateManager.getAbsoluteHighScore(),
                                 this.uniqueMaxScoreHashes,
                                 this.topBoards.getRawRegistry()
                         );
@@ -631,7 +633,7 @@ public class EternitySolver implements Runnable {
             currentSeedDepth = 256;
         }
         int lockedPieces = 0;
-        for (int p : flatResumeBoard) {
+        for (int p : stateManager.getFlatResumeBoardCopy()) {
             if (p != -1 && p != -2) {
                 lockedPieces++;
             }
@@ -814,7 +816,7 @@ public class EternitySolver implements Runnable {
             deepestStep = result.newHighScore();
             consecutiveGpuStagnation = 0;
 
-            if (deepestStep >= absoluteHighScore - 5) {
+            if (deepestStep >= stateManager.getAbsoluteHighScore() - 5) {
                 consecutiveExtinctions = 0;
             }
 
@@ -837,23 +839,23 @@ public class EternitySolver implements Runnable {
             }
 
             // 2. ONLY if it beats the Global Record do we save to disk
-            if (deepestStep > absoluteHighScore) {
-                absoluteHighScore = deepestStep;
-                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+            if (deepestStep > stateManager.getAbsoluteHighScore()) {
+                stateManager.setAbsoluteHighScore(deepestStep);
+                System.arraycopy(bestBoardOut, 0, stateManager.getGlobalBestBoardCopy(), 0, 256);
 
-                int hash = Arrays.hashCode(globalBestBoard);
-                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", absoluteHighScore, hash);
+                int hash = Arrays.hashCode(stateManager.getGlobalBestBoardCopy());
+                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", stateManager.getAbsoluteHighScore(), hash);
 
                 uniqueMaxScoreHashes.clear();
                 uniqueMaxScoreHashes.add(hash);
 
-                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
+                RecordManager.saveRecord(buildDisplayBoard(stateManager.getGlobalBestBoardCopy()), stateManager.getAbsoluteHighScore(), saveProfile);
                 try {
-                    saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                    saveAndUploadBucasLink(stateManager.getGlobalBestBoardCopy(), stateManager.getAbsoluteHighScore());
                 } catch (Exception e) {
                     logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
                 }
-                analyzeFullBoardPotential(globalBestBoard);
+                analyzeFullBoardPotential(stateManager.getGlobalBestBoardCopy());
             }
 
         } else {
@@ -998,21 +1000,21 @@ public class EternitySolver implements Runnable {
                     deepestStep, Arrays.hashCode(bestBoard));
 
             // Only save to disk when beating the absolute global record
-            if (deepestStep > absoluteHighScore) {
-                absoluteHighScore = deepestStep;
-                lastReportedDepth = absoluteHighScore;
-                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+            if (deepestStep > stateManager.getAbsoluteHighScore()) {
+                stateManager.setAbsoluteHighScore(deepestStep);
+                lastReportedDepth = stateManager.getAbsoluteHighScore();
+                System.arraycopy(bestBoardOut, 0, stateManager.getGlobalBestBoardCopy(), 0, 256);
 
-                int hash = Arrays.hashCode(globalBestBoard);
+                int hash = Arrays.hashCode(stateManager.getGlobalBestBoardCopy());
                 uniqueMaxScoreHashes.clear();
                 uniqueMaxScoreHashes.add(hash);
 
                 logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X",
-                        absoluteHighScore, hash);
+                        stateManager.getAbsoluteHighScore(), hash);
 
-                RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-                saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
-                analyzeFullBoardPotential(globalBestBoard);
+                RecordManager.saveRecord(buildDisplayBoard(stateManager.getGlobalBestBoardCopy()), stateManager.getAbsoluteHighScore(), saveProfile);
+                saveAndUploadBucasLink(stateManager.getGlobalBestBoardCopy(), stateManager.getAbsoluteHighScore());
+                analyzeFullBoardPotential(stateManager.getGlobalBestBoardCopy());
             }
 
         } else {
@@ -1082,8 +1084,8 @@ public class EternitySolver implements Runnable {
             if (i < buildOrder.length) {
                 int pos = buildOrder[i];
                 // Preserve static hint locks (-2)
-                if (flatResumeBoard[pos] != -2) {
-                    flatResumeBoard[pos] = -1;
+                if (stateManager.getFlatResumeBoardCopy()[pos] != -2) {
+                    stateManager.getFlatResumeBoardCopy()[pos] = -1;
                 }
             }
         }
@@ -1115,7 +1117,7 @@ public class EternitySolver implements Runnable {
                 }
 
                 if (!isStatic) {
-                    flatResumeBoard[boardPos] = -1; // Punch a hole in the CPU start board
+                    stateManager.getFlatResumeBoardCopy()[boardPos] = -1; // Punch a hole in the CPU start board
                     bestBoard[boardPos] = -1;       // Erase it from local memory
                     consecutiveExtinctions++;
                 }
@@ -1126,7 +1128,7 @@ public class EternitySolver implements Runnable {
     }
 
     private void analyzeFullBoardPotential(int[] recordBoard) {
-        analyzeFullBoardPotential(recordBoard, absoluteHighScore);
+        analyzeFullBoardPotential(recordBoard, stateManager.getAbsoluteHighScore());
     }
 
     private void analyzeFullBoardPotential(int[] recordBoard, int baseScore) {        int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
@@ -1345,7 +1347,7 @@ public class EternitySolver implements Runnable {
 
         // --- CALCULATE THE CURRENT FOUNDATION ---
         int currentBaseCamp = 0;
-        for (int p : flatResumeBoard) {
+        for (int p : stateManager.getFlatResumeBoardCopy()) {
             if (p != -1 && p != -2) currentBaseCamp++;
         }
         if (currentBaseCamp == 0) currentBaseCamp = deepestStep;
@@ -1411,7 +1413,7 @@ public class EternitySolver implements Runnable {
 
                 // Only erase the piece if it is NOT the center or a hint!
                 if (!isStatic) {
-                    flatResumeBoard[pos] = -1;
+                    stateManager.getFlatResumeBoardCopy()[pos] = -1;
                 }
             }
         }
@@ -1479,12 +1481,6 @@ public class EternitySolver implements Runnable {
                     (diverseWins.get() * 100) / totalWins,
                     (restartWins.get() * 100) / totalWins,
                     highestP2DepthThisCycle);
-            // --- LIVE GPU ACTION FEED ---
-            // Grab the GPU's peak mutation board before the Watchdog touches it
-            int[] liveBoardCopy = new int[256];
-            System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
-            // Force the UI to draw the GPU's highest depth from this specific batch
-            Eternity.updateDisplay(highestP2DepthThisCycle, this.absoluteHighScore, buildDisplayBoard(liveBoardCopy));
 
         }
 
@@ -1492,15 +1488,6 @@ public class EternitySolver implements Runnable {
         highestP2DepthThisCycle = deepestStep;
 
         lastThroughputReportTime = now;
-
-        // --- LIVE FEED UI OVERRIDE ---
-        if (now - lastForcedGuiUpdate > 60000) { // 60,000 milliseconds = 1 minute
-            lastForcedGuiUpdate = now;
-
-            // 1. Create a safe copy of the active GPU peak (NOT the base camp!)
-            int[] liveBoardCopy = new int[256];
-            System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
-        }
     }
 
     void retreat(int targetStep, String logMessage) {
@@ -1549,7 +1536,7 @@ public class EternitySolver implements Runnable {
     private void updateDisplay(int depth, int[][] displayBoard) {
         long now = System.currentTimeMillis();
 
-        boolean isNewRecord = depth >= absoluteHighScore;
+        boolean isNewRecord = depth >= stateManager.getAbsoluteHighScore();
         boolean timeToRefresh = (now - lastVisualUpdate) >= 300_000;
 
         if (!isNewRecord && !timeToRefresh) {
@@ -1559,7 +1546,7 @@ public class EternitySolver implements Runnable {
         // If we passed the gate, update the timer
         lastVisualUpdate = now;
 
-        Eternity.updateDisplay(depth, this.absoluteHighScore, displayBoard);
+        Eternity.updateDisplay(depth, stateManager.getAbsoluteHighScore(), displayBoard);
     }
 
     private void saveAndUploadBucasLink(int[] board, int score) {
@@ -1821,8 +1808,8 @@ public class EternitySolver implements Runnable {
             this.banStartStep = banStart;
             this.banEndStep = banEnd;
 
-            System.arraycopy(flatResumeBoard, 0, localBoard, 0, 256);
-            System.arraycopy(flatResumeBoard, 0, localResumeBoard, 0, 256);
+            System.arraycopy(stateManager.getFlatResumeBoardCopy(), 0, localBoard, 0, 256);
+            System.arraycopy(stateManager.getFlatResumeBoardCopy(), 0, localResumeBoard, 0, 256);
             System.arraycopy(usedPhysicalPieces, 0, localUsed, 0, 256);
 
             for (int i = 0; i < 256; i++) {
@@ -1868,11 +1855,11 @@ public class EternitySolver implements Runnable {
 
             if (step == 256) {
                 synchronized (displayLock) {
-                    if (step > absoluteHighScore) {
-                        absoluteHighScore = step;
-                        System.arraycopy(localBoard, 0, globalBestBoard, 0, 256);
-                        RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-                        saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                    if (step > stateManager.getAbsoluteHighScore()) {
+                        stateManager.setAbsoluteHighScore(step);
+                        System.arraycopy(localBoard, 0, stateManager.getGlobalBestBoardCopy(), 0, 256);
+                        RecordManager.saveRecord(buildDisplayBoard(stateManager.getGlobalBestBoardCopy()), stateManager.getAbsoluteHighScore(), saveProfile);
+                        saveAndUploadBucasLink(stateManager.getGlobalBestBoardCopy(), stateManager.getAbsoluteHighScore());
                         logger.info(">>> [CPU MODE] VICTORY! ETERNITY II SOLVED! <<<");
                     }
                 }
@@ -1891,19 +1878,19 @@ public class EternitySolver implements Runnable {
                         deepestStep = step;
                         System.arraycopy(localBoard, 0, bestBoard, 0, 256);
 //                        updateDisplay(deepestStep, buildDisplayBoard(localBoard));
-                        if (!useGpu && deepestStep > absoluteHighScore) {
-                            absoluteHighScore = deepestStep;
-                            System.arraycopy(localBoard, 0, globalBestBoard, 0, 256);
-                            RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore,
+                        if (!useGpu && deepestStep > stateManager.getAbsoluteHighScore()) {
+                            stateManager.setAbsoluteHighScore(deepestStep);
+                            System.arraycopy(localBoard, 0, stateManager.getGlobalBestBoardCopy(), 0, 256);
+                            RecordManager.saveRecord(buildDisplayBoard(stateManager.getGlobalBestBoardCopy()), stateManager.getAbsoluteHighScore(),
                                     saveProfile);
-                            analyzeFullBoardPotential(globalBestBoard);
+                            analyzeFullBoardPotential(stateManager.getGlobalBestBoardCopy());
                             try {
-                                saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                                saveAndUploadBucasLink(stateManager.getGlobalBestBoardCopy(), stateManager.getAbsoluteHighScore());
                             } catch (Exception e) {
                                 logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
                             }
                             consecutiveExtinctions = 0;
-                            saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
+                            saveAndUploadBucasLink(stateManager.getGlobalBestBoardCopy(), stateManager.getAbsoluteHighScore());
                         }
                     }
                 }
