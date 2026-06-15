@@ -826,8 +826,9 @@ public class EternitySolver implements Runnable {
 
             if (deepestStep > variantSaveThreshold.get()) {
                 int hash = Arrays.hashCode(bestBoard);
-                if (savedVariantHashes.add(hash)) { // .add() returns true only if it's a NEW hash!
+                if (savedVariantHashes.add(hash)) {
                     logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
+                    logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
                     analyzeFullBoardPotential(bestBoard, deepestStep);
                 }
             }
@@ -1075,7 +1076,7 @@ public class EternitySolver implements Runnable {
         int rollbackRow = Math.max(1, failedRow - 4);
         int newSeedDepth = rollbackRow * 16;
 
-        logger.info(">>> [GENETIC EXPLORATION] 100% Vanguard Threads. Hard-banning the next 16 poisoned pieces at depth {}.", newSeedDepth);
+        logger.info(">>> [GENETIC EXPLORATION] 100% Vanguard Threads. Hard-banning the next 16 poisoned pieces at depth %d.", newSeedDepth);
 
         // 1. Sync the depth so the engine knows where it is
         deepestStep = newSeedDepth;
