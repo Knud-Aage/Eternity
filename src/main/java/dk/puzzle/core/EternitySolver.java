@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class EternitySolver implements Runnable {
 
-    // --- VARIANT TRACKER ---
+    private long cumulativeTrials = 0;
     private final Set<Integer> savedVariantHashes = ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.atomic.AtomicInteger variantSaveThreshold = new java.util.concurrent.atomic.AtomicInteger(198);
     public static final int SEED_DEPTH = 110;
@@ -203,6 +203,7 @@ public class EternitySolver implements Runnable {
         if (loadedState != null) {
             restoreBoardState(loadedState.bestBoard);
             this.uniqueMaxScoreHashes.addAll(loadedState.uniqueMaxScoreHashes);
+            this.cumulativeTrials = loadedState.cumulativeTrials;
             for (int[] historicBoard : loadedState.topBoardsRegistry) {
                 this.topBoards.offer(historicBoard, loadedState.score);
             }
@@ -430,7 +431,8 @@ public class EternitySolver implements Runnable {
                         buildDisplayBoard(globalBestBoard),
                         absoluteHighScore,
                         this.uniqueMaxScoreHashes,
-                        this.topBoards.getRawRegistry()
+                        this.topBoards.getRawRegistry(),
+                        cumulativeTrials
                 );
                 CheckpointManager.saveSmartState(memoryToSave, saveProfile);
             }
@@ -586,7 +588,8 @@ public class EternitySolver implements Runnable {
                                 buildDisplayBoard(globalBestBoard),
                                 absoluteHighScore,
                                 this.uniqueMaxScoreHashes,
-                                this.topBoards.getRawRegistry()
+                                this.topBoards.getRawRegistry(),
+                                cumulativeTrials
                         );
                         CheckpointManager.saveSmartState(memoryToSave, saveProfile);
                     }
@@ -843,7 +846,7 @@ public class EternitySolver implements Runnable {
 
                 int hash = Arrays.hashCode(globalBestBoard);
                 logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", absoluteHighScore, hash);
-
+                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
                 uniqueMaxScoreHashes.clear();
                 uniqueMaxScoreHashes.add(hash);
 
@@ -1009,7 +1012,7 @@ public class EternitySolver implements Runnable {
 
                 logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X",
                         absoluteHighScore, hash);
-
+                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
                 RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                 saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
                 analyzeFullBoardPotential(globalBestBoard);
@@ -1419,6 +1422,7 @@ public class EternitySolver implements Runnable {
 
     private void handleVictory(int[] winningBoard) {
         logger.info(">>> ETERNITY II SOLVED BY GPU PIPELINE!!! <<<");
+        logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
         updateDisplay(256, buildDisplayBoard(winningBoard));
         RecordManager.saveRecord(buildDisplayBoard(winningBoard), 256, saveProfile);
         consecutiveExtinctions = 0;
@@ -1456,7 +1460,7 @@ public class EternitySolver implements Runnable {
             lastThroughputReportTime = now;
             return;
         }
-
+        cumulativeTrials += gpuTrials + cpuTrials;
         double cpuTps = cpuTrials / (elapsed / 1000.0);
         double gpuTps = gpuTrials / (elapsed / 1000.0);
 
@@ -1484,7 +1488,7 @@ public class EternitySolver implements Runnable {
             int[] liveBoardCopy = new int[256];
             System.arraycopy(bestBoard, 0, liveBoardCopy, 0, 256);
             // Force the UI to draw the GPU's highest depth from this specific batch
-            Eternity.updateDisplay(highestP2DepthThisCycle, this.absoluteHighScore, buildDisplayBoard(liveBoardCopy));
+//            Eternity.updateDisplay(highestP2DepthThisCycle, this.absoluteHighScore, buildDisplayBoard(liveBoardCopy));
 
         }
 
@@ -1874,7 +1878,7 @@ public class EternitySolver implements Runnable {
                         RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                         saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
                         logger.info(">>> [CPU MODE] VICTORY! ETERNITY II SOLVED! <<<");
-                    }
+                        logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));                    }
                 }
                 return true;
             }
@@ -1894,6 +1898,7 @@ public class EternitySolver implements Runnable {
                         if (!useGpu && deepestStep > absoluteHighScore) {
                             absoluteHighScore = deepestStep;
                             System.arraycopy(localBoard, 0, globalBestBoard, 0, 256);
+                            logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
                             RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore,
                                     saveProfile);
                             analyzeFullBoardPotential(globalBestBoard);
