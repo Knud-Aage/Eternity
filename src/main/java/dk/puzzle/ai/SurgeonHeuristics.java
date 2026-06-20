@@ -162,7 +162,7 @@ public class SurgeonHeuristics {
      *
      * @param numClones        The number of modified board variations to generate.
      * @param numHoles         The target number of pieces to remove.
-     * @param tabuTenure       Array preventing removal of recently modified pieces.
+//     * @param tabuTenure       Array preventing removal of recently modified pieces.
      * @param currentIteration The current solver iteration.
      * @param currentHighScore The deepest point reached (e.g., 209).
      * @param buildOrder       The sequence of indices representing placement order.

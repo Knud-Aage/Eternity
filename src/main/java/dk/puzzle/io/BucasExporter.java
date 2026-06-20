@@ -1,141 +1,207 @@
 package dk.puzzle.io;
 
-import dk.puzzle.util.PieceUtils; // Sørg for at denne sti passer til din mappestruktur!
-import java.io.BufferedReader;
-import java.io.FileReader;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
+import java.net.URL;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.List;
+import java.util.ArrayList;
+import dk.puzzle.model.PieceInventory;
+import dk.puzzle.util.PieceUtils;
 
-
-/**
- * <p>A utility class designed to convert Eternity II puzzle solution records
- * from a CSV file format into a URL compatible with the <a href="https://e2.bucas.name/">Bucas Eternity II solver/viewer</a>.</p>
- *
- * <p>This exporter reads a CSV file, which can be in one of two formats:
- * a standard 16x16 grid format or a "macro" format (representing a 4x4 grid of 4x4 sub-grids).
- * It then processes each line to extract piece information (position and side patterns)
- * and constructs a 256-character string representing the entire 16x16 board.
- * Each piece's four sides (North, East, South, West) are encoded as lowercase
- * letters ('a' through 'w') based on their pattern ID.</p>
- *
- * <p>The generated URL allows users to visualize their puzzle solutions directly
- * in the Bucas online tool.</p>
- */
 public class BucasExporter {
 
-    private static final Logger logger = LogManager.getLogger(BucasExporter.class);
+    /**
+     * Helper class representing a placed piece with its 4 edge colors
+     */
+    static class Piece {
+        String north, east, south, west;
+
+        public Piece(String n, String e, String s, String w) {
+            this.north = n;
+            this.east = e;
+            this.south = s;
+            this.west = w;
+        }
+    }
 
     /**
-     * The main entry point for the BucasExporter application.
-     *
-     * <p>This method reads a specified CSV file containing Eternity II puzzle piece data,
-     * processes it to determine piece positions and patterns, and then generates
-     * a Bucas-compatible URL that can be used to view the puzzle solution online.</p>
-     *
-     * <p>It supports two input CSV formats: a standard 16x16 grid format and a "macro" format.
-     * The format is detected by checking if the first line of the CSV contains "macro".</p>
-     *
-     * @param args Command line arguments (not used in this application).
+     * Generates a Bucas Visualizer link for the KnudHansen puzzle configuration.
+     * Based on the official Javascript parser:
+     * - board_edges requires exactly 1024 contiguous lowercase letters (no commas).
+     * - board_pieces requires exactly 768 contiguous digits (3 digits per piece, no commas).
+     * - show_piecenumber=1 forces the piece overlay to render on page load.
      */
-    public static String exportBoard(int[] board) {
-        StringBuilder bucasString = new StringBuilder();
+    public static String exportBoard(int[] board, PieceInventory inventory) {
+        StringBuilder sb = new StringBuilder();
+
+        // Use the KnudHansen puzzle ID and enable the piece numbers overlay
+        sb.append("https://e2.bucas.name/#puzzle=KnudHansen&board_w=16&board_h=16&show_piecenumber=1");
+
+        StringBuilder edgesSb = new StringBuilder();
+        StringBuilder piecesSb = new StringBuilder();
 
         for (int i = 0; i < 256; i++) {
             int p = board[i];
 
-            // Hvis feltet er tomt, indsætter vi "0000"
             if (p == -1 || p == -2) {
-                bucasString.append("0000");
+                // Empty slots use color 0 ('a') and piece ID '000'
+                edgesSb.append("aaaa");
+                piecesSb.append("000");
             } else {
-                // Hent farverne for Nord, Øst, Syd, Vest
                 int n = PieceUtils.getNorth(p);
                 int e = PieceUtils.getEast(p);
                 int s = PieceUtils.getSouth(p);
                 int w = PieceUtils.getWest(p);
 
-                // Oversæt farvekoderne (0-22) til bogstaver ('a'-'w')
-                bucasString.append((char) ('a' + Math.max(0, n)));
-                bucasString.append((char) ('a' + Math.max(0, e)));
-                bucasString.append((char) ('a' + Math.max(0, s)));
-                bucasString.append((char) ('a' + Math.max(0, w)));
+                // Map numeric colors (0-22) to alphabetical characters ('a'-'w')
+                edgesSb.append((char) ('a' + n));
+                edgesSb.append((char) ('a' + e));
+                edgesSb.append((char) ('a' + s));
+                edgesSb.append((char) ('a' + w));
+
+                // Find the physical piece ID (1-based index)
+                int physId = -1;
+                for (int oi = 0; oi < 1024; oi++) {
+                    if (inventory.allOrientations[oi] == p) {
+                        physId = inventory.physicalMapping[oi] + 1; // Convert to 1-based index
+                        break;
+                    }
+                }
+
+                // Format the ID as exactly 3 digits (e.g., 45 becomes "045")
+                piecesSb.append(String.format("%03d", physId));
             }
         }
 
-        return "https://e2.bucas.name/#puzzle=Joshua_Blackwood_470&board_w=16&board_h=16&board_edges="
-                + bucasString.toString()
-                + "&motifs_order=jblackwood";
+        // Append both parameters without any commas
+        sb.append("&board_edges=").append(edgesSb.toString());
+        sb.append("&board_pieces=").append(piecesSb.toString());
+
+        return sb.toString();
     }
 
-    // ==========================================================
-    // DIN OPRINDELIGE METODE (Til CSV-filer)
-    // ==========================================================
-    public static void main(String[] args) {
-//        String filename = "records/SPIRAL/Record_209Pieces.csv";
-        String filename = "records/TYPEWRITER_LOCKED/Record_254Pieces.csv";
+    /**
+     * Verifies a Bucas link by parsing the contiguous character strings
+     * in exact accordance with the Bucas JS constraints.
+     */
+    public static void verifyBucasLink(String urlString) throws Exception {
+        // Handle URL fragment strings identifier (#) safely converted to queries
+        String standardUrl = urlString.replace("#", "?");
+        URL url = new URL(standardUrl);
+        Map<String, String> params = getQueryParams(url.getQuery());
 
-        String[] board = new String[256];
-        for (int i = 0; i < 256; i++) {
-            board[i] = "0000";
+        // Step 1: Parse Grid Matrix Metadata
+        int width = Integer.parseInt(params.getOrDefault("board_w", "16"));
+        int height = Integer.parseInt(params.getOrDefault("board_h", "16"));
+        String edgesStr = params.get("board_edges");
+
+        if (edgesStr == null || edgesStr.trim().isEmpty()) {
+            throw new IllegalArgumentException("Missing 'board_edges' parameter in the link.");
         }
 
-        try (BufferedReader br = new BufferedReader(new FileReader(filename))) {
-            String line = br.readLine();
-            if (line == null) {
-                return;
+        int totalExpectedChars = width * height * 4;
+
+        if (edgesStr.length() < totalExpectedChars) {
+            throw new IllegalArgumentException("Insufficient data! Found " + edgesStr.length()
+                    + " edge characters, but expected " + totalExpectedChars + " for a " + width + "x" + height + " board.");
+        }
+
+        // Step 2: Build Grid Matrix [Row][Column]
+        Piece[][] board = new Piece[height][width];
+        int charIdx = 0;
+        for (int r = 0; r < height; r++) {
+            for (int c = 0; c < width; c++) {
+                String n = String.valueOf(edgesStr.charAt(charIdx++));
+                String e = String.valueOf(edgesStr.charAt(charIdx++));
+                String s = String.valueOf(edgesStr.charAt(charIdx++));
+                String w = String.valueOf(edgesStr.charAt(charIdx++));
+                board[r][c] = new Piece(n, e, s, w);
             }
+        }
 
-            boolean isMacroFormat = line.toLowerCase().contains("macro");
+        System.out.println("--- Eternity II Board Setup parsed ---");
+        System.out.printf("Dimensions: %d columns x %d rows\n", width, height);
+        System.out.println("Processing integrity checks...\n");
 
-            while ((line = br.readLine()) != null) {
-                String[] parts = line.split(",");
-                if (parts.length >= 6) {
-                    int pos1 = Integer.parseInt(parts[0].trim());
-                    int pos2 = Integer.parseInt(parts[1].trim());
+        // Step 3: Evaluate All Constraints (Inner & Outer Frame Boundaries)
+        int totalInternalEdges = 0;
+        int matchedInternalEdges = 0;
+        int outerBorderMismatches = 0;
 
-                    int absoluteIndex = 0;
-                    if (isMacroFormat) {
-                        int row = (pos1 / 4) * 4 + (pos2 / 4);
-                        int col = (pos1 % 4) * 4 + (pos2 % 4);
-                        absoluteIndex = row * 16 + col;
-                    } else {
-                        absoluteIndex = pos1 * 16 + pos2;
+        for (int r = 0; r < height; r++) {
+            for (int c = 0; c < width; c++) {
+                Piece current = board[r][c];
+
+                // Check North Boundary
+                if (r == 0) {
+                    if (!current.north.equals("a")) outerBorderMismatches++; // 'a' corresponds to color 0 (grey border)
+                } else {
+                    totalInternalEdges++;
+                    if (current.north.equals(board[r - 1][c].south)) {
+                        matchedInternalEdges++;
                     }
+                }
 
-                    int n = Integer.parseInt(parts[2].trim());
+                // Check East Boundary
+                if (c == width - 1) {
+                    if (!current.east.equals("a")) outerBorderMismatches++;
+                } else {
+                    totalInternalEdges++;
+                    if (current.east.equals(board[r][c + 1].west)) {
+                        matchedInternalEdges++;
+                    }
+                }
 
-                    if (n >= 0 && n <= 22) {
-                        int e = Integer.parseInt(parts[3].trim());
-                        int s = Integer.parseInt(parts[4].trim());
-                        int w = Integer.parseInt(parts[5].trim());
+                // Check South Boundary
+                if (r == height - 1) {
+                    if (!current.south.equals("a")) outerBorderMismatches++;
+                } else {
+                    totalInternalEdges++;
+                    if (current.south.equals(board[r + 1][c].north)) {
+                        matchedInternalEdges++;
+                    }
+                }
 
-                        String pieceStr = "" +
-                                (char) ('a' + n) +
-                                (char) ('a' + e) +
-                                (char) ('a' + s) +
-                                (char) ('a' + w);
-
-                        board[absoluteIndex] = pieceStr;
+                // Check West Boundary
+                if (c == 0) {
+                    if (!current.west.equals("a")) outerBorderMismatches++;
+                } else {
+                    totalInternalEdges++;
+                    if (current.west.equals(board[r][c - 1].east)) {
+                        matchedInternalEdges++;
                     }
                 }
             }
-
-            StringBuilder bucasString = new StringBuilder();
-            for (int i = 0; i < 256; i++) {
-                bucasString.append(board[i]);
-            }
-
-            String finalUrl = "https://e2.bucas.name/#puzzle=Joshua_Blackwood_470&board_w=16&board_h=16&board_edges="
-                    + bucasString
-                    + "&motifs_order=jblackwood";
-
-            logger.info("Finished. Press on this link to see the puzzle:");
-            logger.info("------------------------------------------------------");
-            logger.info(finalUrl);
-            logger.info("------------------------------------------------------");
-
-        } catch (Exception e) {
-            logger.info("Couldn't find the file. Be sure that it is placed in the records folder.");
-            e.printStackTrace();
         }
+
+        // Step 4: Display Output Summary
+        int brokenEdges = totalInternalEdges - matchedInternalEdges;
+        System.out.println("--- Validation Results ---");
+        System.out.println("Frame Border Violations (Should be 0): " + outerBorderMismatches);
+        System.out.println("Total Internal Edge Interfaces Check: " + totalInternalEdges);
+        System.out.println("Successfully Matched Edges: " + matchedInternalEdges);
+        System.out.println("Broken / Mismatched Edges: " + brokenEdges);
+
+        if (outerBorderMismatches == 0 && brokenEdges == 0) {
+            System.out.println("\nSUCCESS: The provided link is a VALID full solution!");
+        } else {
+            System.out.println("\nFAILURE: Invalid placement matrix detected.");
+        }
+    }
+
+    // Parses raw URL query parameters into a manageable Key-Value map
+    private static Map<String, String> getQueryParams(String query) throws Exception {
+        Map<String, String> paramsMap = new HashMap<>();
+        if (query == null) return paramsMap;
+        String[] pairs = query.split("&");
+        for (String pair : pairs) {
+            int idx = pair.indexOf("=");
+            String key = idx > 0 ? URLDecoder.decode(pair.substring(0, idx), StandardCharsets.UTF_8.name()) : pair;
+            String value = idx > 0 && pair.length() > idx + 1 ? URLDecoder.decode(pair.substring(idx + 1), StandardCharsets.UTF_8.name()) : "";
+            paramsMap.put(key, value);
+        }
+        return paramsMap;
     }
 }
