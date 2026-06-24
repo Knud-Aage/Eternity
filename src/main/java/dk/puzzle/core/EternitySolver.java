@@ -1076,7 +1076,7 @@ public class EternitySolver implements Runnable {
         int rollbackRow = Math.max(1, failedRow - 4);
         int newSeedDepth = rollbackRow * 16;
 
-        logger.info(">>> [GENETIC EXPLORATION] 100% Vanguard Threads. Hard-banning the next 16 poisoned pieces at depth %d.", newSeedDepth);
+        logger.info(">>> [GENETIC EXPLORATION] 100%% Vanguard Threads. Hard-banning the next 16 poisoned pieces at depth %d.", newSeedDepth);
 
         // 1. Sync the depth so the engine knows where it is
         deepestStep = newSeedDepth;
@@ -1470,6 +1470,8 @@ public class EternitySolver implements Runnable {
         // Print the primary throughput speed
         logger.info("[SPEED] CPU: %,.0f/s  |  GPU: %,.0f/s  |  Pieces: %d  |  Hash: %08X",
                 cpuTps, gpuTps, deepestStep, hash);
+        System.out.printf("[SPEED] CPU: %,.0f/s  |  GPU: %,.0f/s  |  Pieces: %d  |  Hash: %08X%n",
+                cpuTps, gpuTps, deepestStep, hash);
 
         // --- PRINT POPULATION PERFORMANCE STATS ---
         int totalWins = eliteWins.get() + diverseWins.get() + restartWins.get();
@@ -1575,13 +1577,14 @@ public class EternitySolver implements Runnable {
                 folder.mkdirs();
             }
 
-            java.io.File linkFile = new java.io.File(folder, "bucas_link_" + score + ".txt");
+            String timeId = LocalTime.now().format(DateTimeFormatter.ofPattern("HHmmss"));
+            java.io.File linkFile = new java.io.File(folder, "Bucas_" + score + "pieces_" + timeId + ".txt");
             try (java.io.FileWriter writer = new java.io.FileWriter(linkFile)) {
                 writer.write("Eternity II Record: " + score + " pieces\n");
                 writer.write("Time: " + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "\n");
                 writer.write("Strategy: " + saveProfile + "\n\n");
 
-                writer.write("--- VISUALIZER LINK (Colors Only) ---\n");
+                writer.write("--- BUCAS VISUALIZER LINK ---\n");
                 writer.write(bucasLink + "\n\n");
 
                 writer.write("--- VERIFIABLE MATHEMATICAL PROOF (1-Based-ID/Rotation) ---\n");
@@ -1606,6 +1609,15 @@ public class EternitySolver implements Runnable {
                     writer.write("\n");
                 }
             }
+
+            // Upload Bucas link file to Google Drive
+            try {
+                uploadToDrive(linkFile, saveProfile, saveProfile);
+                logger.info(">>> [BUCAS] Uploaded to Google Drive: {}", linkFile.getName());
+            } catch (Exception uploadEx) {
+                logger.warn(">>> [BUCAS] Google Drive upload failed: {}", uploadEx.getMessage());
+            }
+
         } catch (Exception e) {
             logger.warn(String.format(">>> Error writing verifiable bucas text file: %s", e.getMessage()));
         }

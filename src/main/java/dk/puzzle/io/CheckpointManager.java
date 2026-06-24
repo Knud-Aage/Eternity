@@ -26,7 +26,7 @@ public class CheckpointManager {
 
         try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(file))) {
             oos.writeObject(state); // Saves the board AND the memory!
-            System.out.println(">>> [SUCCESS] Saved solver memory to: " + file.getAbsolutePath());
+//            System.out.println(">>> [SUCCESS] Saved solver memory to: " + file.getAbsolutePath());
         } catch (IOException e) {
             System.err.println(">>> [ERROR] Could not save memory: " + e.getMessage());
         }
