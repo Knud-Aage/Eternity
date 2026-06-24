@@ -1574,15 +1574,40 @@ public class EternitySolver implements Runnable {
             if (!folder.exists()) {
                 folder.mkdirs();
             }
+
             java.io.File linkFile = new java.io.File(folder, "bucas_link_" + score + ".txt");
             try (java.io.FileWriter writer = new java.io.FileWriter(linkFile)) {
                 writer.write("Eternity II Record: " + score + " pieces\n");
                 writer.write("Time: " + LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm:ss")) + "\n");
                 writer.write("Strategy: " + saveProfile + "\n\n");
-                writer.write(bucasLink + "\n");
+
+                writer.write("--- VISUALIZER LINK (Colors Only) ---\n");
+                writer.write(bucasLink + "\n\n");
+
+                writer.write("--- VERIFIABLE MATHEMATICAL PROOF (1-Based-ID/Rotation) ---\n");
+                for (int row = 0; row < 16; row++) {
+                    for (int col = 0; col < 16; col++) {
+                        int p = board[row * 16 + col];
+                        if (p == -1 || p == -2) {
+                            writer.write("---/- ");
+                        } else {
+                            int physId = -1;
+                            int rotation = 0;
+                            for (int oi = 0; oi < 1024; oi++) {
+                                if (inventory.allOrientations[oi] == p) {
+                                    physId = inventory.physicalMapping[oi];
+                                    rotation = oi % 4;
+                                    break;
+                                }
+                            }
+                            writer.write((physId + 1) + "/" + rotation + " ");
+                        }
+                    }
+                    writer.write("\n");
+                }
             }
-            uploadToDrive(linkFile, "text/plain", saveProfile);
         } catch (Exception e) {
+            logger.warn(String.format(">>> Error writing verifiable bucas text file: %s", e.getMessage()));
         }
     }
 
@@ -1596,27 +1621,64 @@ public class EternitySolver implements Runnable {
         String timeId = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss_SSS"));
         String baseFilename = "Errors" + conflicts + "_Base" + baseScore + "_" + timeId;
 
-        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, baseFilename + ".csv"))) {
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, "Raw_Board_Output_" + baseScore + ".txt"))) {
             for (int row = 0; row < 16; row++) {
                 StringBuilder line = new StringBuilder();
                 for (int col = 0; col < 16; col++) {
                     int p = simulatedBoard[row * 16 + col];
-                    int physId = -1;
-                    for (int oi = 0; oi < 1024; oi++) {
-                        if (inventory.allOrientations[oi] == p) {
-                            physId = inventory.physicalMapping[oi];
-                            break;
+                    if (p == -1 || p == -2) {
+                        line.append("0/0");
+                    } else {
+                        int physId = -1;
+                        int rotation = 0;
+                        for (int oi = 0; oi < 1024; oi++) {
+                            if (inventory.allOrientations[oi] == p) {
+                                physId = inventory.physicalMapping[oi];
+                                rotation = oi % 4;
+                                break;
+                            }
                         }
+                        line.append((physId + 1)).append("/").append(rotation);
                     }
-                    line.append(physId + 1);
+                    if (col < 15) {
+                        line.append(" ");
+                    }
+                }
+                writer.println(line);
+            }
+            logger.info(String.format(">>> Saved raw board text for BoardImporter: Raw_Board_Output_%d.txt", baseScore));
+        } catch (Exception e) {
+            logger.error(String.format(">>> Error saving Raw Board Text: %s", e.getMessage()));
+        }
+
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, "pieces.csv"))) {
+            for (int row = 0; row < 16; row++) {
+                StringBuilder line = new StringBuilder();
+                for (int col = 0; col < 16; col++) {
+                    int p = simulatedBoard[row * 16 + col];
+                    if (p == -1 || p == -2) {
+                        line.append("---/-");
+                    } else {
+                        int physId = -1;
+                        int rotation = 0;
+                        for (int oi = 0; oi < 1024; oi++) {
+                            if (inventory.allOrientations[oi] == p) {
+                                physId = inventory.physicalMapping[oi];
+                                rotation = oi % 4;
+                                break;
+                            }
+                        }
+                        line.append((physId + 1)).append("/").append(rotation);
+                    }
                     if (col < 15) {
                         line.append(",");
                     }
                 }
                 writer.println(line);
             }
+            logger.info(">>> Saved official verification file: pieces.csv");
         } catch (Exception e) {
-            logger.error(">>> Error saving Full Board CSV: " + e.getMessage());
+            logger.error(String.format(">>> Error saving pieces.csv: %s", e.getMessage()));
         }
 
         try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder,
@@ -1624,18 +1686,17 @@ public class EternitySolver implements Runnable {
             writer.println("Base Score: " + baseScore);
             writer.println("Edge Conflicts: " + conflicts);
             writer.println(BucasExporter.exportBoard(simulatedBoard));
-            logger.info(">>> Saved full board Bucas link: " + baseFilename + "_link.txt");
+            logger.info(String.format(">>> Saved full board Bucas link: %s_link.txt", baseFilename));
         } catch (Exception e) {
-            logger.error(">>> Error saving Full Board Bucas Link: " + e.getMessage());
+            logger.error(String.format(">>> Error saving Full Board Bucas Link: %s", e.getMessage()));
         }
 
-        // SAFELY Save PNG Image
         try {
             RecordManager.saveImage(buildDisplayBoard(simulatedBoard), new java.io.File(folder,
                     baseFilename + ".png").getAbsolutePath());
-            logger.info(">>> Saved full board PNG image: " + baseFilename + ".png");
+            logger.info(String.format(">>> Saved full board PNG image: %s.png", baseFilename));
         } catch (Exception e) {
-            logger.error(">>> Error saving PNG image: " + e.getMessage());
+            logger.error(String.format(">>> Error saving PNG image: %s", e.getMessage()));
         }
     }
 
@@ -1696,7 +1757,6 @@ public class EternitySolver implements Runnable {
                     int[] neighbors = {idx, idx + 1, idx + 16, idx - 1, idx - 16};
                     for (int n : neighbors) {
                         if (n >= 0 && n < 256) {
-                            // BUG FIX: Only protect the static locks if the Master Switch is ON!
                             if (this.lockCenter && (n == 135 || n == 221 || n == 45 || n == 210 || n == 34)) {
                                 continue;
                             }
@@ -1724,11 +1784,6 @@ public class EternitySolver implements Runnable {
         logger.info(">>> [CONFIG] Variant Save Threshold updated to: " + newThreshold);
     }
 
-    /**
-     * Re-applies the Center Piece and the 4 Hint Pieces to any board array.
-     * This is necessary because the GPU kernel only writes the path it explored,
-     * leaving unexplored hint positions as -1 (empty holes).
-     */
     private void applyStaticLocks(int[] board) {
         if (this.lockCenter) {
             board[135] = targetPiece;

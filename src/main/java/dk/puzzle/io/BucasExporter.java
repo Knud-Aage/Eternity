@@ -37,33 +37,38 @@ public class BucasExporter {
      *
      * @param args Command line arguments (not used in this application).
      */
+    /**
+     * Remaps TheSil color numbers (0-22) to KnudHansen/Bucas color numbers.
+     * Derived by comparing Thomas Egense's 22-piece solution with TheSil's data.
+     */
+    private static final int[] THESIL_TO_THOMAS = {
+            0, 1, 3, 4, 2, 5, 6, 7, 9, 12, 14, 15, 19, 21, 8, 10, 13, 16, 17, 18, 20, 22, 11
+    };
+
     public static String exportBoard(int[] board) {
         StringBuilder bucasString = new StringBuilder();
 
         for (int i = 0; i < 256; i++) {
             int p = board[i];
 
-            // Hvis feltet er tomt, indsætter vi "0000"
             if (p == -1 || p == -2) {
-                bucasString.append("0000");
+                bucasString.append("aaaa");
             } else {
-                // Hent farverne for Nord, Øst, Syd, Vest
                 int n = PieceUtils.getNorth(p);
                 int e = PieceUtils.getEast(p);
                 int s = PieceUtils.getSouth(p);
                 int w = PieceUtils.getWest(p);
 
-                // Oversæt farvekoderne (0-22) til bogstaver ('a'-'w')
-                bucasString.append((char) ('a' + Math.max(0, n)));
-                bucasString.append((char) ('a' + Math.max(0, e)));
-                bucasString.append((char) ('a' + Math.max(0, s)));
-                bucasString.append((char) ('a' + Math.max(0, w)));
+                // Remap TheSil colors to KnudHansen colors for Bucas verification
+                bucasString.append((char) ('a' + THESIL_TO_THOMAS[n]));
+                bucasString.append((char) ('a' + THESIL_TO_THOMAS[e]));
+                bucasString.append((char) ('a' + THESIL_TO_THOMAS[s]));
+                bucasString.append((char) ('a' + THESIL_TO_THOMAS[w]));
             }
         }
 
-        return "https://e2.bucas.name/#puzzle=Joshua_Blackwood_470&board_w=16&board_h=16&board_edges="
-                + bucasString.toString()
-                + "&motifs_order=jblackwood";
+        return "https://e2.bucas.name/#puzzle=KnudHansen&board_w=16&board_h=16&board_edges="
+                + bucasString.toString();
     }
 
     // ==========================================================
