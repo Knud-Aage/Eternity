@@ -1569,7 +1569,7 @@ public class EternitySolver implements Runnable {
 
     private void saveAndUploadBucasLink(int[] board, int score) {
         try {
-            String bucasLink = BucasExporter.exportBoard(board, inventory);
+            String bucasLink = BucasExporter.exportBoard(board);
             java.io.File folder = new java.io.File(saveProfile);
             if (!folder.exists()) {
                 folder.mkdirs();
@@ -1685,7 +1685,7 @@ public class EternitySolver implements Runnable {
                 baseFilename + "_link.txt"))) {
             writer.println("Base Score: " + baseScore);
             writer.println("Edge Conflicts: " + conflicts);
-            writer.println(BucasExporter.exportBoard(simulatedBoard, inventory));
+            writer.println(BucasExporter.exportBoard(simulatedBoard));
             logger.info(String.format(">>> Saved full board Bucas link: %s_link.txt", baseFilename));
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving Full Board Bucas Link: %s", e.getMessage()));

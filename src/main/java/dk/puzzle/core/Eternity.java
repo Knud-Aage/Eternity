@@ -20,7 +20,7 @@ import org.apache.logging.log4j.Logger;
 
 /**
  * The primary entry point and coordinator for the Eternity II solver application.
- * 
+ *
  * <p>This class is responsible for initializing the application environment,
  * loading puzzle piece data, launching the graphical user interface, and
  * managing the lifecycle of the solver threads. It also provides the control
@@ -28,7 +28,7 @@ import org.apache.logging.log4j.Logger;
  */
 public class Eternity {
     private static final int CENTER_PIECE_INDEX = 138;
-    private static final int CENTER_PIECE_ROTATION = 2;
+    private static final int CENTER_PIECE_ROTATION = 3;
 
     public static final AtomicInteger currentScore = new AtomicInteger(0);
     private static final int[][] currentDisplayBoard = new int[16][];
@@ -38,16 +38,16 @@ public class Eternity {
 
     /**
      * Orchestrates the startup sequence of the application.
-     * 
+     *
      * <p>This method initializes logging, displays the {@link StartupDialog}, 
      * loads the piece inventory, configures the center piece, starts the 
      * requested {@link EternitySolver} strategy, and constructs the main GUI frame.</p>
-     * 
+     *
      * @param args Command-line arguments (currently unused).
      */
     public static void main(String[] args) {
 //        initLogging();
-        
+
         StartupDialog dialog = new StartupDialog(null);
         dialog.setVisible(true);
 
@@ -229,7 +229,7 @@ public class Eternity {
                 // ------------------------------------------------
 
                 frame.add(controlPanel, BorderLayout.EAST);
-                }
+            }
 
             frame.pack();
             frame.setLocationRelativeTo(null);
@@ -248,10 +248,10 @@ public class Eternity {
 
     /**
      * Updates the shared state used for real-time visualization of the puzzle board.
-     * 
+     *
      * <p>This method is thread-safe, allowing solver threads to push updates to the 
      * UI without causing race conditions on the display board data.</p>
-     * 
+     *
      * @param current The number of pieces placed in the current iteration.
      * @param record The highest number of pieces successfully placed during this session.
      * @param board A 2D array representing the 16x16 board state to be rendered.
@@ -269,30 +269,72 @@ public class Eternity {
     }
 
     public static int[] loadPieces() {
+        // Expected CSV format (TheSil): pieceNumber, north, east, south, west
+        // Border/corner pieces use empty fields for grey edges, e.g.: 1,1,2,,
+        // Empty fields are treated as 0 (grey border color).
         try (BufferedReader br = new BufferedReader(new FileReader("pieces.csv"))) {
             int[] pieces = new int[256];
             int i = 0;
             String line;
-            while ((line = br.readLine()) != null && i < 256) {
-                String[] pts = line.split(",");
-                if (pts.length < 4) {
-                    continue;
-                }
 
-                int e = Integer.parseInt(pts[0].trim());
-                int s = Integer.parseInt(pts[1].trim());
-                int w = Integer.parseInt(pts[2].trim());
-                int n = Integer.parseInt(pts[3].trim());
+            // Skip header line if present (starts with non-digit)
+            br.mark(256);
+            String firstLine = br.readLine();
+            if (firstLine != null) {
+                String trimmed = firstLine.trim();
+                // TheSil header: "16,16,5,17" — 4 numbers describing the puzzle
+                // If first token parses as a number > 256 or has exactly 4 tokens
+                // and no piece data, it's a header — skip it.
+                String[] headerPts = trimmed.split(",");
+                boolean isHeader = headerPts.length <= 4 &&
+                        headerPts[0].trim().equals("16");
+                if (!isHeader) {
+                    br.reset(); // not a header, rewind and process it
+                }
+            }
+
+            while ((line = br.readLine()) != null && i < 256) {
+                String trimmed = line.trim();
+                if (trimmed.isEmpty()) continue;
+
+                String[] pts = trimmed.split(",", -1); // -1 keeps trailing empty fields
+                if (pts.length < 5) continue;
+
+                // TheSil format: pieceNumber, E, S, W, N
+                // (NOT north-east-south-west — verified against piece 139: E=14,S=8,W=8,N=9)
+                int e = parseColorField(pts[1]);
+                int s = parseColorField(pts[2]);
+                int w = parseColorField(pts[3]);
+                int n = parseColorField(pts[4]);
 
                 pieces[i++] = PieceUtils.pack(n, e, s, w);
             }
+
             if (i == 256) {
+                logger.info("Loaded {} pieces from pieces.csv.", i);
                 return pieces;
+            } else {
+                logger.warn("pieces.csv only contained {} pieces, expected 256. Using mock data.", i);
             }
         } catch (Exception e) {
-            logger.info("pieces.csv not found or unreadable. Using mock data.");
+            logger.info("pieces.csv not found or unreadable: {}. Using mock data.", e.getMessage());
         }
         return generateMock();
+    }
+
+    /**
+     * Parses a color field from the CSV, returning 0 for empty or missing fields.
+     * TheSil's format uses empty fields for grey (border) edges.
+     */
+    private static int parseColorField(String field) {
+        if (field == null) return 0;
+        String trimmed = field.trim();
+        if (trimmed.isEmpty()) return 0;
+        try {
+            return Integer.parseInt(trimmed);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private static int[] generateMock() {
