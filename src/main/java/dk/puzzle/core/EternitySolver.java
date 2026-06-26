@@ -363,10 +363,12 @@ public class EternitySolver implements Runnable {
         if (deepestStep >= 100) {
             return 5000;
         }
-        if (deepestStep < 50) {
-            return 5000;
+        if (deepestStep >= 50) {
+            return 2000;
         }
-        return 15000;
+        // Below depth 50: small batch so GPU fires quickly from a shallow base camp.
+        // CPU can produce these seeds easily; GPU then pushes deep from depth 30-40.
+        return 200;
     }
 
     private void initializeGpuEngine() {
@@ -753,13 +755,34 @@ public class EternitySolver implements Runnable {
         }
 
         int[] bestBoardOut = new int[256];
+        Arrays.fill(bestBoardOut, -1);
+
         isGpuBusy = true;
 
         GpuEngine.GpuResult result = null;
 
+        // Three-tier dynamic budget based on how close we are to the record.
+        // Tier 1 — Standard evolution (deepestStep far from record):
+        //           35,000 steps, ~2-3 sec/batch. Keeps genetic loop fast.
+        // Tier 2 — Approaching record (within 10 pieces):
+        //           75,000 steps. More runway without killing throughput.
+        // Tier 3 — Endgame (within 3 of record, same threshold as hyper-dive trigger):
+        //           200,000 steps. Near-record seeds deserve deep search.
+        // Hyper-dive (single goldmine seed) uses 2,000,000 separately after this batch.
+        final int goldmineThreshold = Math.max(LNS_THRESHOLD, absoluteHighScore - 3);
+        long currentGpuBudget;
+        if (deepestStep >= goldmineThreshold) {
+            currentGpuBudget = 200_000L;  // Tier 3 — endgame
+        } else if (absoluteHighScore > 0 && deepestStep >= absoluteHighScore - 10) {
+            currentGpuBudget = 75_000L;   // Tier 2 — approaching record
+        } else {
+            currentGpuBudget = 35_000L;   // Tier 1 — standard evolution
+        }
+//        long currentGpuBudget = (deepestStep >= LNS_THRESHOLD) ? 500000L : 75000L;
+
         try {
             Future<GpuEngine.GpuResult> future = gpuExecutor.submit(() ->
-                    gpuEngine.runDeepDfs(seeds, currentSeedDepth, deepestStep, bestBoardOut, buildOrder)
+                    gpuEngine.runDeepDfs(seeds, currentSeedDepth, deepestStep, bestBoardOut, buildOrder, currentGpuBudget)
             );
             result = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
         } catch (Exception e) {
@@ -768,6 +791,13 @@ public class EternitySolver implements Runnable {
             triggerBranchScrap();
             return;
         }
+
+        // >>> FIX: Double-tjek at Java er enig i GPU'ens score
+        int javaCountedScore = countPieces(bestBoardOut);
+        if (javaCountedScore != result.newHighScore()) {
+            logger.warn(">>> [ADVARSEL] Fase 2 GPU rapporterede " + result.newHighScore() + " men Java talte " + javaCountedScore + "! Retter score...");
+        }
+        int validScore = Math.min(javaCountedScore, result.newHighScore());
 
         applyStaticLocks(bestBoardOut);
         // --- ANALYZE BATCH SEED PERFORMANCE ---
@@ -787,7 +817,6 @@ public class EternitySolver implements Runnable {
         }
 
         // Classify the winning seed based on its position in the stratified tiers
-        // Elite = first 20%, Diverse = next 50%, Random-Restart = remaining 30%
         int totalSeeds = seeds.size();
         if (totalSeeds > 0) {
             double relativePosition = (double) bestSeedIndex / totalSeeds;
@@ -802,18 +831,14 @@ public class EternitySolver implements Runnable {
         globalGpuTrialCount.addAndGet(result.stepsTaken());
         isGpuBusy = false;
 
-        long elapsed = System.currentTimeMillis() - methodStartTime;
-//        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
-//                Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
-
         if (result.solved()) {
             handleVictory(bestBoardOut);
         }
 
-        if (result.newHighScore() > deepestStep) {
+        // Brug validScore i stedet for result.newHighScore()
+        if (validScore > deepestStep) {
 
-            // 1. Accept the GPU's local progress!
-            deepestStep = result.newHighScore();
+            deepestStep = validScore;
             consecutiveGpuStagnation = 0;
 
             if (deepestStep >= absoluteHighScore - 5) {
@@ -826,16 +851,14 @@ public class EternitySolver implements Runnable {
             if (deepestStep > variantSaveThreshold.get()) {
                 int hash = Arrays.hashCode(bestBoard);
                 if (savedVariantHashes.add(hash)) {
-                    logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
+                    logger.info(">>> [HIGH DEPTH VARIANT] Unique " + deepestStep + "-piece board detected! Generating Full Board Variant...");
                     logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
                     analyzeFullBoardPotential(bestBoard, deepestStep);
                 }
             }
 
-            // Log the local climb so you can watch it rise
             if (deepestStep > lastReportedDepth) {
-                logger.info(">>> [CLIMBING] Depth: %d / 256 | Board Hash: %08X", deepestStep,
-                        Arrays.hashCode(bestBoard));
+                logger.info(String.format(">>> [CLIMBING] Depth: %d / 256 | Board Hash: %08X", deepestStep, Arrays.hashCode(bestBoard)));
                 lastReportedDepth = deepestStep;
             }
 
@@ -863,11 +886,9 @@ public class EternitySolver implements Runnable {
             }
 
         } else {
-            // The GPU completely failed to beat the current local depth.
             consecutiveGpuStagnation++;
         }
 
-        // --- Seed generation for the next batch ---
         if (consecutiveGpuStagnation < 4) {
             seedPool.addAll(SeedSelector.selectBest(
                     seeds,
@@ -898,36 +919,34 @@ public class EternitySolver implements Runnable {
             sourceBoard = bestBoard;
         }
 
-        // More holes when we're stuck deep — 5 holes at 209 pieces is not enough
-        // to escape a structural dead end. Scale up with depth and stagnation.
         int actualHoles;
         if (consecutiveExtinctions > 20) {
-            // Heavy stagnation: aggressive excavation to break out
             actualHoles = Math.min(holesToPunch * 2, deepestStep / 5);
         } else if (deepestStep > 240) {
-            // Very close to solved: tiny surgical holes only
             actualHoles = Math.max(3, holesToPunch / 4);
         } else if (deepestStep > 200) {
-            // Normal high-depth operation: use configured hole count
             actualHoles = holesToPunch;
         } else {
-            // Below 200: use configured hole count
             actualHoles = holesToPunch;
         }
-        actualHoles = Math.clamp(actualHoles, 1, deepestStep - 5); // safety clamp
+        actualHoles = Math.clamp(actualHoles, 1, deepestStep - 5);
+
         List<int[]> variations = surgeon.excavateFrontier(
                 sourceBoard, numClones, actualHoles, currentRepairIteration, deepestStep, buildOrder);
 
-        int scoreBefore = deepestStep;
+        // >>> FIX: Rens bufferen FØR GPU'en rører den
         int[] bestBoardOut = new int[256];
+        Arrays.fill(bestBoardOut, -1);
+
         GpuEngine.GpuResult result = null;
+
+        // >>> FIX: Send budgettet med over til GPU'en
+        long currentGpuBudget = (deepestStep >= 210) ? 2000000L : 500000L;
 
         try {
             Future<GpuEngine.GpuResult> future = gpuExecutor.submit(() ->
-                    gpuEngine.runRepairMode(variations, deepestStep, bestBoardOut)
+                    gpuEngine.runRepairMode(variations, deepestStep, bestBoardOut, currentGpuBudget)
             );
-            // Phase 3 repair batches take 4-8 minutes per run with 50k clones.
-            // 10 seconds killed every batch before results could be collected.
             result = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
         } catch (java.util.concurrent.TimeoutException e) {
             logger.warn(">>> [GPU TIMEOUT] Phase 3 Surgeon locked up after 10 minutes! Triggering teardown and rebooting GPU...");
@@ -941,14 +960,18 @@ public class EternitySolver implements Runnable {
             return;
         }
 
+        // >>> FIX: Double-tjek at Java er enig i GPU'ens score
+        int javaCountedScore = countPieces(bestBoardOut);
+        if (javaCountedScore != result.newHighScore()) {
+            logger.warn(">>> [ADVARSEL] Fase 3 GPU rapporterede " + result.newHighScore() + " men Java talte " + javaCountedScore + "! Retter score...");
+        }
+        int validScore = Math.min(javaCountedScore, result.newHighScore());
+
         applyStaticLocks(bestBoardOut);
 
-// --- 1. METRICS & VICTORY CHECK ---
         globalGpuTrialCount.addAndGet(result.stepsTaken());
         isGpuBusy = false;
 
-        // We declare the timer here, immediately before the logging,
-        // using a unique name and a direct System call.
         long calculationElapsed = System.currentTimeMillis() - start;
 
         logger.info(">>> GPU Phase 3 (Surgeon) complete. Steps taken per second: %,d",
@@ -957,11 +980,9 @@ public class EternitySolver implements Runnable {
         if (result.solved()) {
             handleVictory(bestBoardOut);
         }
-        // --- 2. ACCEPT ANY LOCAL PROGRESS ---
-        // Phase 3 must act on ANY improvement over deepestStep, not just
-        // absolute records. Without this it cannot build momentum through
-        // 213 -> 214 -> 215 -> 216 incrementally.
-        if (result.newHighScore() > deepestStep) {
+
+        // Brug validScore i stedet for result.newHighScore()
+        if (validScore > deepestStep) {
 
             if (!verifyBoardStrict(bestBoardOut)) {
                 logger.error(">>> [FATAL GPU BUG] Phase 3 returned a board with an illegal edge conflict!");
@@ -981,8 +1002,7 @@ public class EternitySolver implements Runnable {
                 return;
             }
 
-            // --- 3. APPLY LOCAL PROGRESS ---
-            deepestStep = result.newHighScore();
+            deepestStep = validScore;
             consecutiveGpuStagnation = 0;
             consecutiveExtinctions = 0;
 
@@ -1001,7 +1021,6 @@ public class EternitySolver implements Runnable {
             logger.info(">>> [PHASE 3 PROGRESS] Depth: %d / 256 | Hash: %08X",
                     deepestStep, Arrays.hashCode(bestBoard));
 
-            // Only save to disk when beating the absolute global record
             if (deepestStep > absoluteHighScore) {
                 absoluteHighScore = deepestStep;
                 lastReportedDepth = absoluteHighScore;
@@ -1391,7 +1410,9 @@ public class EternitySolver implements Runnable {
         }
 
 // --- EXECUTE THE TEARDOWN ---
-        int newTargetDepth = Math.max(0, lockedPieces - 16);
+        // lockedPieces IS already the target depth after the drop calculation above.
+        // The previous "- 16" caused a double-subtraction that cascaded to depth 0.
+        int newTargetDepth = lockedPieces;
         int piecesDropped = deepestStep - newTargetDepth;
 
         logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping " + piecesDropped + " pieces to depth " + newTargetDepth + ".");
