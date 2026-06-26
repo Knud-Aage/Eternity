@@ -363,12 +363,10 @@ public class EternitySolver implements Runnable {
         if (deepestStep >= 100) {
             return 5000;
         }
-        if (deepestStep >= 50) {
-            return 2000;
+        if (deepestStep < 50) {
+            return 5000;
         }
-        // Below depth 50: small batch so GPU fires quickly from a shallow base camp.
-        // CPU can produce these seeds easily; GPU then pushes deep from depth 30-40.
-        return 200;
+        return 15000;
     }
 
     private void initializeGpuEngine() {
@@ -504,14 +502,13 @@ public class EternitySolver implements Runnable {
                             int failedRow = deadEndDepth / 16;
 
                             // Roll back 2 full rows.
-                            int rollbackRow = Math.max(1, failedRow - 4);
+                            int rollbackRow = Math.max(1, failedRow - 2);
                             int newSeedDepth = rollbackRow * 16;
 
                             logger.warn(String.format(">>> [SMART RETREAT] Starved at depth %d. Rolling Base Camp to Row %d (Depth %d)",
                                     deadEndDepth, rollbackRow, newSeedDepth));
 
-                            // Sync the depth so the engine knows where it is
-                            deepestStep = newSeedDepth;
+                             deepestStep = newSeedDepth; // REMOVED — caused budget tier regression
 
                             // Erase the CPU start board down to the rollback row
                             for (int i = newSeedDepth; i < 256; i++) {
@@ -761,24 +758,17 @@ public class EternitySolver implements Runnable {
 
         GpuEngine.GpuResult result = null;
 
-        // Three-tier dynamic budget based on how close we are to the record.
-        // Tier 1 — Standard evolution (deepestStep far from record):
-        //           35,000 steps, ~2-3 sec/batch. Keeps genetic loop fast.
-        // Tier 2 — Approaching record (within 10 pieces):
-        //           75,000 steps. More runway without killing throughput.
-        // Tier 3 — Endgame (within 3 of record, same threshold as hyper-dive trigger):
-        //           200,000 steps. Near-record seeds deserve deep search.
-        // Hyper-dive (single goldmine seed) uses 2,000,000 separately after this batch.
-        final int goldmineThreshold = Math.max(LNS_THRESHOLD, absoluteHighScore - 3);
-        long currentGpuBudget;
-        if (deepestStep >= goldmineThreshold) {
-            currentGpuBudget = 200_000L;  // Tier 3 — endgame
-        } else if (absoluteHighScore > 0 && deepestStep >= absoluteHighScore - 10) {
-            currentGpuBudget = 75_000L;   // Tier 2 — approaching record
-        } else {
-            currentGpuBudget = 35_000L;   // Tier 1 — standard evolution
-        }
-//        long currentGpuBudget = (deepestStep >= LNS_THRESHOLD) ? 500000L : 75000L;
+        long currentGpuBudget = (deepestStep >= LNS_THRESHOLD) ? 500000L : 75000L;
+
+//        final int goldmineThreshold = Math.max(LNS_THRESHOLD, absoluteHighScore - 3);
+//        long currentGpuBudget;
+//        if (deepestStep >= goldmineThreshold) {
+//            currentGpuBudget = 200_000L;  // Endgame: within 3 of record
+//        } else if (deepestStep >= LNS_THRESHOLD) {
+//            currentGpuBudget = 75_000L;   // Near record: depth 200-209
+//        } else {
+//            currentGpuBudget = 35_000L;   // Standard evolution
+//        }
 
         try {
             Future<GpuEngine.GpuResult> future = gpuExecutor.submit(() ->
@@ -792,12 +782,26 @@ public class EternitySolver implements Runnable {
             return;
         }
 
-        // >>> FIX: Double-tjek at Java er enig i GPU'ens score
+        // Cross-check GPU score vs actual board content.
+        // If bestBoardOut is empty (copy-back race condition), fall back to bestBoard.
         int javaCountedScore = countPieces(bestBoardOut);
-        if (javaCountedScore != result.newHighScore()) {
-            logger.warn(">>> [ADVARSEL] Fase 2 GPU rapporterede " + result.newHighScore() + " men Java talte " + javaCountedScore + "! Retter score...");
+        if (javaCountedScore == 0 && result.newHighScore() > 0) {
+            // GPU reported a score but board wasn't copied — use previous bestBoard
+            // as a fallback so the score isn't silently lost.
+            logger.warn(">>> [ADVARSEL] GPU rapporterede %d men Java talte 0 — bruger forrige bestBoard som fallback.",
+                    result.newHighScore());
+            int fallbackScore = countPieces(bestBoard);
+            if (fallbackScore > 0) {
+                System.arraycopy(bestBoard, 0, bestBoardOut, 0, 256);
+                javaCountedScore = fallbackScore;
         }
-        int validScore = Math.min(javaCountedScore, result.newHighScore());
+        } else if (javaCountedScore != result.newHighScore()) {
+            logger.warn(">>> [ADVARSEL] GPU rapporterede %d men Java talte %d — bruger minimum.",
+                    result.newHighScore(), javaCountedScore);
+        }
+        int validScore = (javaCountedScore > 0)
+                ? Math.min(javaCountedScore, result.newHighScore())
+                : result.newHighScore(); // trust GPU if board is still empty
 
         applyStaticLocks(bestBoardOut);
         // --- ANALYZE BATCH SEED PERFORMANCE ---
@@ -1410,9 +1414,7 @@ public class EternitySolver implements Runnable {
         }
 
 // --- EXECUTE THE TEARDOWN ---
-        // lockedPieces IS already the target depth after the drop calculation above.
-        // The previous "- 16" caused a double-subtraction that cascaded to depth 0.
-        int newTargetDepth = lockedPieces;
+        int newTargetDepth = Math.max(0, lockedPieces - 16);
         int piecesDropped = deepestStep - newTargetDepth;
 
         logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping " + piecesDropped + " pieces to depth " + newTargetDepth + ".");
@@ -1652,17 +1654,37 @@ public class EternitySolver implements Runnable {
     private void updateDisplay(int depth, int[][] displayBoard) {
         long now = System.currentTimeMillis();
 
-        boolean isNewRecord = depth >= absoluteHighScore;
+        // Count actual placed pieces from the board instead of using deepestStep.
+        // deepestStep is filtered by the radar and can be 1 less than reality.
+        int actualPieces = 0;
+        if (displayBoard != null) {
+            for (int[] row : displayBoard) {
+                if (row != null) {
+                    for (int p : row) {
+                        if (p != -1) actualPieces++;
+                    }
+                }
+            }
+        }
+        // Fall back to depth if board is empty (e.g. during init)
+        int scoreToShow = (actualPieces > 0) ? actualPieces : depth;
+
+        boolean isNewRecord = absoluteHighScore > 0 && scoreToShow >= absoluteHighScore;
         boolean timeToRefresh = (now - lastVisualUpdate) >= 300_000;
 
         if (!isNewRecord && !timeToRefresh) {
             return; // Gate is closed!
         }
 
-        // If we passed the gate, update the timer
         lastVisualUpdate = now;
 
-        Eternity.updateDisplay(depth, this.absoluteHighScore, displayBoard);
+        // Update absoluteHighScore if actual count exceeds it
+        if (scoreToShow > absoluteHighScore) {
+            absoluteHighScore = scoreToShow;
+            System.arraycopy(bestBoard, 0, globalBestBoard, 0, 256);
+        }
+
+        Eternity.updateDisplay(scoreToShow, this.absoluteHighScore, displayBoard);
     }
 
     private void saveAndUploadBucasLink(int[] board, int score) {
