@@ -482,7 +482,7 @@ public class EternitySolver implements Runnable {
                         // The queue is actively growing. Reset the timer!
                         lastSeedGrowthTime = System.currentTimeMillis();
                         lastSeedCount = currentSeeds;
-                    } else if (System.currentTimeMillis() - lastSeedGrowthTime > 5000) {
+                    } else if (System.currentTimeMillis() - lastSeedGrowthTime > 30000) {
 
                         logger.warn(">>> Watchdog: Endgame Starvation Triggered! Executing immediate retreat.");
 
@@ -508,7 +508,8 @@ public class EternitySolver implements Runnable {
                             logger.warn(String.format(">>> [SMART RETREAT] Starved at depth %d. Rolling Base Camp to Row %d (Depth %d)",
                                     deadEndDepth, rollbackRow, newSeedDepth));
 
-                             deepestStep = newSeedDepth; // REMOVED — caused budget tier regression
+                            // Sync the depth so the engine knows where it is
+                            deepestStep = newSeedDepth;
 
                             // Erase the CPU start board down to the rollback row
                             for (int i = newSeedDepth; i < 256; i++) {
@@ -758,17 +759,17 @@ public class EternitySolver implements Runnable {
 
         GpuEngine.GpuResult result = null;
 
-        long currentGpuBudget = (deepestStep >= LNS_THRESHOLD) ? 500000L : 75000L;
+//        long currentGpuBudget = (deepestStep >= LNS_THRESHOLD) ? 500000L : 75000L;
 
-//        final int goldmineThreshold = Math.max(LNS_THRESHOLD, absoluteHighScore - 3);
-//        long currentGpuBudget;
-//        if (deepestStep >= goldmineThreshold) {
-//            currentGpuBudget = 200_000L;  // Endgame: within 3 of record
-//        } else if (deepestStep >= LNS_THRESHOLD) {
-//            currentGpuBudget = 75_000L;   // Near record: depth 200-209
-//        } else {
-//            currentGpuBudget = 35_000L;   // Standard evolution
-//        }
+        final int goldmineThreshold = Math.max(LNS_THRESHOLD, absoluteHighScore - 3);
+        long currentGpuBudget;
+        if (deepestStep >= goldmineThreshold) {
+            currentGpuBudget = 200_000L;  // Endgame: within 3 of record
+        } else if (deepestStep >= LNS_THRESHOLD) {
+            currentGpuBudget = 75_000L;   // Near record: depth 200-209
+        } else {
+            currentGpuBudget = 35_000L;   // Standard evolution
+        }
 
         try {
             Future<GpuEngine.GpuResult> future = gpuExecutor.submit(() ->
@@ -782,26 +783,12 @@ public class EternitySolver implements Runnable {
             return;
         }
 
-        // Cross-check GPU score vs actual board content.
-        // If bestBoardOut is empty (copy-back race condition), fall back to bestBoard.
+        // >>> FIX: Double-tjek at Java er enig i GPU'ens score
         int javaCountedScore = countPieces(bestBoardOut);
-        if (javaCountedScore == 0 && result.newHighScore() > 0) {
-            // GPU reported a score but board wasn't copied — use previous bestBoard
-            // as a fallback so the score isn't silently lost.
-            logger.warn(">>> [ADVARSEL] GPU rapporterede %d men Java talte 0 — bruger forrige bestBoard som fallback.",
-                    result.newHighScore());
-            int fallbackScore = countPieces(bestBoard);
-            if (fallbackScore > 0) {
-                System.arraycopy(bestBoard, 0, bestBoardOut, 0, 256);
-                javaCountedScore = fallbackScore;
+        if (javaCountedScore != result.newHighScore()) {
+            logger.warn(">>> [ADVARSEL] Fase 2 GPU rapporterede " + result.newHighScore() + " men Java talte " + javaCountedScore + "! Retter score...");
         }
-        } else if (javaCountedScore != result.newHighScore()) {
-            logger.warn(">>> [ADVARSEL] GPU rapporterede %d men Java talte %d — bruger minimum.",
-                    result.newHighScore(), javaCountedScore);
-        }
-        int validScore = (javaCountedScore > 0)
-                ? Math.min(javaCountedScore, result.newHighScore())
-                : result.newHighScore(); // trust GPU if board is still empty
+        int validScore = Math.min(javaCountedScore, result.newHighScore());
 
         applyStaticLocks(bestBoardOut);
         // --- ANALYZE BATCH SEED PERFORMANCE ---

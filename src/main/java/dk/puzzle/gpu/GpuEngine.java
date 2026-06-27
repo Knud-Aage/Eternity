@@ -143,7 +143,8 @@ public class GpuEngine {
         int[] threadDepths = new int[numBoards];
         cuMemcpyDtoH(Pointer.to(threadDepths), d_threadDepths, (long) numBoards * Sizeof.INT);
 
-        if (resultHighScore[0] > currentHighScore) {
+        int cleanScore = resultHighScore[0] & 0x0FFFFFFF;
+        if (cleanScore > 0) {
             cuMemcpyDtoH(Pointer.to(bestBoardOut), d_bestBoardOut, 256L * Sizeof.INT);
         }
 

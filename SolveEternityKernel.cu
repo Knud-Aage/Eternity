@@ -119,6 +119,7 @@ extern "C" __global__ void solvePBP(
     int seedPiecesPlaced = 0;
     for (int i = 0; i < 256; i++) {
         if (board[i] != -1) seedPiecesPlaced++;
+        bestLocalBoard[i] = board[i]; // >>> FIX: Kopier brættet ind, så vi slipper for hukommelses-skrald! <<<
     }
     bestPiecesPlaced = seedPiecesPlaced;
 
@@ -187,7 +188,7 @@ extern "C" __global__ void solvePBP(
             foundPiece = true;
             step++;
 
-            if (step > maxStepReached) maxStepReached = step; 
+            if (step > maxStepReached) maxStepReached = step;
 
             int piecesNow = 0;
             for (int i = 0; i < 256; i++) { if (board[i] != -1) piecesNow++; }
