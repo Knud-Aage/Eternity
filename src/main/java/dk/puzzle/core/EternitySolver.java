@@ -2169,7 +2169,7 @@ public class EternitySolver implements Runnable {
                     localResumeBoard[boardIdx] = -1;
 
                     // 2. >>> THE RADAR SWEEP <<<
-                    if (step < 150 || isTopologicallyViable(localBoard, localUsed)) {
+                    if (step < 200 || isTopologicallyViable(localBoard, localUsed)) {
 
                         // 3. The geometry is safe! Take the next step.
                         if (solve(step + 1)) {
