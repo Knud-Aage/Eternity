@@ -783,10 +783,17 @@ public class EternitySolver implements Runnable {
             return;
         }
 
-        // >>> FIX: Double-tjek at Java er enig i GPU'ens score
+        // Cross-check Java's count against the GPU's reported score.
+        // If Java counts MORE than the GPU (e.g. 256 vs 203), the surplus cells
+        // are uninitialised kernel values — sanitise them back to -1 so the
+        // board is consistent with the true score.
         int javaCountedScore = countPieces(bestBoardOut);
-        if (javaCountedScore != result.newHighScore()) {
-            logger.warn(">>> [ADVARSEL] Fase 2 GPU rapporterede " + result.newHighScore() + " men Java talte " + javaCountedScore + "! Retter score...");
+        if (javaCountedScore > result.newHighScore() && result.newHighScore() > 0) {
+            sanitiseBoard(bestBoardOut, result.newHighScore());
+            javaCountedScore = countPieces(bestBoardOut);
+        } else if (javaCountedScore != result.newHighScore()) {
+            logger.warn(">>> [ADVARSEL] Fase 2 GPU rapporterede %d men Java talte %d.",
+                    result.newHighScore(), javaCountedScore);
         }
         int validScore = Math.min(javaCountedScore, result.newHighScore());
 
@@ -1622,6 +1629,27 @@ public class EternitySolver implements Runnable {
             }
         }
         return count;
+    }
+
+    /**
+     * Removes uninitialised kernel garbage from a board. The GPU sometimes copies
+     * back a board where trailing positions contain stale local-memory values
+     * instead of -1. This keeps the first {@code validPieces} placed cells (in
+     * build order) and clears any surplus so the board matches the true score.
+     */
+    private void sanitiseBoard(int[] board, int validPieces) {
+        // Count placed cells in build order; clear everything beyond validPieces.
+        int kept = 0;
+        for (int step = 0; step < 256; step++) {
+            int idx = buildOrder[step];
+            if (board[idx] != -1 && board[idx] != -2) {
+                if (kept < validPieces) {
+                    kept++;
+                } else {
+                    board[idx] = -1; // surplus garbage — clear it
+                }
+            }
+        }
     }
 
     int[][] buildDisplayBoard(int[] sourceArray) {
