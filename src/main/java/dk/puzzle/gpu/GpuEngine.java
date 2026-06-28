@@ -38,7 +38,7 @@ public class GpuEngine {
         initCUDA();
     }
 
-    private CUmodule cuModule;
+    private CUmodule cuModule; // kept for constant memory uploads
 
     private void initCUDA() {
         JCudaDriver.setExceptionsEnabled(true);
@@ -50,7 +50,7 @@ public class GpuEngine {
         cuModule = new CUmodule();
         cuModuleLoad(cuModule, "SolveEternityKernel.ptx");
 
-        // solvePBP reads piece tables from __constant__ memory — upload them now
+        // Upload piece tables to constant memory once at init
         CUdeviceptr c_all = new CUdeviceptr();
         cuModuleGetGlobal(c_all, null, cuModule, "c_allOrientations");
         cuMemcpyHtoD(c_all, Pointer.to(inventory.allOrientations), 1024L * Sizeof.INT);
@@ -104,7 +104,6 @@ public class GpuEngine {
         cuMemAlloc(d_buildOrder, 256L * Sizeof.INT);
         cuMemcpyHtoD(d_buildOrder, Pointer.to(buildOrder), 256L * Sizeof.INT);
 
-        // solvePBP reads piece tables from __constant__ memory (uploaded in initCUDA)
         CUdeviceptr d_solution = new CUdeviceptr();
         cuMemAlloc(d_solution, 256L * Sizeof.INT);
 
@@ -118,7 +117,6 @@ public class GpuEngine {
 
         CUdeviceptr d_bestBoardOut = new CUdeviceptr();
         cuMemAlloc(d_bestBoardOut, 256L * Sizeof.INT);
-        { int[] sentinel = new int[256]; java.util.Arrays.fill(sentinel, -1); cuMemcpyHtoD(d_bestBoardOut, Pointer.to(sentinel), 256L * Sizeof.INT); }
 
         CUdeviceptr d_totalSteps = new CUdeviceptr();
         cuMemAlloc(d_totalSteps, Sizeof.LONG);
@@ -128,9 +126,9 @@ public class GpuEngine {
         cuMemAlloc(d_threadDepths, (long) numBoards * Sizeof.INT);
         cuMemcpyHtoD(d_threadDepths, Pointer.to(new int[numBoards]), (long) numBoards * Sizeof.INT);
 
-        // 12-param layout matching the PTX-compiled solvePBP signature:
-        // [partialBoards, numBoards, startingStep, buildOrder, solution, solvedFlag,
-        //  gpuHighScore, bestBoardOut, totalSteps, lockCenter, threadDepths, stepBudget(u64)]
+        // 12 params matching solvePBP() exactly. allOrientations/physicalMapping
+        // are in constant memory — do NOT pass as kernel parameters.
+        long stepBudget = 75_000L;
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards),
                 Pointer.to(new int[]{numBoards}),
@@ -143,7 +141,7 @@ public class GpuEngine {
                 Pointer.to(d_totalSteps),
                 Pointer.to(new int[]{lockCenter ? 1 : 0}),
                 Pointer.to(d_threadDepths),
-                Pointer.to(new long[]{75000L})   // stepBudget: u64 scalar, read directly by PTX
+                Pointer.to(new int[]{(int)stepBudget})  // int matches kernel param type
         );
 
         int blockSizeX = 256;
@@ -216,26 +214,31 @@ public class GpuEngine {
         cuMemAlloc(d_physicalMapping, 1024L * Sizeof.INT);
         cuMemcpyHtoD(d_physicalMapping, Pointer.to(inventory.physicalMapping), 1024L * Sizeof.INT);
 
+        CUdeviceptr d_solution = new CUdeviceptr();
+        cuMemAlloc(d_solution, 256L * Sizeof.INT);
+
+        CUdeviceptr d_solvedFlag = new CUdeviceptr();
+        cuMemAlloc(d_solvedFlag, Sizeof.INT);
+        cuMemcpyHtoD(d_solvedFlag, Pointer.to(new int[]{0}), Sizeof.INT);
+
         CUdeviceptr d_gpuHighScore = new CUdeviceptr();
         cuMemAlloc(d_gpuHighScore, Sizeof.INT);
         cuMemcpyHtoD(d_gpuHighScore, Pointer.to(new int[]{currentHighScore}), Sizeof.INT);
 
         CUdeviceptr d_bestBoardOut = new CUdeviceptr();
         cuMemAlloc(d_bestBoardOut, 256L * Sizeof.INT);
-        { int[] sentinel = new int[256]; java.util.Arrays.fill(sentinel, -1); cuMemcpyHtoD(d_bestBoardOut, Pointer.to(sentinel), 256L * Sizeof.INT); }
 
         CUdeviceptr d_totalSteps = new CUdeviceptr();
         cuMemAlloc(d_totalSteps, Sizeof.LONG);
         cuMemcpyHtoD(d_totalSteps, Pointer.to(new long[]{0L}), Sizeof.LONG);
 
-        // 8-param layout matching the PTX-compiled solveRepairMode signature:
-        // [partialBoards, numBoards, allOrientations, physicalMapping,
-        //  gpuHighScore, bestBoardOut, totalSteps, maxStepsPerThread(u64)]
+        int maxStepsPerThread = 100_000;
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards), Pointer.to(new int[]{numBoards}),
                 Pointer.to(d_allOrientations), Pointer.to(d_physicalMapping),
+                Pointer.to(d_solution), Pointer.to(d_solvedFlag),
                 Pointer.to(d_gpuHighScore), Pointer.to(d_bestBoardOut),
-                Pointer.to(d_totalSteps), Pointer.to(new long[]{100_000L})
+                Pointer.to(d_totalSteps), Pointer.to(new int[]{maxStepsPerThread})
         );
 
         int blockSizeX = 256;
@@ -251,15 +254,22 @@ public class GpuEngine {
         long steps = totalSteps[0];
         if (steps == 0) steps = (long) numBoards * 150000;
 
+        int[] solved = new int[1];
+        cuMemcpyDtoH(Pointer.to(solved), d_solvedFlag, Sizeof.INT);
+
         if (resultHighScore[0] > currentHighScore) {
             cuMemcpyDtoH(Pointer.to(bestBoardOut), d_bestBoardOut, 256L * Sizeof.INT);
+        }
+        if (solved[0] == 1) {
+            cuMemcpyDtoH(Pointer.to(bestBoardOut), d_solution, 256L * Sizeof.INT);
         }
 
         // Ryd op
         cuMemFree(d_partialBoards); cuMemFree(d_allOrientations); cuMemFree(d_physicalMapping);
-        cuMemFree(d_gpuHighScore); cuMemFree(d_bestBoardOut); cuMemFree(d_totalSteps);
+        cuMemFree(d_solution); cuMemFree(d_solvedFlag); cuMemFree(d_gpuHighScore);
+        cuMemFree(d_bestBoardOut); cuMemFree(d_totalSteps);
 
-        return new GpuResult(resultHighScore[0], false, steps, new int[0]);
+        return new GpuResult(resultHighScore[0], solved[0] == 1, steps, new int[0]);
     }
 
     /**

@@ -571,22 +571,17 @@ public class EternitySolver implements Runnable {
             }
         }
 
-        int dynamicOffset;
-        if (lockedPieces >= 190) {
-            dynamicOffset = 2;
-        } else if (lockedPieces >= 150) {
-            dynamicOffset = 4;
-        } else {
-            dynamicOffset = userCpuHandoffDepth;
-        }
-
+        // Cap currentSeedDepth so CPU workers only need to place a few pieces
+        // beyond the base camp. At depth 197, lockedPieces+2=199 is nearly
+        // impossible for CPU workers to reach. Cap at lockedPieces+2 but never
+        // more than lockedPieces+2 — and rely on seed padding for GPU saturation.
         if (lockedPieces == 0) {
             currentSeedDepth = 14;
             logger.info(String.format(">>> [PHASE 1] Empty board. Setting fast GPU handoff depth to: %d", currentSeedDepth));
-        } else if (lockedPieces < SEED_DEPTH) {
-            currentSeedDepth = Math.max(SEED_DEPTH, lockedPieces + dynamicOffset);
         } else {
-            currentSeedDepth = lockedPieces + dynamicOffset;
+            // Always just 2 steps beyond base camp — CPU places 2 pieces then hands to GPU.
+            // Seed padding (MIN_GPU_THREADS=8192) fills remaining GPU capacity.
+            currentSeedDepth = lockedPieces + 2;
         }
 
         try {
@@ -673,6 +668,18 @@ public class EternitySolver implements Runnable {
         }
         if (seeds.isEmpty()) {
             return;
+        }
+
+        // Pad to minimum GPU thread count by duplicating seeds.
+        // At deep depths CPU generates few seeds — duplication fills the GPU.
+        // Duplicate seeds diverge naturally because DFS explores different piece
+        // orderings from the same position.
+        final int MIN_GPU_THREADS = 8192;
+        if (seeds.size() < MIN_GPU_THREADS) {
+            int originalSize = seeds.size();
+            while (seeds.size() < MIN_GPU_THREADS) {
+                seeds.add(seeds.get(seeds.size() % originalSize).clone());
+            }
         }
 
         logger.info(String.format(">>> [PHASE 2] Overdrager %,d seeds til GPU'en. Beregner... (Dette tager lidt tid)", seeds.size()));
@@ -765,11 +772,9 @@ public class EternitySolver implements Runnable {
                         handleVictory(hyperBestOut, inventory);
                     }
 
-                    int hyperJavaCount = countPieces(hyperBestOut);
-                    logger.info(String.format(">>> [SCORE-DEBUG HYPER] GPU=%d Java=%d deepest=%d", hyperResult.newHighScore(), hyperJavaCount, deepestStep));
-                    if (hyperResult.newHighScore() > deepestStep || hyperJavaCount > deepestStep) {
-                        int javaCountedScore = hyperJavaCount;
-                        int validScore = (javaCountedScore > 0) ? javaCountedScore : hyperResult.newHighScore();
+                    if (hyperResult.newHighScore() > deepestStep) { // Rettet til field access
+                        int javaCountedScore = countPieces(hyperBestOut);
+                        int validScore = Math.min(javaCountedScore, hyperResult.newHighScore());
 
                         if (validScore > deepestStep) {
                             applyStaticLocks(hyperBestOut);
@@ -842,26 +847,13 @@ public class EternitySolver implements Runnable {
             handleVictory(bestBoardOut, inventory);
         }
 
-        // Always trust the Java board count as authoritative.
-        int javaCountedScore = countPieces(bestBoardOut);
-        logger.info(String.format(">>> [SCORE-DEBUG P2] GPU=%d Java=%d deepest=%d", result.newHighScore(), javaCountedScore, deepestStep));
-        if (result.newHighScore() > deepestStep || javaCountedScore > deepestStep) {
-            int validScore;
-            if (javaCountedScore == 0 && result.newHighScore() > 0) {
-                // Board copy failed — fall back to GPU score
-                validScore = result.newHighScore();
-            } else if (javaCountedScore > result.newHighScore() + 1 && result.newHighScore() > 0) {
-                // Large discrepancy (> 1) — unexpected kernel state, sanitise excess pieces
-                sanitiseBoard(bestBoardOut, result.newHighScore() + 1);
-                validScore = countPieces(bestBoardOut);
-            } else {
-                // Normal case (exact match or expected off-by-one): trust the board
-                validScore = javaCountedScore;
+        // >>> FIX: Check med korrekt wrapper-logik, så Java ikke tæller affald
+        if (result.newHighScore() > deepestStep) { // Rettet til field access
+            int javaCountedScore = countPieces(bestBoardOut);
+            if (javaCountedScore != result.newHighScore()) {
+                logger.warn(">>> [ADVARSEL] Fase 2 GPU rapporterede " + result.newHighScore() + " men Java talte " + javaCountedScore + "! Retter score...");
             }
-            if (Math.abs(javaCountedScore - result.newHighScore()) > 1) {
-                logger.warn(String.format(">>> [ADVARSEL] GPU=%d Java=%d validScore=%d — large discrepancy",
-                        result.newHighScore(), javaCountedScore, validScore));
-            }
+            int validScore = Math.min(javaCountedScore, result.newHighScore());
 
             if (validScore > deepestStep) {
                 deepestStep = validScore;
@@ -903,13 +895,6 @@ public class EternitySolver implements Runnable {
                 if (deepestStep > absoluteHighScore) {
                     absoluteHighScore = deepestStep;
                     System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
-
-                    // Count actual pieces in the saved board — may differ from deepestStep
-                    // if the radar blocked the last placement.
-                    int actualRecord = countPieces(globalBestBoard);
-                    if (actualRecord > absoluteHighScore) {
-                        absoluteHighScore = actualRecord;
-                    }
 
                     int hash = Arrays.hashCode(globalBestBoard);
                     logger.info(String.format(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", absoluteHighScore, hash));
@@ -1009,13 +994,13 @@ public class EternitySolver implements Runnable {
                 handleVictory(bestBoardOut, inventory);
             }
 
-            int javaCountedScore = countPieces(bestBoardOut);
-            logger.info(String.format(">>> [SCORE-DEBUG P3] GPU=%d Java=%d deepest=%d", result.newHighScore(), javaCountedScore, deepestStep));
-            if (result.newHighScore() > deepestStep || javaCountedScore > deepestStep) {
-                if (Math.abs(javaCountedScore - result.newHighScore()) > 1) {
-                    logger.warn(">>> [ADVARSEL] Fase 3 GPU=" + result.newHighScore() + " Java=" + javaCountedScore + " — large discrepancy");
+            // >>> FIX: Tjek og tæl KUN brættet, hvis GPU'en rent faktisk har slået rekorden <<<
+            if (result.newHighScore() > deepestStep) { // Rettet til field access
+                int javaCountedScore = countPieces(bestBoardOut);
+                if (javaCountedScore != result.newHighScore()) {
+                    logger.warn(">>> [ADVARSEL] Fase 3 GPU rapporterede " + result.newHighScore() + " men Java talte " + javaCountedScore + "! Retter score...");
                 }
-                int validScore = (javaCountedScore > 0) ? javaCountedScore : result.newHighScore();
+                int validScore = Math.min(javaCountedScore, result.newHighScore());
 
                 if (validScore > deepestStep) {
                     if (!verifyBoardStrict(bestBoardOut)) {
@@ -1574,38 +1559,10 @@ public class EternitySolver implements Runnable {
         return displayBoard;
     }
 
-    private void sanitiseBoard(int[] board, int validPieces) {
-        int kept = 0;
-        for (int step = 0; step < 256; step++) {
-            int idx = buildOrder[step];
-            if (board[idx] != -1 && board[idx] != -2) {
-                if (kept < validPieces) {
-                    kept++;
-                } else {
-                    board[idx] = -1;
-                }
-            }
-        }
-    }
-
     private void updateDisplay(int depth, int[][] displayBoard) {
         long now = System.currentTimeMillis();
 
-        // Count actual placed pieces from the display board.
-        // depth may be radar-filtered and 1 less than the true piece count.
-        int actualPieces = 0;
-        if (displayBoard != null) {
-            for (int[] row : displayBoard) {
-                if (row != null) {
-                    for (int p : row) {
-                        if (p != -1) actualPieces++;
-                    }
-                }
-            }
-        }
-        int scoreToShow = (actualPieces > 0) ? actualPieces : depth;
-
-        boolean isNewRecord = scoreToShow >= absoluteHighScore && absoluteHighScore > 0;
+        boolean isNewRecord = depth >= absoluteHighScore;
         boolean timeToRefresh = (now - lastVisualUpdate) >= 300_000;
 
         if (!isNewRecord && !timeToRefresh) {
@@ -1613,7 +1570,7 @@ public class EternitySolver implements Runnable {
         }
 
         lastVisualUpdate = now;
-        Eternity.updateDisplay(scoreToShow, this.absoluteHighScore, displayBoard);
+        Eternity.updateDisplay(depth, this.absoluteHighScore, displayBoard);
     }
 
     private void saveAndUploadBucasLink(int[] board, int score) {
