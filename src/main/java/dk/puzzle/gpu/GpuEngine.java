@@ -277,4 +277,9 @@ public class GpuEngine {
      */
     public record GpuResult(int newHighScore, boolean solved, long stepsTaken, int[] threadDepths) {
     }
+
+    public void hardReset() {
+        JCuda.cudaSetDevice(0);
+        JCuda.cudaDeviceReset();
+    }
 }

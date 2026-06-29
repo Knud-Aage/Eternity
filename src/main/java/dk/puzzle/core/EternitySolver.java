@@ -389,13 +389,9 @@ public class EternitySolver implements Runnable {
     private void rebootGpuEngine() {
         logger.warn(">>> [HARDWARE] Rebooting GPU Engine to escape kernel deadlock...");
 
-        if (this.useGpu) {
+        if (this.gpuEngine != null) {
             try {
-                // 1. The Orchestrator thread MUST claim the device before resetting it!
-                jcuda.runtime.JCuda.cudaSetDevice(0);
-
-                // 2. Nuke the VRAM memory and destroy the deadlocked context
-                jcuda.runtime.JCuda.cudaDeviceReset();
+                this.gpuEngine.hardReset();
             } catch (Exception e) {
                 logger.warn(">>> [HARDWARE] Failed to forcefully reset CUDA device: " + e.getMessage());
             }
