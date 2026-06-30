@@ -421,6 +421,7 @@ public class EternitySolver implements Runnable {
                 if (repairReporterScheduler != null) {
                     repairReporterScheduler.shutdownNow();
                 }
+                cumulativeTrials += globalCpuTrialCount.getAndSet(0) + globalGpuTrialCount.getAndSet(0);
                 SolverState memoryToSave = new SolverState(
                         buildDisplayBoard(globalBestBoard),
                         absoluteHighScore,
@@ -578,6 +579,7 @@ public class EternitySolver implements Runnable {
 
                 if (System.currentTimeMillis() - lastPeriodicSave > 300_000) {
                     synchronized (displayLock) {
+                        cumulativeTrials += globalCpuTrialCount.getAndSet(0) + globalGpuTrialCount.getAndSet(0);
                         SolverState memoryToSave = new SolverState(
                                 buildDisplayBoard(globalBestBoard),
                                 absoluteHighScore,
