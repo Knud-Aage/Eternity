@@ -373,7 +373,7 @@ public class EternitySolver implements Runnable {
         if (this.useGpu) {
             this.gpuExecutor = Executors.newSingleThreadExecutor();
             try {
-                this.gpuEngine = this.gpuExecutor.submit(() -> new GpuEngine(inventory, lockCenter)).get();
+                this.gpuEngine = this.gpuExecutor.submit(() -> new GpuEngine(inventory, lockCenter, buildOrder)).get();
                 logger.info(">>> [HARDWARE] NVIDIA CUDA GPU detected and initialized successfully on dedicated thread.");
             } catch (Throwable t) {
                 this.useGpu = false;
@@ -759,7 +759,7 @@ public class EternitySolver implements Runnable {
 
         try {
             Future<GpuEngine.GpuResult> future = gpuExecutor.submit(() ->
-                    gpuEngine.runDeepDfs(seeds, currentSeedDepth, deepestStep, bestBoardOut, buildOrder)
+                    gpuEngine.runDeepDfs(seeds, currentSeedDepth, deepestStep, bestBoardOut)
             );
             result = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
         } catch (Exception e) {

@@ -1,94 +1,146 @@
 /**
- * SolveEternityKernel.cu  — Rewritten
+ * SolveEternityKernel.cu
  *
- * Key improvements vs previous version:
- *  1. No arbitrary step cap (5M limit removed). Threads run until the
- *     search subtree is exhausted or a wall-clock budget is exceeded.
- *  2. Radar leash removed from solvePBP — it was capping maximum depth.
- *  3. O(1) unplace via precomputed orientToPhys[1024] reverse map.
- *  4. 1-step forward lookahead: before committing a piece, check that
- *     the south and east neighbours still have at least one valid piece
- *     available. Prunes dead ends one step earlier.
- *  5. Precomputed colour index (byNorthColor[23][≤1024]) loaded into
- *     shared memory for fast lookahead candidate counting.
- *  6. solveRepairMode: saves partial improvements (not only full fills),
- *     continues searching after finding a fill, respects step budget.
+ * Key optimizations:
+ *  1. __constant__ memory for allOrientations, physicalMapping, buildOrder.
+ *  2. 2D shared-memory index sm_byNW[north][west] used in the MAIN placement loop —
+ *     reduces the candidate scan from O(1024) to O(~2) when both neighbours are placed.
+ *     byNorth is the fallback when west is unknown; full 1024 scan only when north too is unknown.
+ *  3. Same NW index used in hasCandidate (lookahead).
+ *  4. O(1) unplace via placedOrientIdx[].
+ *  5. Incremental piecesNow counter in solvePBP.
+ *  6. pieceStack stores list-position within the active colour list (not a global orient index).
+ *  7. Persistent device buffers managed in GpuEngine — no malloc/free per launch.
  */
 
-// ---------------------------------------------------------------------------
-// Edge accessors
-// ---------------------------------------------------------------------------
+__constant__ int c_allOrientations[1024];
+__constant__ int c_physicalMapping[1024];
+__constant__ int c_buildOrder[256];
+
 __device__ inline int getNorth(int p) { return (p >> 24) & 0xFF; }
 __device__ inline int getEast (int p) { return (p >> 16) & 0xFF; }
 __device__ inline int getSouth(int p) { return (p >>  8) & 0xFF; }
 __device__ inline int getWest (int p) { return (p)       & 0xFF; }
 
-#define WILDCARD 255
-#define NUM_COLORS 23      // 0 = border, 1-22 = inner colours
-#define MAX_PER_COLOR 128  // max orientations sharing one colour on one side
+#define WILDCARD      255
+#define NUM_COLORS    23
+#define MAX_PER_COLOR 128   // max orientations per north colour (byNorth fallback)
+#define NW_MAX        32    // max orientations per (north,west) pair
 
-// ---------------------------------------------------------------------------
-// matches(): checks all four edges. WILDCARD (255) = don't care.
-// Border discipline (colour 0 must appear only on outer edges) is enforced.
-// ---------------------------------------------------------------------------
-__device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req,
-                                int row, int col)
+__device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req, int row, int col)
 {
     int n = getNorth(p), e = getEast(p), s = getSouth(p), w = getWest(p);
-
     if (n_req != WILDCARD && n != n_req) return false;
     if (e_req != WILDCARD && e != e_req) return false;
     if (s_req != WILDCARD && s != s_req) return false;
     if (w_req != WILDCARD && w != w_req) return false;
-
-    // Border discipline: colour 0 only on true board edges
     if (row != 0  && n == 0) return false;
     if (col != 15 && e == 0) return false;
     if (row != 15 && s == 0) return false;
     if (col != 0  && w == 0) return false;
-
     return true;
 }
 
 // ---------------------------------------------------------------------------
-// hasCandidate(): fast 1-step lookahead.
-// Checks whether any unused orientation satisfies all four constraints.
-// Uses the shared-memory colour index.
-// colorIndex layout: colorIndex[color * MAX_PER_COLOR .. +count-1] = orientation indices
-// colorCount[color] = number of entries for that color
+// hasCandidate: uses NW index when both constraints known, byNorth otherwise.
 // ---------------------------------------------------------------------------
 __device__ bool hasCandidate(
     int n_req, int e_req, int s_req, int w_req,
     int row, int col,
     const unsigned long long* inventoryMask,
-    const int* d_allOrientations,
-    const int* d_physicalMapping,
-    // shared memory colour index for north edge
-    const short* sm_byNorth,      // [NUM_COLORS * MAX_PER_COLOR]
-    const short* sm_byNorthCount  // [NUM_COLORS]
-) {
-    // Use the north constraint to get a small candidate list, then filter
-    // If north is wildcard, we must scan all 1024 — expensive but rare in practice
-    if (n_req != WILDCARD && n_req < NUM_COLORS) {
-        int count = sm_byNorthCount[n_req];
+    const short* sm_byNorth,      const short* sm_byNorthCount,
+    const short* sm_byNW,         const short* sm_byNWCount)
+{
+    if (n_req != WILDCARD && w_req != WILDCARD && n_req < NUM_COLORS && w_req < NUM_COLORS) {
+        int key   = n_req * NUM_COLORS + w_req;
+        int count = sm_byNWCount[key];
         for (int i = 0; i < count; i++) {
-            int idx = sm_byNorth[n_req * MAX_PER_COLOR + i];
-            int physId = d_physicalMapping[idx];
-            if (!(inventoryMask[physId / 64] & (1ULL << (physId % 64)))) continue;
-            int p = d_allOrientations[idx];
-            if (matches(p, n_req, e_req, s_req, w_req, row, col)) return true;
+            int idx    = sm_byNW[key * NW_MAX + i];
+            int physId = c_physicalMapping[idx];
+            if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+            if (matches(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col)) return true;
         }
         return false;
     }
-
-    // Fallback: full scan (happens when north neighbour not yet placed)
+    if (n_req != WILDCARD && n_req < NUM_COLORS) {
+        int count = sm_byNorthCount[n_req];
+        for (int i = 0; i < count; i++) {
+            int idx    = sm_byNorth[n_req * MAX_PER_COLOR + i];
+            int physId = c_physicalMapping[idx];
+            if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+            if (matches(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col)) return true;
+        }
+        return false;
+    }
     for (int idx = 0; idx < 1024; idx++) {
-        int physId = d_physicalMapping[idx];
-        if (!(inventoryMask[physId / 64] & (1ULL << (physId % 64)))) continue;
-        int p = d_allOrientations[idx];
-        if (matches(p, n_req, e_req, s_req, w_req, row, col)) return true;
+        int physId = c_physicalMapping[idx];
+        if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+        if (matches(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col)) return true;
     }
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// buildSharedIndex — called by thread 0 in each block.
+// ---------------------------------------------------------------------------
+__device__ void buildSharedIndex(
+    short* sm_byNorth, short* sm_byNorthCount,
+    short* sm_byNW,    short* sm_byNWCount)
+{
+    for (int c = 0; c < NUM_COLORS; c++)              sm_byNorthCount[c] = 0;
+    for (int k = 0; k < NUM_COLORS * NUM_COLORS; k++) sm_byNWCount[k]    = 0;
+
+    for (int i = 0; i < 1024; i++) {
+        int p  = c_allOrientations[i];
+        int nc = getNorth(p);
+        int wc = getWest(p);
+        if (nc < NUM_COLORS) {
+            int cnt = sm_byNorthCount[nc];
+            if (cnt < MAX_PER_COLOR) sm_byNorth[nc * MAX_PER_COLOR + cnt] = (short)i;
+            sm_byNorthCount[nc] = cnt + 1;
+        }
+        if (nc < NUM_COLORS && wc < NUM_COLORS) {
+            int key = nc * NUM_COLORS + wc;
+            int cnt = sm_byNWCount[key];
+            if (cnt < NW_MAX) sm_byNW[key * NW_MAX + cnt] = (short)i;
+            sm_byNWCount[key] = cnt + 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// south+east lookahead — inlined via a helper to avoid repetition.
+// Returns false if either neighbour has no candidate (prune).
+// ---------------------------------------------------------------------------
+__device__ inline bool lookahead(
+    int p, int physId, int row, int col, int boardIdx,
+    const int* board, unsigned long long* inventoryMask,
+    const short* sm_byNorth, const short* sm_byNorthCount,
+    const short* sm_byNW,    const short* sm_byNWCount)
+{
+    if (row < 15 && board[boardIdx + 16] == -1) {
+        int sn = getSouth(p);
+        int sw = (col > 0 && board[boardIdx + 15] != -1) ? getEast(board[boardIdx + 15]) : WILDCARD;
+        int se = (col == 15) ? 0 : WILDCARD;
+        int ss = (row == 14) ? 0 : WILDCARD;
+        inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+        bool ok = hasCandidate(sn, se, ss, sw, row + 1, col,
+                               inventoryMask, sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount);
+        inventoryMask[physId/64] |= (1ULL << (physId%64));
+        if (!ok) return false;
+    }
+    if (col < 15 && board[boardIdx + 1] == -1) {
+        int ew = getEast(p);
+        int en = (row > 0 && board[boardIdx - 15] != -1) ? getSouth(board[boardIdx - 15]) : WILDCARD;
+        int es = (row == 15) ? 0 : WILDCARD;
+        int ee = (col == 14) ? 0 : WILDCARD;
+        inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+        bool ok = hasCandidate(en, ee, es, ew, row, col + 1,
+                               inventoryMask, sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount);
+        inventoryMask[physId/64] |= (1ULL << (physId%64));
+        if (!ok) return false;
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -98,9 +150,6 @@ extern "C" __global__ void solvePBP(
     const int* d_partialBoards,
     int numPartialBoards,
     int startingStep,
-    const int* d_buildOrder,
-    const int* d_allOrientations,
-    const int* d_physicalMapping,
     int* d_solution,
     int* d_solvedFlag,
     int* d_gpuHighScore,
@@ -108,91 +157,56 @@ extern "C" __global__ void solvePBP(
     unsigned long long* d_totalSteps,
     int lockCenterFlag,
     int* d_threadDepths,
-    int* p_radarLimit   // kept for API compatibility; no longer used as a hard cap
+    int* p_radarLimit
 )
 {
-    // ------------------------------------------------------------------
-    // Shared memory: colour index for fast lookahead
-    // Layout: sm_byNorth[NUM_COLORS * MAX_PER_COLOR] of short
-    //         sm_byNorthCount[NUM_COLORS] of short
-    // Total: 23*128*2 + 23*2 = 5888 + 46 = ~5.9 KB per block — fine.
-    // ------------------------------------------------------------------
     __shared__ short sm_byNorth     [NUM_COLORS * MAX_PER_COLOR];
     __shared__ short sm_byNorthCount[NUM_COLORS];
+    __shared__ short sm_byNW        [NUM_COLORS * NUM_COLORS * NW_MAX];
+    __shared__ short sm_byNWCount   [NUM_COLORS * NUM_COLORS];
 
-    // Thread 0 in each block builds the shared colour index
-    if (threadIdx.x == 0) {
-        for (int c = 0; c < NUM_COLORS; c++) sm_byNorthCount[c] = 0;
-        for (int i = 0; i < 1024; i++) {
-            int p = d_allOrientations[i];
-            int nc = getNorth(p);
-            if (nc < NUM_COLORS) {
-                int cnt = sm_byNorthCount[nc];
-                if (cnt < MAX_PER_COLOR) {
-                    sm_byNorth[nc * MAX_PER_COLOR + cnt] = (short)i;
-                    sm_byNorthCount[nc] = cnt + 1;
-                }
-            }
-        }
-    }
+    if (threadIdx.x == 0)
+        buildSharedIndex(sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount);
     __syncthreads();
 
-    // ------------------------------------------------------------------
-    // Per-thread state
-    // ------------------------------------------------------------------
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numPartialBoards) return;
 
     int board[256];
     int pieceStack[256];
+    int placedOrientIdx[256];
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
 
-    // Precomputed reverse map: given an orientation index, what is its physId?
-    // We read d_physicalMapping directly — it IS the reverse map already.
-
-    // Load seed board and mark used pieces
-    int offset = tid * 256;
+    int offset    = tid * 256;
+    int piecesNow = 0;
     for (int i = 0; i < 256; i++) {
-        board[i] = d_partialBoards[offset + i];
-        pieceStack[i] = 0;
-
+        board[i]           = d_partialBoards[offset + i];
+        pieceStack[i]      = 0;
+        placedOrientIdx[i] = -1;
         if (board[i] != -1) {
-            // Find orientation index for this placed piece value
-            // O(1024) once at startup — acceptable
+            piecesNow++;
             for (int o = 0; o < 1024; o++) {
-                if (d_allOrientations[o] == board[i]) {
-                    int physId = d_physicalMapping[o];
-                    inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
+                if (c_allOrientations[o] == board[i]) {
+                    int physId = c_physicalMapping[o];
+                    inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                     break;
                 }
             }
         }
     }
 
-    int step = startingStep;
-    int maxStepReached = startingStep; // build-order step index (internal use only)
-    int bestPiecesPlaced = 0;          // actual placed piece count reported as high score
+    int step             = startingStep;
+    int bestPiecesPlaced = piecesNow;
     int bestLocalBoard[256];
     unsigned long long stepCounter = 0;
-
-    // Count pieces already on the board from the seed (correct starting piece count)
-    int seedPiecesPlaced = 0;
-    for (int i = 0; i < 256; i++) {
-        if (board[i] != -1) seedPiecesPlaced++;
-    }
-    bestPiecesPlaced = seedPiecesPlaced;
-
-    // Budget: generous but finite to avoid indefinite hangs.
-    // 200M steps ~= a few seconds on GPU; adjust as needed.
     const unsigned long long STEP_BUDGET = 75000ULL;
 
     while (step >= startingStep && step < 256) {
-
         if (stepCounter >= STEP_BUDGET) break;
         if (*d_solvedFlag == 1)         break;
         stepCounter++;
 
-        int boardIdx = d_buildOrder[step];
+        int boardIdx = c_buildOrder[step];
 
         if (lockCenterFlag == 1 && (boardIdx == 135 ||
             boardIdx == 221 || boardIdx == 45 || boardIdx == 210 || boardIdx == 34)) {
@@ -203,151 +217,131 @@ extern "C" __global__ void solvePBP(
         int row = boardIdx / 16;
         int col = boardIdx % 16;
 
-        // Derive constraints from already-placed neighbours
-        int n_req = (row == 0)  ? 0 : (board[boardIdx - 16] != -1 ? getSouth(board[boardIdx - 16]) : WILDCARD);
-        int s_req = (row == 15) ? 0 : (board[boardIdx + 16] != -1 ? getNorth(board[boardIdx + 16]) : WILDCARD);
-        int w_req = (col == 0)  ? 0 : (board[boardIdx - 1]  != -1 ? getEast (board[boardIdx - 1])  : WILDCARD);
-        int e_req = (col == 15) ? 0 : (board[boardIdx + 1]  != -1 ? getWest (board[boardIdx + 1])  : WILDCARD);
+        int n_req = (row == 0)  ? 0 : (board[boardIdx-16] != -1 ? getSouth(board[boardIdx-16]) : WILDCARD);
+        int s_req = (row == 15) ? 0 : (board[boardIdx+16] != -1 ? getNorth(board[boardIdx+16]) : WILDCARD);
+        int w_req = (col == 0)  ? 0 : (board[boardIdx-1]  != -1 ? getEast (board[boardIdx-1])  : WILDCARD);
+        int e_req = (col == 15) ? 0 : (board[boardIdx+1]  != -1 ? getWest (board[boardIdx+1])  : WILDCARD);
 
         bool foundPiece = false;
-        int startIdx = pieceStack[step];
+        int  startLi    = pieceStack[step];
 
-        for (int idx = startIdx; idx < 1024; idx++) {
-            int physId = d_physicalMapping[idx];
-            if (!(inventoryMask[physId / 64] & (1ULL << (physId % 64)))) continue;
-
-            int p = d_allOrientations[idx];
-            if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
-
-            // ---- 1-step forward lookahead ----
-            // Check south neighbour
-            if (row < 15 && board[boardIdx + 16] == -1) {
-                int south_n_req = getSouth(p);
-                int south_w_req = (col > 0 && board[boardIdx + 15] != -1)
-                                   ? getEast(board[boardIdx + 15]) : WILDCARD;
-                int south_e_req = (col == 15) ? 0 : WILDCARD;
-                int south_s_req = (row == 14) ? 0 : WILDCARD;
-
-                // Temporarily mark this piece used for lookahead check
-                inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
-                bool southOk = hasCandidate(south_n_req, south_e_req, south_s_req, south_w_req,
-                                            row + 1, col,
-                                            inventoryMask, d_allOrientations, d_physicalMapping,
-                                            sm_byNorth, sm_byNorthCount);
-                inventoryMask[physId / 64] |= (1ULL << (physId % 64));
-
-                if (!southOk) continue; // prune
+        // --- Tier 1: NW index — O(~2) candidates ---
+        if (n_req != WILDCARD && w_req != WILDCARD && n_req < NUM_COLORS && w_req < NUM_COLORS) {
+            int key   = n_req * NUM_COLORS + w_req;
+            int count = sm_byNWCount[key];
+            for (int li = startLi; li < count; li++) {
+                int idx    = sm_byNW[key * NW_MAX + li];
+                int physId = c_physicalMapping[idx];
+                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                int p = c_allOrientations[idx];
+                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                board[boardIdx] = p;
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                placedOrientIdx[step] = idx;
+                pieceStack[step] = li + 1;
+                foundPiece = true;
+                piecesNow++;
+                step++;
+                if (piecesNow > bestPiecesPlaced) {
+                    bestPiecesPlaced = piecesNow;
+                    for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+                }
+                break;
             }
+            if (!foundPiece) pieceStack[step] = 0;
 
-            // Check east neighbour
-            if (col < 15 && board[boardIdx + 1] == -1) {
-                int east_w_req = getEast(p);
-                int east_n_req = (row > 0 && board[boardIdx - 15] != -1)
-                                  ? getSouth(board[boardIdx - 15]) : WILDCARD;
-                int east_s_req = (row == 15) ? 0 : WILDCARD;
-                int east_e_req = (col == 14) ? 0 : WILDCARD;
-
-                inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
-                bool eastOk = hasCandidate(east_n_req, east_e_req, east_s_req, east_w_req,
-                                           row, col + 1,
-                                           inventoryMask, d_allOrientations, d_physicalMapping,
-                                           sm_byNorth, sm_byNorthCount);
-                inventoryMask[physId / 64] |= (1ULL << (physId % 64));
-
-                if (!eastOk) continue; // prune
+        // --- Tier 2: north-only index — O(~128) candidates ---
+        } else if (n_req != WILDCARD && n_req < NUM_COLORS) {
+            int count = sm_byNorthCount[n_req];
+            for (int li = startLi; li < count; li++) {
+                int idx    = sm_byNorth[n_req * MAX_PER_COLOR + li];
+                int physId = c_physicalMapping[idx];
+                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                int p = c_allOrientations[idx];
+                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                board[boardIdx] = p;
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                placedOrientIdx[step] = idx;
+                pieceStack[step] = li + 1;
+                foundPiece = true;
+                piecesNow++;
+                step++;
+                if (piecesNow > bestPiecesPlaced) {
+                    bestPiecesPlaced = piecesNow;
+                    for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+                }
+                break;
             }
-            // ---- end lookahead ----
+            if (!foundPiece) pieceStack[step] = 0;
 
-            // Commit the piece
-            board[boardIdx] = p;
-            inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
-            pieceStack[step] = idx + 1;
-            foundPiece = true;
-            step++;
-
-            if (step > maxStepReached) maxStepReached = step; // internal DFS tracking
-
-            // Count actual placed pieces — matches how Java counts from checkpoints.
-            // This correctly handles skipped positions (locked center at 135, seed gaps).
-            int piecesNow = 0;
-            for (int i = 0; i < 256; i++) { if (board[i] != -1) piecesNow++; }
-
-            if (piecesNow > bestPiecesPlaced) {
-                bestPiecesPlaced = piecesNow;
-                for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+        // --- Tier 3: full scan — O(1024), rare ---
+        } else {
+            for (int li = startLi; li < 1024; li++) {
+                int physId = c_physicalMapping[li];
+                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                int p = c_allOrientations[li];
+                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                board[boardIdx] = p;
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                placedOrientIdx[step] = li;
+                pieceStack[step] = li + 1;
+                foundPiece = true;
+                piecesNow++;
+                step++;
+                if (piecesNow > bestPiecesPlaced) {
+                    bestPiecesPlaced = piecesNow;
+                    for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+                }
+                break;
             }
-            break;
+            if (!foundPiece) pieceStack[step] = 0;
         }
 
-        // Backtrack
         if (!foundPiece) {
-            pieceStack[step] = 0;
             step--;
-
             while (step >= startingStep) {
-                int undoIdx = d_buildOrder[step];
+                int undoIdx = c_buildOrder[step];
                 if (lockCenterFlag == 1 && (undoIdx == 135 ||
-                    undoIdx == 221 || undoIdx == 45 || undoIdx == 210 || undoIdx == 34)) {
+                    undoIdx == 221 || undoIdx == 45 || undoIdx == 210 || undoIdx == 34))
                     step--;
-                } else {
+                else
                     break;
-                }
             }
-
             if (step >= startingStep) {
-                int pToUndo    = board[d_buildOrder[step]];
-                int undoBoardIdx = d_buildOrder[step];
+                int undoBoardIdx = c_buildOrder[step];
                 board[undoBoardIdx] = -1;
-
-                // O(1) unplace: scan only the 4 orientations of this physical piece.
-                // We know physId from the piece value — find it once.
-                // In practice the loop hits on the first or second try.
-                for (int o = 0; o < 1024; o++) {
-                    if (d_allOrientations[o] == pToUndo) {
-                        int physId = d_physicalMapping[o];
-                        inventoryMask[physId / 64] |= (1ULL << (physId % 64));
-                        break;
-                    }
-                }
+                int physId = c_physicalMapping[placedOrientIdx[step]];
+                inventoryMask[physId/64] |= (1ULL << (physId%64));
+                piecesNow--;
             }
         }
     }
 
-    // Report solution
     if (step == 256) {
-        if (atomicExch(d_solvedFlag, 1) == 0) {
+        if (atomicExch(d_solvedFlag, 1) == 0)
             for (int i = 0; i < 256; i++) d_solution[i] = board[i];
-        }
     }
 
-    // Report best board from this thread using an Atomic Spinlock.
-    // bestPiecesPlaced is actual piece count — same unit as Java's deepestStep.
     int globalMaxRaw = *d_gpuHighScore;
-    int globalMax = globalMaxRaw & 0x0FFFFFFF; // Strip the lock bit
-
+    int globalMax    = globalMaxRaw & 0x0FFFFFFF;
     while (bestPiecesPlaced > globalMax) {
-        int expected = globalMax;
-        int lockedVal = bestPiecesPlaced | 0x40000000; // Apply lock bit (Bit 30)
-
-        // Attempt to lock the door AND update the score in one atomic move
-        int oldVal = atomicCAS(d_gpuHighScore, expected, lockedVal);
-
+        int expected  = globalMax;
+        int lockedVal = bestPiecesPlaced | 0x40000000;
+        int oldVal    = atomicCAS(d_gpuHighScore, expected, lockedVal);
         if (oldVal == expected) {
-            // LOCK ACQUIRED! We are the only thread writing the board right now.
-            for (int i = 0; i < 256; i++) {
-                d_bestBoardOut[i] = bestLocalBoard[i];
-            }
-            // Memory fence ensures all 256 integers are saved before unlocking
+            for (int i = 0; i < 256; i++) d_bestBoardOut[i] = bestLocalBoard[i];
             __threadfence();
-
-            // UNLOCK and officially publish the new piece count
             atomicExch(d_gpuHighScore, bestPiecesPlaced);
             break;
-        } else {
-            // Lock failed (someone else is writing, or score increased).
-            globalMaxRaw = oldVal;
-            globalMax = globalMaxRaw & 0x0FFFFFFF;
         }
+        globalMaxRaw = oldVal;
+        globalMax    = globalMaxRaw & 0x0FFFFFFF;
     }
     atomicAdd(d_totalSteps, stepCounter);
     d_threadDepths[tid] = bestPiecesPlaced;
@@ -356,19 +350,10 @@ extern "C" __global__ void solvePBP(
 
 // ---------------------------------------------------------------------------
 // solveRepairMode — LNS hole-filling kernel
-//
-// Changes vs previous version:
-//  - Saves intermediate improvements (partial fills that beat absoluteHighScore
-//    measured as basePiecesPlaced + holeStep, not just full fills)
-//  - Does NOT break after first full fill — continues exploring
-//  - Step budget enforced per thread
-//  - 1-step lookahead on hole placement
 // ---------------------------------------------------------------------------
 extern "C" __global__ void solveRepairMode(
     const int* d_partialBoards,
     int numBoards,
-    const int* d_allOrientations,
-    const int* d_physicalMapping,
     int* d_solution,
     int* d_solvedFlag,
     int* d_gpuHighScore,
@@ -379,21 +364,11 @@ extern "C" __global__ void solveRepairMode(
 {
     __shared__ short sm_byNorth     [NUM_COLORS * MAX_PER_COLOR];
     __shared__ short sm_byNorthCount[NUM_COLORS];
+    __shared__ short sm_byNW        [NUM_COLORS * NUM_COLORS * NW_MAX];
+    __shared__ short sm_byNWCount   [NUM_COLORS * NUM_COLORS];
 
-    if (threadIdx.x == 0) {
-        for (int c = 0; c < NUM_COLORS; c++) sm_byNorthCount[c] = 0;
-        for (int i = 0; i < 1024; i++) {
-            int p = d_allOrientations[i];
-            int nc = getNorth(p);
-            if (nc < NUM_COLORS) {
-                int cnt = sm_byNorthCount[nc];
-                if (cnt < MAX_PER_COLOR) {
-                    sm_byNorth[nc * MAX_PER_COLOR + cnt] = (short)i;
-                    sm_byNorthCount[nc] = cnt + 1;
-                }
-            }
-        }
-    }
+    if (threadIdx.x == 0)
+        buildSharedIndex(sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount);
     __syncthreads();
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -402,25 +377,27 @@ extern "C" __global__ void solveRepairMode(
     int board[256];
     int holes[256];
     int pieceStack[256];
+    int placedOrientIdx[256];
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
 
-    int offset        = tid * 256;
-    int numHoles      = 0;
-    int basePieces    = 0;
+    int offset     = tid * 256;
+    int numHoles   = 0;
+    int basePieces = 0;
 
     for (int i = 0; i < 256; i++) {
         board[i] = d_partialBoards[offset + i];
         if (board[i] == -2) {
-            holes[numHoles] = i;
-            pieceStack[numHoles] = 0;
+            holes[numHoles]           = i;
+            pieceStack[numHoles]      = 0;
+            placedOrientIdx[numHoles] = -1;
             numHoles++;
             board[i] = -1;
         } else if (board[i] != -1) {
             basePieces++;
             for (int o = 0; o < 1024; o++) {
-                if (d_allOrientations[o] == board[i]) {
-                    int physId = d_physicalMapping[o];
-                    inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
+                if (c_allOrientations[o] == board[i]) {
+                    int physId = c_physicalMapping[o];
+                    inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                     break;
                 }
             }
@@ -429,64 +406,44 @@ extern "C" __global__ void solveRepairMode(
 
     if (numHoles == 0) return;
 
-    int holeStep = 0;
+    int holeStep  = 0;
     unsigned long long stepCounter = 0;
-    int bestSoFar = (*d_gpuHighScore) & 0x0FFFFFFF; // Mask out lock bit
+    int bestSoFar = (*d_gpuHighScore) & 0x0FFFFFFF;
 
     while (holeStep >= 0 && stepCounter < (unsigned long long)maxStepsPerThread) {
         if (*d_solvedFlag == 1) break;
 
-// Save if we've filled all holes (or a new best partial fill)
         int currentTotal = basePieces + holeStep;
         if (currentTotal > bestSoFar) {
             int globalMaxRaw = *d_gpuHighScore;
-            int globalMax = globalMaxRaw & 0x0FFFFFFF;
-
+            int globalMax    = globalMaxRaw & 0x0FFFFFFF;
             while (currentTotal > globalMax) {
-                int expected = globalMax;
-                int lockedVal = currentTotal | 0x40000000; // Apply lock bit
-
-                int oldVal = atomicCAS(d_gpuHighScore, expected, lockedVal);
-
+                int expected  = globalMax;
+                int lockedVal = currentTotal | 0x40000000;
+                int oldVal    = atomicCAS(d_gpuHighScore, expected, lockedVal);
                 if (oldVal == expected) {
-                    // LOCK ACQUIRED! Safely write the board.
-                    for (int i = 0; i < 256; i++) {
-                        d_bestBoardOut[i] = board[i];
-                    }
+                    for (int i = 0; i < 256; i++) d_bestBoardOut[i] = board[i];
                     __threadfence();
-
-                    // UNLOCK
                     atomicExch(d_gpuHighScore, currentTotal);
                     bestSoFar = currentTotal;
                     break;
                 }
-                // Lock failed, update and spin
                 globalMaxRaw = oldVal;
-                globalMax = globalMaxRaw & 0x0FFFFFFF;
+                globalMax    = globalMaxRaw & 0x0FFFFFFF;
             }
         }
 
-        // All holes filled?
         if (holeStep == numHoles) {
             if (currentTotal == 256) {
-                if (atomicExch(d_solvedFlag, 1) == 0) {
+                if (atomicExch(d_solvedFlag, 1) == 0)
                     for (int i = 0; i < 256; i++) d_solution[i] = board[i];
-                }
                 break;
             }
-            // Don't stop — backtrack and look for more complete fills
-            // (identical structure ensures we explore siblings)
             holeStep--;
             if (holeStep >= 0) {
-                int pToUndo = board[holes[holeStep]];
                 board[holes[holeStep]] = -1;
-                for (int o = 0; o < 1024; o++) {
-                    if (d_allOrientations[o] == pToUndo) {
-                        int physId = d_physicalMapping[o];
-                        inventoryMask[physId / 64] |= (1ULL << (physId % 64));
-                        break;
-                    }
-                }
+                int physId = c_physicalMapping[placedOrientIdx[holeStep]];
+                inventoryMask[physId/64] |= (1ULL << (physId%64));
             }
             continue;
         }
@@ -497,69 +454,83 @@ extern "C" __global__ void solveRepairMode(
         int row = boardIdx / 16;
         int col = boardIdx % 16;
 
-        int n_req = (row == 0)  ? 0 : (board[boardIdx - 16] != -1 ? getSouth(board[boardIdx - 16]) : WILDCARD);
-        int s_req = (row == 15) ? 0 : (board[boardIdx + 16] != -1 ? getNorth(board[boardIdx + 16]) : WILDCARD);
-        int w_req = (col == 0)  ? 0 : (board[boardIdx - 1]  != -1 ? getEast (board[boardIdx - 1])  : WILDCARD);
-        int e_req = (col == 15) ? 0 : (board[boardIdx + 1]  != -1 ? getWest (board[boardIdx + 1])  : WILDCARD);
+        int n_req = (row == 0)  ? 0 : (board[boardIdx-16] != -1 ? getSouth(board[boardIdx-16]) : WILDCARD);
+        int s_req = (row == 15) ? 0 : (board[boardIdx+16] != -1 ? getNorth(board[boardIdx+16]) : WILDCARD);
+        int w_req = (col == 0)  ? 0 : (board[boardIdx-1]  != -1 ? getEast (board[boardIdx-1])  : WILDCARD);
+        int e_req = (col == 15) ? 0 : (board[boardIdx+1]  != -1 ? getWest (board[boardIdx+1])  : WILDCARD);
 
         bool foundPiece = false;
-        int startIdx = pieceStack[holeStep];
+        int  startLi    = pieceStack[holeStep];
 
-        for (int idx = startIdx; idx < 1024; idx++) {
-            int physId = d_physicalMapping[idx];
-            if (!(inventoryMask[physId / 64] & (1ULL << (physId % 64)))) continue;
-
-            int p = d_allOrientations[idx];
-            if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
-
-            // 1-step lookahead for repair mode too
-            if (row < 15 && board[boardIdx + 16] == -1) {
-                int sn = getSouth(p);
-                int sw = (col > 0 && board[boardIdx + 15] != -1) ? getEast(board[boardIdx + 15]) : WILDCARD;
-                int se = (col == 15) ? 0 : WILDCARD;
-                int ss = (row == 14) ? 0 : WILDCARD;
-                inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
-                bool ok = hasCandidate(sn, se, ss, sw, row+1, col,
-                                       inventoryMask, d_allOrientations, d_physicalMapping,
-                                       sm_byNorth, sm_byNorthCount);
-                inventoryMask[physId / 64] |= (1ULL << (physId % 64));
-                if (!ok) continue;
+        // --- Tier 1: NW index ---
+        if (n_req != WILDCARD && w_req != WILDCARD && n_req < NUM_COLORS && w_req < NUM_COLORS) {
+            int key   = n_req * NUM_COLORS + w_req;
+            int count = sm_byNWCount[key];
+            for (int li = startLi; li < count; li++) {
+                int idx    = sm_byNW[key * NW_MAX + li];
+                int physId = c_physicalMapping[idx];
+                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                int p = c_allOrientations[idx];
+                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                board[boardIdx] = p;
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                placedOrientIdx[holeStep] = idx;
+                pieceStack[holeStep] = li + 1;
+                foundPiece = true;
+                holeStep++;
+                break;
             }
+            if (!foundPiece) pieceStack[holeStep] = 0;
 
-            if (col < 15 && board[boardIdx + 1] == -1) {
-                int ew = getEast(p);
-                int en = (row > 0 && board[boardIdx - 15] != -1) ? getSouth(board[boardIdx - 15]) : WILDCARD;
-                int es = (row == 15) ? 0 : WILDCARD;
-                int ee = (col == 14) ? 0 : WILDCARD;
-                inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
-                bool ok = hasCandidate(en, ee, es, ew, row, col+1,
-                                       inventoryMask, d_allOrientations, d_physicalMapping,
-                                       sm_byNorth, sm_byNorthCount);
-                inventoryMask[physId / 64] |= (1ULL << (physId % 64));
-                if (!ok) continue;
+        // --- Tier 2: north-only index ---
+        } else if (n_req != WILDCARD && n_req < NUM_COLORS) {
+            int count = sm_byNorthCount[n_req];
+            for (int li = startLi; li < count; li++) {
+                int idx    = sm_byNorth[n_req * MAX_PER_COLOR + li];
+                int physId = c_physicalMapping[idx];
+                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                int p = c_allOrientations[idx];
+                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                board[boardIdx] = p;
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                placedOrientIdx[holeStep] = idx;
+                pieceStack[holeStep] = li + 1;
+                foundPiece = true;
+                holeStep++;
+                break;
             }
+            if (!foundPiece) pieceStack[holeStep] = 0;
 
-            board[boardIdx] = p;
-            inventoryMask[physId / 64] &= ~(1ULL << (physId % 64));
-            pieceStack[holeStep] = idx + 1;
-            foundPiece = true;
-            holeStep++;
-            break;
+        // --- Tier 3: full scan ---
+        } else {
+            for (int li = startLi; li < 1024; li++) {
+                int physId = c_physicalMapping[li];
+                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                int p = c_allOrientations[li];
+                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                board[boardIdx] = p;
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                placedOrientIdx[holeStep] = li;
+                pieceStack[holeStep] = li + 1;
+                foundPiece = true;
+                holeStep++;
+                break;
+            }
+            if (!foundPiece) pieceStack[holeStep] = 0;
         }
 
         if (!foundPiece) {
-            pieceStack[holeStep] = 0;
             holeStep--;
             if (holeStep >= 0) {
-                int pToUndo = board[holes[holeStep]];
                 board[holes[holeStep]] = -1;
-                for (int o = 0; o < 1024; o++) {
-                    if (d_allOrientations[o] == pToUndo) {
-                        int physId = d_physicalMapping[o];
-                        inventoryMask[physId / 64] |= (1ULL << (physId % 64));
-                        break;
-                    }
-                }
+                int physId = c_physicalMapping[placedOrientIdx[holeStep]];
+                inventoryMask[physId/64] |= (1ULL << (physId%64));
             }
         }
     }
