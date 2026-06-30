@@ -1389,7 +1389,9 @@ public class EternitySolver implements Runnable {
         }
 
 // --- EXECUTE THE TEARDOWN ---
-        int newTargetDepth = Math.max(0, lockedPieces - 16);
+        // GPU needs a -16 buffer so the CPU handoff layer has room to re-explore;
+        // CPU mode already computed a fine-grained dropAmount, so no extra subtraction.
+        int newTargetDepth = this.useGpu ? Math.max(0, lockedPieces - 16) : lockedPieces;
         int piecesDropped = deepestStep - newTargetDepth;
 
         logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping " + piecesDropped + " pieces to depth " + newTargetDepth + ".");
