@@ -1744,7 +1744,7 @@ public class EternitySolver implements Runnable {
             logger.error(String.format(">>> Error saving Raw Board Text: %s", e.getMessage()));
         }
 
-        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, "pieces.csv"))) {
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, baseFilename + ".csv"))) {
             for (int row = 0; row < 16; row++) {
                 StringBuilder line = new StringBuilder();
                 for (int col = 0; col < 16; col++) {
@@ -1769,7 +1769,7 @@ public class EternitySolver implements Runnable {
                 }
                 writer.println(line);
             }
-            logger.info(">>> Saved official verification file: pieces.csv");
+            logger.info(String.format(">>> Saved official verification file: %s.csv", baseFilename));
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving pieces.csv: %s", e.getMessage()));
         }
