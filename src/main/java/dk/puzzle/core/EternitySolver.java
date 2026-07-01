@@ -1152,16 +1152,23 @@ public class EternitySolver implements Runnable {
         logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
 
         backgroundAnalysisExecutor.submit(() -> {
-            int[] bestConflicts = {Integer.MAX_VALUE};
-            int[] bestBoard = monteCarloFillBoard(boardCopy, iterations, bestConflicts);
-            int totalConflicts = bestConflicts[0];
+            try {
+                int[] bestConflicts = {Integer.MAX_VALUE};
+                int[] bestBoard = monteCarloFillBoard(boardCopy, iterations, bestConflicts);
+                int totalConflicts = bestConflicts[0];
 
-            logger.info(">>> [FULL BOARD SCAN] Best result: %d / 480 edge conflicts after %,d iterations", totalConflicts, iterations);
-            if (totalConflicts < 30) {
-                logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
-            }
-            if (totalConflicts < conflictSaveThreshold.get() || baseScore > variantSaveThreshold.get()) {
-                saveFullBoardVariant(bestBoard, baseScore, totalConflicts);
+                logger.info(">>> [FULL BOARD SCAN] Best result: %d / 480 edge conflicts after %,d iterations", totalConflicts, iterations);
+                if (totalConflicts < 30) {
+                    logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
+                }
+                if (totalConflicts < conflictSaveThreshold.get() || baseScore > variantSaveThreshold.get()) {
+                    saveFullBoardVariant(bestBoard, baseScore, totalConflicts);
+                } else {
+                    logger.info(">>> [FULL BOARD SCAN] Not saved: %d conflicts >= threshold %d and base score %d <= variant threshold %d",
+                            totalConflicts, conflictSaveThreshold.get(), baseScore, variantSaveThreshold.get());
+                }
+            } catch (Exception e) {
+                logger.error(">>> [FULL BOARD SCAN] Background analysis failed: " + e.getMessage(), e);
             }
         });
     }
@@ -1776,8 +1783,10 @@ public class EternitySolver implements Runnable {
 
         try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder,
                 baseFilename + "_link.txt"))) {
+            long totalTrials = cumulativeTrials + globalCpuTrialCount.get() + globalGpuTrialCount.get();
             writer.println("Base Score: " + baseScore);
             writer.println("Edge Conflicts: " + conflicts);
+            writer.println("Total Trials: " + String.format("%,d", totalTrials));
             writer.println(BucasExporter.exportBoard(simulatedBoard));
             logger.info(String.format(">>> Saved full board Bucas link: %s_link.txt", baseFilename));
         } catch (Exception e) {
