@@ -226,6 +226,33 @@ public class Eternity {
                 controlPanel.add(thresholdLabel);
                 controlPanel.add(Box.createVerticalStrut(10));
                 controlPanel.add(thresholdSlider);
+
+                // --- CONFLICT SAVE THRESHOLD SLIDER ---
+                JLabel conflictLabel = new JLabel("Save Variants With Conflicts Below: 60");
+                conflictLabel.setFont(labelFont);
+                conflictLabel.setForeground(textColor);
+                conflictLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                // Range 0–120; default 60. Lower = stricter (fewer boards saved).
+                JSlider conflictSlider = new JSlider(JSlider.HORIZONTAL, 0, 120, 60);
+                conflictSlider.setBackground(new Color(40, 42, 45));
+                conflictSlider.setMajorTickSpacing(20);
+                conflictSlider.setMinorTickSpacing(5);
+                conflictSlider.setPaintTicks(true);
+                conflictSlider.setPaintLabels(true);
+
+                conflictSlider.addChangeListener(e -> {
+                    int val = conflictSlider.getValue();
+                    conflictLabel.setText("Save Variants With Conflicts Below: " + val);
+                    if (!conflictSlider.getValueIsAdjusting()) {
+                        pbpSolver.setConflictSaveThreshold(val);
+                    }
+                });
+
+                controlPanel.add(Box.createVerticalStrut(30));
+                controlPanel.add(conflictLabel);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(conflictSlider);
                 // ------------------------------------------------
 
                 frame.add(controlPanel, BorderLayout.EAST);

@@ -6,7 +6,6 @@ import dk.puzzle.gpu.GpuEngine;
 import dk.puzzle.io.BucasExporter;
 import dk.puzzle.io.CheckpointManager;
 import dk.puzzle.io.RecordManager;
-import static dk.puzzle.io.RecordManager.uploadToDrive;
 import dk.puzzle.model.CompatibilityIndex;
 import dk.puzzle.model.PieceInventory;
 import dk.puzzle.util.PieceUtils;
@@ -16,13 +15,7 @@ import org.apache.logging.log4j.Logger;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -34,7 +27,8 @@ public class EternitySolver implements Runnable {
 
     private long cumulativeTrials = 0;
     private final Set<Integer> savedVariantHashes = ConcurrentHashMap.newKeySet();
-    private final java.util.concurrent.atomic.AtomicInteger variantSaveThreshold = new java.util.concurrent.atomic.AtomicInteger(198);
+    private final java.util.concurrent.atomic.AtomicInteger variantSaveThreshold = new java.util.concurrent.atomic.AtomicInteger(210);
+    private final java.util.concurrent.atomic.AtomicInteger conflictSaveThreshold = new java.util.concurrent.atomic.AtomicInteger(60);
     public static final int SEED_DEPTH = 110;
     public static final int LNS_THRESHOLD = 200;
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
@@ -59,6 +53,12 @@ public class EternitySolver implements Runnable {
     // Threading and Concurrency
     private final ExecutorService executor;
     private final int numCores;
+    private final ExecutorService backgroundAnalysisExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "monte-carlo-analysis");
+        t.setDaemon(true);
+        t.setPriority(Thread.MIN_PRIORITY);
+        return t;
+    });
     private final java.util.concurrent.LinkedBlockingQueue<int[]> seedPool =
             new java.util.concurrent.LinkedBlockingQueue<>();
     private final Object displayLock = new Object();
@@ -249,7 +249,7 @@ public class EternitySolver implements Runnable {
                     globalBestBoard[HINT_POSITIONS[h]] = foundPacked;
                     flatResumeBoard[HINT_POSITIONS[h]] = foundPacked;
 
-                    logger.info(">>> [HINT LOCKED] Successfully locked Hint " + (h+1) + " (Piece " + exactHintIds[h] + ") at position " + HINT_POSITIONS[h]);
+                    logger.info(">>> [HINT LOCKED] Successfully locked Hint " + (h + 1) + " (Piece " + exactHintIds[h] + ") at position " + HINT_POSITIONS[h]);
                 } else {
                     logger.error(">>> [FATAL CONFIG] Could not find Piece " + exactHintIds[h] + " in inventory!");
                 }
@@ -284,6 +284,7 @@ public class EternitySolver implements Runnable {
             logger.info(">>> [UNCONSTRAINED] Checkbox is off. Running completely without Center Piece or Hints!");
         }
     }
+
     private void restoreBoardState(int[][] loaded) {
         if (loaded == null) {
             return;
@@ -425,6 +426,7 @@ public class EternitySolver implements Runnable {
                 if (repairReporterScheduler != null) {
                     repairReporterScheduler.shutdownNow();
                 }
+                cumulativeTrials += globalCpuTrialCount.getAndSet(0) + globalGpuTrialCount.getAndSet(0);
                 SolverState memoryToSave = new SolverState(
                         buildDisplayBoard(globalBestBoard),
                         absoluteHighScore,
@@ -532,7 +534,8 @@ public class EternitySolver implements Runnable {
                                         flatResumeBoard[pos] = -1;
                                     }
                                 }
-                            }                            consecutiveExtinctions++;
+                            }
+                            consecutiveExtinctions++;
                         }
 
                         lastSeedCount = 0;
@@ -582,6 +585,7 @@ public class EternitySolver implements Runnable {
 
                 if (System.currentTimeMillis() - lastPeriodicSave > 300_000) {
                     synchronized (displayLock) {
+                        cumulativeTrials += globalCpuTrialCount.getAndSet(0) + globalGpuTrialCount.getAndSet(0);
                         SolverState memoryToSave = new SolverState(
                                 buildDisplayBoard(globalBestBoard),
                                 absoluteHighScore,
@@ -865,6 +869,7 @@ public class EternitySolver implements Runnable {
         } else {
             // The GPU completely failed to beat the current local depth.
             consecutiveGpuStagnation++;
+//            analyzeFullBoardPotential(bestBoardOut, deepestStep);
         }
 
         // --- Seed generation for the next batch ---
@@ -976,7 +981,10 @@ public class EternitySolver implements Runnable {
                     }
                 } else {
                     fatalGpuBugCount++;
-                    if (fatalGpuBugCount > 50) { triggerBranchScrap(); fatalGpuBugCount = 0; }
+                    if (fatalGpuBugCount > 50) {
+                        triggerBranchScrap();
+                        fatalGpuBugCount = 0;
+                    }
                 }
                 return;
             }
@@ -1136,195 +1144,185 @@ public class EternitySolver implements Runnable {
         analyzeFullBoardPotential(recordBoard, absoluteHighScore);
     }
 
-    private void analyzeFullBoardPotential(int[] recordBoard, int baseScore) {        int[] simulatedBoard = Arrays.copyOf(recordBoard, 256);
-        List<Integer> emptySpots = new ArrayList<>();
+    private void analyzeFullBoardPotential(int[] recordBoard, int baseScore) {
+        int[] boardCopy = Arrays.copyOf(recordBoard, 256);
+        int numEmpty = 0;
+        for (int p : boardCopy) if (p == -1 || p == -2) numEmpty++;
+        final int iterations = 100_000;
+        logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
+
+        backgroundAnalysisExecutor.submit(() -> {
+            int[] bestConflicts = {Integer.MAX_VALUE};
+            int[] bestBoard = monteCarloFillBoard(boardCopy, iterations, bestConflicts);
+            int totalConflicts = bestConflicts[0];
+
+            logger.info(">>> [FULL BOARD SCAN] Best result: %d / 480 edge conflicts after %,d iterations", totalConflicts, iterations);
+            if (totalConflicts < 30) {
+                logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
+            }
+            if (totalConflicts < conflictSaveThreshold.get() || baseScore > variantSaveThreshold.get()) {
+                saveFullBoardVariant(bestBoard, baseScore, totalConflicts);
+            }
+        });
+    }
+
+    /**
+     * Monte Carlo fill: randomly orders the empty spots, then for each spot places
+     * the unused piece (in any valid orientation) that produces the fewest conflicts
+     * with already-placed neighbours. Repeats {@code iterations} times and returns
+     * the board with the lowest total edge-conflict count.
+     */
+    private int[] monteCarloFillBoard(int[] fixedBoard, int iterations, int[] outBestConflicts) {
+        // --- identify empty spots and already-used physical pieces ---
         boolean[] usedPhysical = new boolean[256];
+        List<Integer> emptyList = new ArrayList<>();
 
         for (int i = 0; i < 256; i++) {
-            int p = simulatedBoard[i];
+            int p = fixedBoard[i];
             if (p != -1 && p != -2) {
-                int physicalId = -1;
                 for (int oi = 0; oi < 1024; oi++) {
                     if (inventory.allOrientations[oi] == p) {
-                        physicalId = inventory.physicalMapping[oi];
+                        usedPhysical[inventory.physicalMapping[oi]] = true;
                         break;
                     }
                 }
-                if (physicalId != -1) {
-                    usedPhysical[physicalId] = true;
-                }
             } else {
-                emptySpots.add(i);
+                emptyList.add(i);
             }
         }
 
-        List<Integer> unusedPhysIds = new ArrayList<>();
-        for (int physId = 0; physId < 256; physId++) {
-            if (!usedPhysical[physId]) {
-                unusedPhysIds.add(physId);
+        int numEmpty = emptyList.size();
+        int[] emptyArr = new int[numEmpty];
+        for (int i = 0; i < numEmpty; i++) emptyArr[i] = emptyList.get(i);
+
+        // --- pre-compute edge flags and the set of orientations that satisfy
+        //     border constraints for each empty spot (done once, not per iteration) ---
+        boolean[] isNorthEdge = new boolean[256], isSouthEdge = new boolean[256];
+        boolean[] isWestEdge  = new boolean[256], isEastEdge  = new boolean[256];
+        int[][] spotValidOi   = new int[256][];
+        int[][] spotValidPhys = new int[256][];
+
+        for (int spot : emptyArr) {
+            isNorthEdge[spot] = (spot / 16 == 0);
+            isSouthEdge[spot] = (spot / 16 == 15);
+            isWestEdge[spot]  = (spot % 16 == 0);
+            isEastEdge[spot]  = (spot % 16 == 15);
+
+            // Two passes: count then fill, to avoid ArrayList overhead inside hot loop
+            int count = 0;
+            for (int oi = 0; oi < 1024; oi++) {
+                int p = inventory.allOrientations[oi];
+                if (isNorthEdge[spot] ? PieceUtils.getNorth(p) != 0 : PieceUtils.getNorth(p) == 0) continue;
+                if (isSouthEdge[spot] ? PieceUtils.getSouth(p) != 0 : PieceUtils.getSouth(p) == 0) continue;
+                if (isWestEdge[spot]  ? PieceUtils.getWest(p)  != 0 : PieceUtils.getWest(p)  == 0) continue;
+                if (isEastEdge[spot]  ? PieceUtils.getEast(p)  != 0 : PieceUtils.getEast(p)  == 0) continue;
+                count++;
+            }
+            spotValidOi[spot]   = new int[count];
+            spotValidPhys[spot] = new int[count];
+            int idx = 0;
+            for (int oi = 0; oi < 1024; oi++) {
+                int p = inventory.allOrientations[oi];
+                if (isNorthEdge[spot] ? PieceUtils.getNorth(p) != 0 : PieceUtils.getNorth(p) == 0) continue;
+                if (isSouthEdge[spot] ? PieceUtils.getSouth(p) != 0 : PieceUtils.getSouth(p) == 0) continue;
+                if (isWestEdge[spot]  ? PieceUtils.getWest(p)  != 0 : PieceUtils.getWest(p)  == 0) continue;
+                if (isEastEdge[spot]  ? PieceUtils.getEast(p)  != 0 : PieceUtils.getEast(p)  == 0) continue;
+                spotValidOi[spot][idx]   = oi;
+                spotValidPhys[spot][idx] = inventory.physicalMapping[oi];
+                idx++;
             }
         }
 
-        Collections.shuffle(unusedPhysIds);
+        // --- Monte Carlo iterations ---
+        int[] bestBoard = null;
+        int bestConflicts = Integer.MAX_VALUE;
 
-        for (int spot : emptySpots) {
-            int row = spot / 16;
-            int col = spot % 16;
-            boolean atNorthEdge = (row == 0);
-            boolean atSouthEdge = (row == 15);
-            boolean atWestEdge = (col == 0);
-            boolean atEastEdge = (col == 15);
+        Random rng = new Random();
+        int[] order = Arrays.copyOf(emptyArr, numEmpty);
+        boolean[] localUsed = new boolean[256];
+        int[] board = new int[256];
 
-            int bestBrikIndex = -1;
-            int bestOrientedPiece = -1;
+        for (int iter = 0; iter < iterations; iter++) {
+            System.arraycopy(fixedBoard, 0, board, 0, 256);
+            System.arraycopy(usedPhysical, 0, localUsed, 0, 256);
 
-            for (int i = 0; i < unusedPhysIds.size(); i++) {
-                int physId = unusedPhysIds.get(i);
-                for (int oi = 0; oi < 1024; oi++) {
-                    if (inventory.physicalMapping[oi] == physId) {
-                        int p = inventory.allOrientations[oi];
-                        boolean match = !atNorthEdge || PieceUtils.getNorth(p) == 0;
+            // Fisher-Yates shuffle of hole order
+            for (int i = numEmpty - 1; i > 0; i--) {
+                int j = rng.nextInt(i + 1);
+                int t = order[i]; order[i] = order[j]; order[j] = t;
+            }
 
-                        // 1. MUST have border on the actual edges
-                        if (atSouthEdge && PieceUtils.getSouth(p) != 0) {
-                            match = false;
-                        }
-                        if (atWestEdge && PieceUtils.getWest(p) != 0) {
-                            match = false;
-                        }
-                        if (atEastEdge && PieceUtils.getEast(p) != 0) {
-                            match = false;
-                        }
+            for (int si = 0; si < numEmpty; si++) {
+                int spot = order[si];
+                int[] voi   = spotValidOi[spot];
+                int[] vphys = spotValidPhys[spot];
+                int vlen = voi.length;
 
-                        // 2. MUST NOT have border on the inside! (The Missing Rule)
-                        if (!atNorthEdge && PieceUtils.getNorth(p) == 0) {
-                            match = false;
-                        }
-                        if (!atSouthEdge && PieceUtils.getSouth(p) == 0) {
-                            match = false;
-                        }
-                        if (!atWestEdge && PieceUtils.getWest(p) == 0) {
-                            match = false;
-                        }
-                        if (!atEastEdge && PieceUtils.getEast(p) == 0) {
-                            match = false;
-                        }
+                int bestOi = -1, bestPhys = -1, bestScore = Integer.MAX_VALUE;
 
-                        // 3. Check internal neighbors (Pass 1 only)
-                        if (match && row > 0 && simulatedBoard[spot - 16] != -1) {
-                            if (PieceUtils.getNorth(p) != PieceUtils.getSouth(simulatedBoard[spot - 16])) {
-                                match = false;
-                            }
-                        }
-                        if (match && col > 0 && simulatedBoard[spot - 1] != -1) {
-                            if (PieceUtils.getWest(p) != PieceUtils.getEast(simulatedBoard[spot - 1])) {
-                                match = false;
-                            }
-                        }
+                for (int vi = 0; vi < vlen; vi++) {
+                    int physId = vphys[vi];
+                    if (localUsed[physId]) continue;
 
-                        if (match) {
-                            bestBrikIndex = i;
-                            bestOrientedPiece = p;
+                    int p = inventory.allOrientations[voi[vi]];
+                    int score = 0;
+                    if (!isNorthEdge[spot] && board[spot - 16] != -1
+                            && PieceUtils.getNorth(p) != PieceUtils.getSouth(board[spot - 16])) score++;
+                    if (!isSouthEdge[spot] && board[spot + 16] != -1
+                            && PieceUtils.getSouth(p) != PieceUtils.getNorth(board[spot + 16])) score++;
+                    if (!isWestEdge[spot]  && board[spot - 1]  != -1
+                            && PieceUtils.getWest(p)  != PieceUtils.getEast(board[spot - 1]))  score++;
+                    if (!isEastEdge[spot]  && board[spot + 1]  != -1
+                            && PieceUtils.getEast(p)  != PieceUtils.getWest(board[spot + 1]))  score++;
+
+                    if (score < bestScore) {
+                        bestScore = score;
+                        bestOi   = voi[vi];
+                        bestPhys = physId;
+                        if (score == 0) break; // perfect fit — stop searching
+                    }
+                }
+
+                if (bestOi != -1) {
+                    board[spot] = inventory.allOrientations[bestOi];
+                    localUsed[bestPhys] = true;
+                } else {
+                    // No edge-valid piece left (extremely rare) — place anything unused
+                    for (int oi = 0; oi < 1024; oi++) {
+                        int physId = inventory.physicalMapping[oi];
+                        if (!localUsed[physId]) {
+                            board[spot] = inventory.allOrientations[oi];
+                            localUsed[physId] = true;
                             break;
                         }
                     }
                 }
-                if (bestBrikIndex != -1) {
+            }
+
+            // count total internal edge conflicts
+            int conflicts = 0;
+            for (int row = 0; row < 16; row++) {
+                for (int col = 0; col < 16; col++) {
+                    int boardIdx = row * 16 + col;
+                    int p = board[boardIdx];
+                    if (p == -1) continue;
+                    if (col < 15 && PieceUtils.getEast(p)  != PieceUtils.getWest(board[boardIdx + 1]))  conflicts++;
+                    if (row < 15 && PieceUtils.getSouth(p) != PieceUtils.getNorth(board[boardIdx + 16])) conflicts++;
+                }
+            }
+
+            if (conflicts < bestConflicts) {
+                bestConflicts = conflicts;
+                bestBoard = Arrays.copyOf(board, 256);
+                if (bestConflicts == 0) {
+                    logger.warn(">>> [!!!] PERFECT FILL! Zero conflicts found after %,d Monte Carlo iterations!", iter + 1);
                     break;
                 }
             }
-
-            // PASS 2: Fallback to EDGE ONLY match (Ignore internal neighbors, but strictly forbid inner borders)
-            if (bestBrikIndex == -1) {
-                for (int i = 0; i < unusedPhysIds.size(); i++) {
-                    int physId = unusedPhysIds.get(i);
-                    for (int oi = 0; oi < 1024; oi++) {
-                        if (inventory.physicalMapping[oi] == physId) {
-                            int p = inventory.allOrientations[oi];
-                            boolean match = !atNorthEdge || PieceUtils.getNorth(p) == 0;
-
-                            // MUST have border on the actual edges
-                            if (atSouthEdge && PieceUtils.getSouth(p) != 0) {
-                                match = false;
-                            }
-                            if (atWestEdge && PieceUtils.getWest(p) != 0) {
-                                match = false;
-                            }
-                            if (atEastEdge && PieceUtils.getEast(p) != 0) {
-                                match = false;
-                            }
-
-                            // MUST NOT have border on the inside!
-                            if (!atNorthEdge && PieceUtils.getNorth(p) == 0) {
-                                match = false;
-                            }
-                            if (!atSouthEdge && PieceUtils.getSouth(p) == 0) {
-                                match = false;
-                            }
-                            if (!atWestEdge && PieceUtils.getWest(p) == 0) {
-                                match = false;
-                            }
-                            if (!atEastEdge && PieceUtils.getEast(p) == 0) {
-                                match = false;
-                            }
-
-                            if (match) {
-                                bestBrikIndex = i;
-                                bestOrientedPiece = p;
-                                break;
-                            }
-                        }
-                    }
-                    if (bestBrikIndex != -1) {
-                        break;
-                    }
-                }
-            }
-
-            // PASS 3: Ultimate Fallback - Just place anything so there isn't a hole!
-            if (bestBrikIndex != -1) {
-                simulatedBoard[spot] = bestOrientedPiece;
-                unusedPhysIds.remove(bestBrikIndex);
-            } else {
-                int fallbackPhysId = unusedPhysIds.remove(0);
-                for (int oi = 0; oi < 1024; oi++) {
-                    if (inventory.physicalMapping[oi] == fallbackPhysId) {
-                        simulatedBoard[spot] = inventory.allOrientations[oi];
-                        break;
-                    }
-                }
-            }
         }
 
-        int totalConflicts = 0;
-        for (int row = 0; row < 16; row++) {
-            for (int col = 0; col < 16; col++) {
-                int idx = row * 16 + col;
-                int currentPiece = simulatedBoard[idx];
-                if (currentPiece == -1) {
-                    continue;
-                }
-                if (col < 15) {
-                    int eastNeighbor = simulatedBoard[idx + 1];
-                    if (eastNeighbor != -1 && PieceUtils.getEast(currentPiece) != PieceUtils.getWest(eastNeighbor)) {
-                        totalConflicts++;
-                    }
-                }
-                if (row < 15) {
-                    int southNeighbor = simulatedBoard[idx + 16];
-                    if (southNeighbor != -1 && PieceUtils.getSouth(currentPiece) != PieceUtils.getNorth(southNeighbor)) {
-                        totalConflicts++;
-                    }
-                }
-            }
-        }
-
-        logger.info(">>> [FULL BOARD SCAN] Simulated an edge-aware fully laid board. Total internal edge conflicts: %d / 480", totalConflicts);
-        if (totalConflicts < 30) {
-            logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
-        }
-
-        saveFullBoardVariant(simulatedBoard, baseScore, totalConflicts);
+        if (outBestConflicts != null && outBestConflicts.length > 0) outBestConflicts[0] = bestConflicts;
+        return bestBoard;
     }
 
     private void triggerBranchScrap() {
@@ -1352,9 +1350,13 @@ public class EternitySolver implements Runnable {
         // --- CALCULATE THE CURRENT FOUNDATION ---
         int currentBaseCamp = 0;
         for (int p : flatResumeBoard) {
-            if (p != -1 && p != -2) currentBaseCamp++;
+            if (p != -1 && p != -2) {
+                currentBaseCamp++;
+            }
         }
-        if (currentBaseCamp == 0) currentBaseCamp = deepestStep;
+        if (currentBaseCamp == 0) {
+            currentBaseCamp = deepestStep;
+        }
 
         int lockedPieces;
 
@@ -1445,31 +1447,43 @@ public class EternitySolver implements Runnable {
         // Try to build further from currentDepth without Lookahead
         for (int step = currentDepth; step < 256; step++) {
             int boardIdx = buildOrder[step];
-            if (extendedBoard[boardIdx] != -1) continue;
+            if (extendedBoard[boardIdx] != -1) {
+                continue;
+            }
 
             int row = boardIdx / 16;
             int col = boardIdx % 16;
 
             int northReq = (row == 0) ? 0 : (extendedBoard[boardIdx - 16] != -1 ? PieceUtils.getSouth(extendedBoard[boardIdx - 16]) : -1);
             int southReq = (row == 15) ? 0 : (extendedBoard[boardIdx + 16] != -1 ? PieceUtils.getNorth(extendedBoard[boardIdx + 16]) : -1);
-            int westReq  = (col == 0) ? 0 : (extendedBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(extendedBoard[boardIdx - 1]) : -1);
-            int eastReq  = (col == 15) ? 0 : (extendedBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(extendedBoard[boardIdx + 1]) : -1);
+            int westReq = (col == 0) ? 0 : (extendedBoard[boardIdx - 1] != -1 ? PieceUtils.getEast(extendedBoard[boardIdx - 1]) : -1);
+            int eastReq = (col == 15) ? 0 : (extendedBoard[boardIdx + 1] != -1 ? PieceUtils.getWest(extendedBoard[boardIdx + 1]) : -1);
 
             boolean pieceFound = false;
 
             // Look for a piece that fits the immediate edges
             for (int physId = 0; physId < 256; physId++) {
-                if (usedPhysical[physId]) continue;
+                if (usedPhysical[physId]) {
+                    continue;
+                }
 
                 for (int oi = 0; oi < 1024; oi++) {
                     if (inventory.physicalMapping[oi] == physId) {
                         int p = inventory.allOrientations[oi];
 
                         boolean fits = true;
-                        if (northReq != -1 && PieceUtils.getNorth(p) != northReq) fits = false;
-                        if (southReq != -1 && PieceUtils.getSouth(p) != southReq) fits = false;
-                        if (westReq != -1 && PieceUtils.getWest(p) != westReq) fits = false;
-                        if (eastReq != -1 && PieceUtils.getEast(p) != eastReq) fits = false;
+                        if (northReq != -1 && PieceUtils.getNorth(p) != northReq) {
+                            fits = false;
+                        }
+                        if (southReq != -1 && PieceUtils.getSouth(p) != southReq) {
+                            fits = false;
+                        }
+                        if (westReq != -1 && PieceUtils.getWest(p) != westReq) {
+                            fits = false;
+                        }
+                        if (eastReq != -1 && PieceUtils.getEast(p) != eastReq) {
+                            fits = false;
+                        }
 
                         if (fits) {
                             extendedBoard[boardIdx] = p;
@@ -1480,7 +1494,9 @@ public class EternitySolver implements Runnable {
                         }
                     }
                 }
-                if (pieceFound) break;
+                if (pieceFound) {
+                    break;
+                }
             }
 
             // If we couldn't find a piece that fits, stop the decoration
@@ -1861,6 +1877,11 @@ public class EternitySolver implements Runnable {
         logger.info(">>> [CONFIG] Variant Save Threshold updated to: " + newThreshold);
     }
 
+    public void setConflictSaveThreshold(int newThreshold) {
+        this.conflictSaveThreshold.set(newThreshold);
+        logger.info(">>> [CONFIG] Conflict Save Threshold updated to: " + newThreshold);
+    }
+
     private void applyStaticLocks(int[] board) {
         if (this.lockCenter) {
             board[135] = targetPiece;
@@ -2011,7 +2032,8 @@ public class EternitySolver implements Runnable {
                         RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
                         saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
                         logger.info(">>> [CPU MODE] VICTORY! ETERNITY II SOLVED! <<<");
-                        logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));                    }
+                        logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
+                    }
                 }
                 return true;
             }
@@ -2028,6 +2050,13 @@ public class EternitySolver implements Runnable {
                         deepestStep = step;
                         System.arraycopy(localBoard, 0, bestBoard, 0, 256);
 //                        updateDisplay(deepestStep, buildDisplayBoard(localBoard));
+                        if (!useGpu && deepestStep > variantSaveThreshold.get()) {
+                            int variantHash = Arrays.hashCode(bestBoard);
+                            if (savedVariantHashes.add(variantHash)) {
+                                logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
+                                analyzeFullBoardPotential(bestBoard, deepestStep);
+                            }
+                        }
                         if (!useGpu && deepestStep > absoluteHighScore) {
                             absoluteHighScore = deepestStep;
                             System.arraycopy(localBoard, 0, globalBestBoard, 0, 256);
@@ -2137,25 +2166,37 @@ public class EternitySolver implements Runnable {
                 // 2. UPDATE DEMAND (Open Edges):
                 // If a neighbor is empty (-1), we CREATE an open edge (demand goes up).
                 // If a neighbor is present, we CLOSE an open edge (demand goes down).
-                if (row > 0 && localBoard[boardIdx - 16] == -1) openEdgesOnBoard[nC]++;
-                else if (row > 0) openEdgesOnBoard[nC]--;
+                if (row > 0 && localBoard[boardIdx - 16] == -1) {
+                    openEdgesOnBoard[nC]++;
+                } else if (row > 0) {
+                    openEdgesOnBoard[nC]--;
+                }
 
-                if (col < 15 && localBoard[boardIdx + 1] == -1) openEdgesOnBoard[eC]++;
-                else if (col < 15) openEdgesOnBoard[eC]--;
+                if (col < 15 && localBoard[boardIdx + 1] == -1) {
+                    openEdgesOnBoard[eC]++;
+                } else if (col < 15) {
+                    openEdgesOnBoard[eC]--;
+                }
 
-                if (row < 15 && localBoard[boardIdx + 16] == -1) openEdgesOnBoard[sC]++;
-                else if (row < 15) openEdgesOnBoard[sC]--;
+                if (row < 15 && localBoard[boardIdx + 16] == -1) {
+                    openEdgesOnBoard[sC]++;
+                } else if (row < 15) {
+                    openEdgesOnBoard[sC]--;
+                }
 
-                if (col > 0 && localBoard[boardIdx - 1] == -1) openEdgesOnBoard[wC]++;
-                else if (col > 0) openEdgesOnBoard[wC]--;
+                if (col > 0 && localBoard[boardIdx - 1] == -1) {
+                    openEdgesOnBoard[wC]++;
+                } else if (col > 0) {
+                    openEdgesOnBoard[wC]--;
+                }
 
                 // 3. PARITY CHECK (The Early Pruning Gate)
                 boolean isColorBudgetSafe = true;
                 // We only check the colors we just modified to save CPU cycles
                 if (openEdgesOnBoard[nC] > inventoryColorsLeft[nC] ||
-                    openEdgesOnBoard[eC] > inventoryColorsLeft[eC] ||
-                    openEdgesOnBoard[sC] > inventoryColorsLeft[sC] ||
-                    openEdgesOnBoard[wC] > inventoryColorsLeft[wC]) {
+                        openEdgesOnBoard[eC] > inventoryColorsLeft[eC] ||
+                        openEdgesOnBoard[sC] > inventoryColorsLeft[sC] ||
+                        openEdgesOnBoard[wC] > inventoryColorsLeft[wC]) {
                     isColorBudgetSafe = false; // PATH IS MATHEMATICALLY DEAD!
                 }
 
@@ -2188,17 +2229,29 @@ public class EternitySolver implements Runnable {
                 inventoryColorsLeft[sC]++;
                 inventoryColorsLeft[wC]++;
 
-                if (row > 0 && localBoard[boardIdx - 16] == -1) openEdgesOnBoard[nC]--;
-                else if (row > 0) openEdgesOnBoard[nC]++;
+                if (row > 0 && localBoard[boardIdx - 16] == -1) {
+                    openEdgesOnBoard[nC]--;
+                } else if (row > 0) {
+                    openEdgesOnBoard[nC]++;
+                }
 
-                if (col < 15 && localBoard[boardIdx + 1] == -1) openEdgesOnBoard[eC]--;
-                else if (col < 15) openEdgesOnBoard[eC]++;
+                if (col < 15 && localBoard[boardIdx + 1] == -1) {
+                    openEdgesOnBoard[eC]--;
+                } else if (col < 15) {
+                    openEdgesOnBoard[eC]++;
+                }
 
-                if (row < 15 && localBoard[boardIdx + 16] == -1) openEdgesOnBoard[sC]--;
-                else if (row < 15) openEdgesOnBoard[sC]++;
+                if (row < 15 && localBoard[boardIdx + 16] == -1) {
+                    openEdgesOnBoard[sC]--;
+                } else if (row < 15) {
+                    openEdgesOnBoard[sC]++;
+                }
 
-                if (col > 0 && localBoard[boardIdx - 1] == -1) openEdgesOnBoard[wC]--;
-                else if (col > 0) openEdgesOnBoard[wC]++;
+                if (col > 0 && localBoard[boardIdx - 1] == -1) {
+                    openEdgesOnBoard[wC]--;
+                } else if (col > 0) {
+                    openEdgesOnBoard[wC]++;
+                }
             }
             return false;
         }
@@ -2239,13 +2292,22 @@ public class EternitySolver implements Runnable {
                     inventoryColorsLeft[wC]--;
 
                     // Calculate demand: If the neighbor is an empty space (-1), we need a color!
-                    if (r > 0 && localBoard[i - 16] == -1) openEdgesOnBoard[nC]++;
-                    if (c < 15 && localBoard[i + 1] == -1) openEdgesOnBoard[eC]++;
-                    if (r < 15 && localBoard[i + 16] == -1) openEdgesOnBoard[sC]++;
-                    if (c > 0 && localBoard[i - 1] == -1) openEdgesOnBoard[wC]++;
+                    if (r > 0 && localBoard[i - 16] == -1) {
+                        openEdgesOnBoard[nC]++;
+                    }
+                    if (c < 15 && localBoard[i + 1] == -1) {
+                        openEdgesOnBoard[eC]++;
+                    }
+                    if (r < 15 && localBoard[i + 16] == -1) {
+                        openEdgesOnBoard[sC]++;
+                    }
+                    if (c > 0 && localBoard[i - 1] == -1) {
+                        openEdgesOnBoard[wC]++;
+                    }
                 }
             }
         }
+
         /**
          * DYNAMIC LOOKAHEAD HEURISTIC
          * Scans the unplaced board. If any empty cell has 0 valid candidates left in the
