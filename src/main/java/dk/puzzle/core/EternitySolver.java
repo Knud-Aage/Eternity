@@ -1664,7 +1664,7 @@ public class EternitySolver implements Runnable {
         // If we passed the gate, update the timer
         lastVisualUpdate = now;
 
-        Eternity.updateDisplay(depth, this.absoluteHighScore, displayBoard);
+        Eternity.updateDisplay(depth + 1, this.absoluteHighScore + 1, displayBoard);
     }
 
     private void saveAndUploadBucasLink(int[] board, int score) {
@@ -1719,9 +1719,10 @@ public class EternitySolver implements Runnable {
         }
 
         String timeId = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss_SSS"));
-        String baseFilename = "Errors" + conflicts + "_Base" + baseScore + "_" + timeId;
+        int displayScore = baseScore + 1; // radar holds one piece back; show the true count
+        String baseFilename = "Errors" + conflicts + "_Base" + displayScore + "_" + timeId;
 
-        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, "Raw_Board_Output_" + baseScore + ".txt"))) {
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, "Raw_Board_Output_" + displayScore + ".txt"))) {
             for (int row = 0; row < 16; row++) {
                 StringBuilder line = new StringBuilder();
                 for (int col = 0; col < 16; col++) {
@@ -1784,7 +1785,7 @@ public class EternitySolver implements Runnable {
         try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder,
                 baseFilename + "_link.txt"))) {
             long totalTrials = cumulativeTrials + globalCpuTrialCount.get() + globalGpuTrialCount.get();
-            writer.println("Base Score: " + baseScore);
+            writer.println("Base Score: " + displayScore);
             writer.println("Edge Conflicts: " + conflicts);
             writer.println("Total Trials: " + String.format("%,d", totalTrials));
             writer.println(BucasExporter.exportBoard(simulatedBoard));
