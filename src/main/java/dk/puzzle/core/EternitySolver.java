@@ -1149,7 +1149,7 @@ public class EternitySolver implements Runnable {
         int[] boardCopy = Arrays.copyOf(recordBoard, 256);
         int numEmpty = 0;
         for (int p : boardCopy) if (p == -1 || p == -2) numEmpty++;
-        final int iterations = 100_000;
+        final int iterations = 200_000;
         logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
 
         if (pendingAnalyses.get() >= 2) {

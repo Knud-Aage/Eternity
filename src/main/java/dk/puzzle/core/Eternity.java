@@ -170,6 +170,51 @@ public class Eternity {
                 controlPanel.add(Box.createVerticalStrut(10));
                 controlPanel.add(thresholdSlider);
 
+                JLabel eliteLabel = new JLabel("Population: Elite 15%");
+                eliteLabel.setFont(labelFont);
+                eliteLabel.setForeground(textColor);
+                eliteLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+                JSlider eliteSlider = new JSlider(JSlider.HORIZONTAL, 5, 60, 15);
+                eliteSlider.setBackground(new Color(40, 42, 45));
+                eliteSlider.setMajorTickSpacing(10);
+                eliteSlider.setMinorTickSpacing(5);
+                eliteSlider.setPaintTicks(true);
+                eliteSlider.setPaintLabels(true);
+                eliteSlider.addChangeListener(e -> {
+                    int val = eliteSlider.getValue();
+                    eliteLabel.setText("Population: Elite " + val + "%");
+                    if (!eliteSlider.getValueIsAdjusting()) {
+                        dk.puzzle.ai.SeedSelector.setElitePct(val);
+                    }
+                });
+
+                JLabel diverseLabel = new JLabel("Population: Diverse 55%");
+                diverseLabel.setFont(labelFont);
+                diverseLabel.setForeground(textColor);
+                diverseLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
+                JSlider diverseSlider = new JSlider(JSlider.HORIZONTAL, 10, 70, 55);
+                diverseSlider.setBackground(new Color(40, 42, 45));
+                diverseSlider.setMajorTickSpacing(10);
+                diverseSlider.setMinorTickSpacing(5);
+                diverseSlider.setPaintTicks(true);
+                diverseSlider.setPaintLabels(true);
+                diverseSlider.addChangeListener(e -> {
+                    int val = diverseSlider.getValue();
+                    diverseLabel.setText("Population: Diverse " + val + "%");
+                    if (!diverseSlider.getValueIsAdjusting()) {
+                        dk.puzzle.ai.SeedSelector.setDiversePct(val);
+                    }
+                });
+
+                controlPanel.add(Box.createVerticalStrut(20));
+                controlPanel.add(eliteLabel);
+                controlPanel.add(Box.createVerticalStrut(5));
+                controlPanel.add(eliteSlider);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(diverseLabel);
+                controlPanel.add(Box.createVerticalStrut(5));
+                controlPanel.add(diverseSlider);
+
                 // --- CONFLICT SAVE THRESHOLD SLIDER ---
                 JLabel conflictLabel = new JLabel("Save Variants With Conflicts Below: 60");
                 conflictLabel.setFont(labelFont);
@@ -238,9 +283,6 @@ public class Eternity {
     }
 
     public static int[] loadPieces() {
-        // Expected CSV format (TheSil): pieceNumber, north, east, south, west
-        // Border/corner pieces use empty fields for grey edges, e.g.: 1,1,2,,
-        // Empty fields are treated as 0 (grey border color).
         try (BufferedReader br = new BufferedReader(new FileReader("pieces.csv"))) {
             int[] pieces = new int[256];
             int i = 0;
@@ -251,9 +293,6 @@ public class Eternity {
             String firstLine = br.readLine();
             if (firstLine != null) {
                 String trimmed = firstLine.trim();
-                // TheSil header: "16,16,5,17" — 4 numbers describing the puzzle
-                // If first token parses as a number > 256 or has exactly 4 tokens
-                // and no piece data, it's a header — skip it.
                 String[] headerPts = trimmed.split(",");
                 boolean isHeader = headerPts.length <= 4 &&
                         headerPts[0].trim().equals("16");
@@ -269,8 +308,6 @@ public class Eternity {
                 String[] pts = trimmed.split(",", -1); // -1 keeps trailing empty fields
                 if (pts.length < 5) continue;
 
-                // TheSil format: pieceNumber, E, S, W, N
-                // (NOT north-east-south-west — verified against piece 139: E=14,S=8,W=8,N=9)
                 int e = parseColorField(pts[1]);
                 int s = parseColorField(pts[2]);
                 int w = parseColorField(pts[3]);

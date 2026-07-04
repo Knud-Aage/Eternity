@@ -8,6 +8,18 @@ import java.util.*;
  */
 public class SeedSelector {
 
+    // Population split — adjustable via UI sliders at runtime.
+    // Restarts = whatever is left after elite + diverse.
+    private static volatile int elitePct   = 15;  // default: lean toward diversity
+    private static volatile int diversePct = 55;
+
+    public static void setElitePct(int pct) {
+        elitePct = Math.max(5, Math.min(60, pct));
+    }
+    public static void setDiversePct(int pct) {
+        diversePct = Math.max(10, Math.min(70, pct));
+    }
+
     private static final int[] POSITION_WEIGHT = buildPositionWeights();
 
     private static int[] buildPositionWeights() {
@@ -26,27 +38,10 @@ public class SeedSelector {
     public static int scoreBoard(int[] board, int depthReached) {
         int posScore = 0;
         int dangerPenalty = 0;
-        int edgeConflicts = 0;
 
         for (int i = 0; i < 256; i++) {
             if (board[i] != -1) {
                 posScore += POSITION_WEIGHT[i];
-
-                // Count internal edge conflicts between placed neighbours.
-                // Each conflict is counted once (only check east and south
-                // so we don't double-count).
-                int row = i / 16;
-                int col = i % 16;
-                if (col < 15 && board[i + 1] != -1) {
-                    int myEast    = (board[i]     >> 16) & 0xFF;
-                    int theirWest =  board[i + 1]        & 0xFF;
-                    if (myEast != theirWest) edgeConflicts++;
-                }
-                if (row < 15 && board[i + 16] != -1) {
-                    int mySouth    = (board[i]      >>  8) & 0xFF;
-                    int theirNorth = (board[i + 16] >> 24) & 0xFF;
-                    if (mySouth != theirNorth) edgeConflicts++;
-                }
             } else {
                 int row = i / 16;
                 int col = i % 16;
@@ -58,13 +53,7 @@ public class SeedSelector {
                 if (filled >= 3) dangerPenalty += (filled - 2) * 5;
             }
         }
-
-        // Edge conflicts are heavily penalised — a seed with internal conflicts
-        // is a structural dead end; the GPU will hit the same wall from it.
-        // Weight: each conflict costs as much as losing ~2 depth points.
-        int conflictPenalty = edgeConflicts * 200;
-
-        return depthReached * 100 + posScore * 2 - dangerPenalty - conflictPenalty;
+        return depthReached * 100 + posScore * 2 - dangerPenalty;
     }
 
     public static boolean isEdgeConsistent(int[] board) {
@@ -146,9 +135,9 @@ public class SeedSelector {
         for (int i = 0; i < n; i++) indices[i] = i;
         Arrays.sort(indices, (a, b) -> scores[b] - scores[a]);
 
-        int eliteCount   = Math.max(1, targetCount * 15 / 100);
-        int diverseCount = Math.max(1, targetCount * 55 / 100);
-        int restartCount = targetCount - eliteCount - diverseCount;
+        int eliteCount   = Math.max(1, targetCount * elitePct   / 100);
+        int diverseCount = Math.max(1, targetCount * diversePct / 100);
+        int restartCount = Math.max(1, targetCount - eliteCount - diverseCount);
 
         List<int[]> result    = new ArrayList<>(targetCount);
         List<int[]> eliteList = new ArrayList<>(eliteCount);
