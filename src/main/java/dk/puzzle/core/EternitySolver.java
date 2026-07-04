@@ -59,6 +59,7 @@ public class EternitySolver implements Runnable {
         t.setPriority(Thread.MIN_PRIORITY);
         return t;
     });
+    private final java.util.concurrent.atomic.AtomicInteger pendingAnalyses = new java.util.concurrent.atomic.AtomicInteger(0);
     private final java.util.concurrent.LinkedBlockingQueue<int[]> seedPool =
             new java.util.concurrent.LinkedBlockingQueue<>();
     private final Object displayLock = new Object();
@@ -1151,6 +1152,11 @@ public class EternitySolver implements Runnable {
         final int iterations = 100_000;
         logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
 
+        if (pendingAnalyses.get() >= 2) {
+            logger.info(">>> [FULL BOARD SCAN] Skipped — %d analyses already queued.", pendingAnalyses.get());
+            return;
+        }
+        pendingAnalyses.incrementAndGet();
         backgroundAnalysisExecutor.submit(() -> {
             try {
                 int[] bestConflicts = {Integer.MAX_VALUE};
@@ -1161,7 +1167,7 @@ public class EternitySolver implements Runnable {
                 if (totalConflicts < 30) {
                     logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
                 }
-                if (totalConflicts < conflictSaveThreshold.get() || baseScore > variantSaveThreshold.get()) {
+                if ((baseScore >= absoluteHighScore - 1) || (totalConflicts < conflictSaveThreshold.get() && baseScore > variantSaveThreshold.get())) {
                     saveFullBoardVariant(bestBoard, baseScore, totalConflicts);
                 } else {
                     logger.info(">>> [FULL BOARD SCAN] Not saved: %d conflicts >= threshold %d and base score %d <= variant threshold %d",
@@ -1169,6 +1175,8 @@ public class EternitySolver implements Runnable {
                 }
             } catch (Exception e) {
                 logger.error(">>> [FULL BOARD SCAN] Background analysis failed: " + e.getMessage(), e);
+            } finally {
+                pendingAnalyses.decrementAndGet();
             }
         });
     }
@@ -1333,6 +1341,7 @@ public class EternitySolver implements Runnable {
     }
 
     private void triggerBranchScrap() {
+        analyzeFullBoardPotential(bestBoard, deepestStep);
         consecutiveExtinctions++;
 
         // --- TRUE STAGNATION TRACKER (GPU) ---
@@ -1747,7 +1756,7 @@ public class EternitySolver implements Runnable {
                 }
                 writer.println(line);
             }
-            logger.info(String.format(">>> Saved raw board text for BoardImporter: Raw_Board_Output_%d.txt", baseScore));
+            logger.info(String.format(">>> [FULL BOARD SCAN] Saved raw board text for BoardImporter: Raw_Board_Output_%d.txt", baseScore));
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving Raw Board Text: %s", e.getMessage()));
         }

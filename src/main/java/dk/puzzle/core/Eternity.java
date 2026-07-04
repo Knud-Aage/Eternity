@@ -144,67 +144,11 @@ public class Eternity {
                     jlabelSurgeonHoles.setText("Surgeon Holes (LNS): " + value);
                 });
 
-                // 3. Base Camp Override Slider
-                JLabel campLabel = new JLabel("Force Next Base Camp: 70");
-                campLabel.setFont(labelFont);
-                campLabel.setForeground(textColor);
-                campLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-                JSlider campSlider = new JSlider(0, 200, 70);
-                campSlider.setBackground(new Color(40, 42, 45));
-                campSlider.setMajorTickSpacing(50);
-                campSlider.setMinorTickSpacing(10);
-                campSlider.setPaintTicks(true);
-                campSlider.addChangeListener(e -> campLabel.setText("Force Next Base Camp: " + campSlider.getValue()));
-
-                // 4. Override Button
-                JButton forceBtn = new JButton("FORCE JUMP!");
-                forceBtn.setFont(new Font("Arial", Font.BOLD, 16));
-                forceBtn.setBackground(new Color(200, 50, 50));
-                forceBtn.setForeground(Color.WHITE);
-                forceBtn.setAlignmentX(Component.CENTER_ALIGNMENT);
-                forceBtn.addActionListener(e -> pbpSolver.triggerManualOverride(campSlider.getValue()));
-
-                controlPanel.add(Box.createVerticalStrut(50));
-
-                controlPanel.add(campLabel);
-                controlPanel.add(Box.createVerticalStrut(10));
-                controlPanel.add(campSlider);
-                controlPanel.add(Box.createVerticalStrut(20));
-                controlPanel.add(forceBtn);
-
-                controlPanel.add(jlabelCpuDepth);
-                controlPanel.add(cpuDepthSlider);
-                controlPanel.add(jlabelSurgeonHoles);
-                controlPanel.add(surgeonHolesSlider);
-
-                JLabel stagLabel = new JLabel("Auto-Reset Timeout: 20 min");
-                stagLabel.setFont(labelFont);
-                stagLabel.setForeground(textColor);
-                stagLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
-
-                JSlider stagSlider = new JSlider(5, 120, 20);
-                stagSlider.setBackground(new Color(40, 42, 45));
-                stagSlider.setMajorTickSpacing(30);
-                stagSlider.setMinorTickSpacing(5);
-                stagSlider.setPaintTicks(true);
-                stagSlider.addChangeListener(e -> {
-                    stagLabel.setText("Auto-Reset Timeout: " + stagSlider.getValue() + " min");
-                    pbpSolver.setStagnationLimit(stagSlider.getValue());
-                });
-
-                controlPanel.add(Box.createVerticalStrut(30));
-                controlPanel.add(stagLabel);
-                controlPanel.add(Box.createVerticalStrut(10));
-                controlPanel.add(stagSlider);
-
-                // --- NEW: DEEP VARIANT SAVE THRESHOLD SLIDER ---
                 JLabel thresholdLabel = new JLabel("Save Variants At Depth: 198");
                 thresholdLabel.setFont(labelFont);
                 thresholdLabel.setForeground(textColor);
                 thresholdLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-                // Range from 50 to 256, default starting at 198
                 JSlider thresholdSlider = new JSlider(JSlider.HORIZONTAL, 190, 256, 208);
                 thresholdSlider.setBackground(new Color(40, 42, 45));
                 thresholdSlider.setMajorTickSpacing(10);
@@ -216,7 +160,6 @@ public class Eternity {
                     int val = thresholdSlider.getValue();
                     thresholdLabel.setText("Save Variants At Depth: " + val);
 
-                    // Only send the command to the solver when the user stops dragging
                     if (!thresholdSlider.getValueIsAdjusting()) {
                         pbpSolver.setVariantSaveThreshold(val);
                     }
@@ -233,7 +176,6 @@ public class Eternity {
                 conflictLabel.setForeground(textColor);
                 conflictLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-                // Range 0–120; default 60. Lower = stricter (fewer boards saved).
                 JSlider conflictSlider = new JSlider(JSlider.HORIZONTAL, 0, 120, 60);
                 conflictSlider.setBackground(new Color(40, 42, 45));
                 conflictSlider.setMajorTickSpacing(20);
