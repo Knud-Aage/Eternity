@@ -38,6 +38,16 @@ public class EternitySolver implements Runnable {
     // GUI configurable parameters
     public static volatile int userCpuHandoffDepth = 8;
     public static volatile int userSurgeonHoles = 20;
+    // % of CPU cores that hard-ban the poisoned Vanguard frontier; the rest
+    // always run unconstrained so the seed pool (and GPU) never fully starves.
+    // Lowered from 75 after testing showed 75% could starve the GPU entirely;
+    // low values fed the GPU far better, so default conservatively low.
+    public static volatile int userVanguardPct = 10;
+    // How many frontier pieces the Vanguard ban demands avoiding, before any
+    // adaptive shrinking on repeated deadlock. Lower = easier to satisfy = seeds
+    // (and therefore the GPU) flow more freely, at the cost of less forced
+    // diversity per retreat. Lowered from 15.
+    public static volatile int userPoisonBanLength = 8;
     final SurgeonHeuristics surgeon;
     final ConflictReducer conflictReducer;
     //    final int[] tabuTenure = new int[256];
@@ -111,6 +121,9 @@ public class EternitySolver implements Runnable {
     private volatile int currentSeedDepth = SEED_DEPTH;
     private int currentRepairIteration = 0;
     private int consecutiveExtinctions = 0;
+    // How many Phase 1 Vanguard attempts in a row have proven the full-length
+    // ban infeasible. Used to shrink banLength adaptively — see runPhase1_CpuSeedGen.
+    private int consecutivePhase1Deadlocks = 0;
     private volatile int lastReportedDepth = 0;
     private int consecutiveGpuStagnation = 0;
     private int phaseCounter = 0; // For GPU Scheduling
@@ -363,12 +376,15 @@ public class EternitySolver implements Runnable {
         run3PhasePipeline();
     }
 
+    // GpuEngine pre-allocates device buffers for at most MAX_BOARDS (16,000)
+    // boards — never return more than that here or in userBatchSizeOverride,
+    // or the GPU memcpy will overrun the allocated buffer.
     private int getDynamicBatchSize() {
         if (deepestStep >= 200) {
-            return 250;
+            return 2000; // was 250 — endgame batches were starving the GPU of parallelism
         }
         if (deepestStep >= 180) {
-            return 1000;
+            return 4000; // was 1000
         }
         if (deepestStep >= 100) {
             return 5000;
@@ -486,6 +502,14 @@ public class EternitySolver implements Runnable {
                 if (userBatchSizeOverride > 0) {
                     activeBatch = userBatchSizeOverride;
                 }
+                // Gate Phase 2 readiness on a small floor, not the full activeBatch.
+                // runPhase2_GpuDeepDfs already tolerates polling fewer seeds than
+                // activeBatch (it just launches with whatever it gets) — requiring
+                // the FULL batch to accumulate first just means a large batch size
+                // (e.g. a big manual override) forces long GPU-idle stretches while
+                // Phase 1 fills the pool, instead of launching smaller/more frequent
+                // bursts and keeping the GPU's duty cycle high.
+                int minSeedsToRun = Math.min(activeBatch, 250);
 
                 if (this.useGpu) {
                     int currentSeeds = seedPool.size();
@@ -507,6 +531,12 @@ public class EternitySolver implements Runnable {
                         boolean wasPoisoned = checkPoisonAndRetreat(currentDeadEndHash, deepestStep);
 
                         if (!wasPoisoned) {
+                            // Top flatResumeBoard back up from bestBoard first, so the
+                            // prefix we're about to "keep" below is real piece data and
+                            // not holes left over from an earlier drain (see
+                            // refreshAndCountBaseCamp for why this is needed).
+                            refreshAndCountBaseCamp();
+
                             int deadEndDepth = deepestStep;
 
                             // Calculate which row the engine died on (16 pieces per row)
@@ -554,7 +584,7 @@ public class EternitySolver implements Runnable {
 
                 if (this.useGpu && this.gpuEngine != null) {
                     if (deepestStep >= LNS_THRESHOLD) {
-                        boolean seedsReady = seedPool.size() >= activeBatch;
+                        boolean seedsReady = seedPool.size() >= minSeedsToRun;
 
                         // phaseCounter counts only Phase 3 completions.
                         // Phase 2 refresh fires every refreshInterval Phase 3 rounds.
@@ -578,7 +608,7 @@ public class EternitySolver implements Runnable {
                             runPhase3_GpuSurgeon();
                             phaseCounter++; // Only Phase 3 runs advance the counter
                         }
-                    } else if (seedPool.size() >= activeBatch) {
+                    } else if (seedPool.size() >= minSeedsToRun) {
                         runPhase2_GpuDeepDfs();
                         if (seedPool.size() >= activeBatch) {
                             logger.warn(">>> Phase 2 traffic jam (Standard Mode)! Force-clearing the pool.");
@@ -681,9 +711,13 @@ public class EternitySolver implements Runnable {
 
         Set<Integer> dominantFrontierPieces = new java.util.HashSet<>();
 
-        // We must ban a MASSIVE chunk of the poisoned tree, not just the first step!
-        // This forces the CPU to build a radically alien foundation.
-        int banLength = 15;
+        // Ban a chunk of the poisoned tree, not just the first step, to force the
+        // CPU to build a meaningfully different foundation. But demanding the
+        // full-length ban forever just cascades the base camp down further every
+        // time it proves infeasible (see consecutivePhase1Deadlocks) — so soften
+        // it a step at a time once CPU has shown the current length can't be
+        // satisfied, and go back to full strength as soon as it succeeds again.
+        int banLength = Math.max(3, userPoisonBanLength - consecutivePhase1Deadlocks * 3);
         int frontierEnd = Math.min(256, lockedPieces + banLength);
 
         for (int i = lockedPieces; i < frontierEnd; i++) {
@@ -706,8 +740,19 @@ public class EternitySolver implements Runnable {
 
             List<CpuSearchWorker> workers = new ArrayList<>();
 
+            // Reserve a slider-controlled fraction of cores to always run
+            // unconstrained, even while the Vanguard ban is active. Without this,
+            // a hard-to-satisfy ban can make ALL cores fail in the same round,
+            // leaving seedPool empty and starving the GPU while Phase 1 retries.
+            // The reserved cores keep seeds flowing continuously; the rest still
+            // chase the full ban for diversity. userVanguardPct=100 restores the
+            // original all-cores-banned behavior (no safety net).
+            int unconstrainedCores = dominantFrontierPieces.isEmpty()
+                    ? numCores
+                    : Math.round(numCores * (100 - userVanguardPct) / 100f);
+
             for (int i = 0; i < numCores; i++) {
-                if (!dominantFrontierPieces.isEmpty()) {
+                if (!dominantFrontierPieces.isEmpty() && i >= unconstrainedCores) {
                     // Vanguard workers must survive for 'banLength' steps without touching ANY of the poisoned pieces!
                     workers.add(new CpuSearchWorker(activeBatch, dominantFrontierPieces, lockedPieces, lockedPieces + banLength));
                 } else {
@@ -718,8 +763,8 @@ public class EternitySolver implements Runnable {
             if (!dominantFrontierPieces.isEmpty()) {
                 long now = System.currentTimeMillis();
                 if (now - lastVanguardLogTime > 10000) {
-                    logger.info(">>> [GENETIC EXPLORATION] 100%% Vanguard Threads. Hard-banning the next %d poisoned pieces at depth %d.",
-                            dominantFrontierPieces.size(), lockedPieces);
+                    logger.info(">>> [GENETIC EXPLORATION] %d/%d Vanguard Threads. Hard-banning the next %d poisoned pieces (ban length %d) at depth %d.",
+                            numCores - unconstrainedCores, numCores, dominantFrontierPieces.size(), banLength, lockedPieces);
                     lastVanguardLogTime = now;
                 }
             }
@@ -736,11 +781,21 @@ public class EternitySolver implements Runnable {
             if (this.useGpu && seedPool.isEmpty()) {
                 logger.warn(">>> [PHASE 1 DEADLOCK] CPU proved that NO alternative seeds exist for this Base Camp!");
                 consecutiveExtinctions++;
+                if (!dominantFrontierPieces.isEmpty()) {
+                    consecutivePhase1Deadlocks++;
+                }
                 triggerBranchScrap();
             } else if (!this.useGpu) {
                 logger.warn(">>> [CPU DEADLOCK] Exhausted branch without finding a solution. Tearing down...");
                 consecutiveExtinctions++;
+                if (!dominantFrontierPieces.isEmpty()) {
+                    consecutivePhase1Deadlocks++;
+                }
                 triggerBranchScrap();
+            } else if (!dominantFrontierPieces.isEmpty()) {
+                // Vanguard workers found valid seeds at this ban length — back off
+                // the softening and demand the full ban again next time.
+                consecutivePhase1Deadlocks = 0;
             }
         } catch (InterruptedException e) {
         }
@@ -839,7 +894,7 @@ public class EternitySolver implements Runnable {
             if (deepestStep > variantSaveThreshold.get()) {
                 int hash = Arrays.hashCode(bestBoard);
                 if (savedVariantHashes.add(hash)) {
-                    logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
+//                    logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
                     logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
                     analyzeFullBoardPotential(bestBoard, deepestStep);
                 }
@@ -1015,7 +1070,7 @@ public class EternitySolver implements Runnable {
             if (deepestStep > variantSaveThreshold.get()) {
                 int hash = Arrays.hashCode(bestBoard);
                 if (savedVariantHashes.add(hash)) {
-                    logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
+//                    logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
                     analyzeFullBoardPotential(bestBoard, deepestStep);
                 }
             }
@@ -1169,7 +1224,7 @@ public class EternitySolver implements Runnable {
         int numEmpty = 0;
         for (int p : boardCopy) if (p == -1 || p == -2) numEmpty++;
         final int iterations = 200_000;
-        logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
+//        logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
 
         if (pendingAnalyses.get() >= 2) {
             logger.info(">>> [FULL BOARD SCAN] Skipped — %d analyses already queued.", pendingAnalyses.get());
@@ -1189,7 +1244,7 @@ public class EternitySolver implements Runnable {
                 }
 
                 logger.info(">>> [FULL BOARD SCAN] Best result: %d / 480 edge conflicts after %,d iterations", totalConflicts, iterations);
-                if (totalConflicts < 30) {
+                if (totalConflicts < 25) {
                     logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
                 }
 
@@ -1375,6 +1430,33 @@ public class EternitySolver implements Runnable {
         return bestBoard;
     }
 
+    /**
+     * Tops flatResumeBoard back up from bestBoard whenever bestBoard genuinely
+     * holds more placed pieces than flatResumeBoard currently does. flatResumeBoard
+     * is only ever eroded — here in triggerBranchScrap's teardown and in the
+     * SMART RETREAT watchdog — with nothing else to refill it, so without this
+     * check every retreat digs a little deeper into an already-hollowed-out
+     * board and the "kept" prefix ends up being holes rather than real pieces.
+     * Gating on a rare all-time peak isn't enough, since erosion happens on
+     * every teardown call, far more often than new peaks occur.
+     *
+     * @return the count of real (non-empty) pieces in flatResumeBoard after
+     *         this call, i.e. max(previous count, deepestStep).
+     */
+    private int refreshAndCountBaseCamp() {
+        int currentBaseCamp = 0;
+        for (int p : flatResumeBoard) {
+            if (p != -1 && p != -2) {
+                currentBaseCamp++;
+            }
+        }
+        if (deepestStep > currentBaseCamp) {
+            System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
+            currentBaseCamp = deepestStep;
+        }
+        return currentBaseCamp;
+    }
+
     private void triggerBranchScrap() {
         analyzeFullBoardPotential(bestBoard, deepestStep);
         consecutiveExtinctions++;
@@ -1384,12 +1466,6 @@ public class EternitySolver implements Runnable {
         if (deepestStep > absolutePeakDepth) {
             absolutePeakDepth = deepestStep;
             trueStagnationCounter = 0; // We broke the ALL-TIME record! Reset the bomb.
-
-            // Bank this genuine forward progress into the CPU base camp. Without
-            // this, flatResumeBoard is only ever eroded (below, and in the SMART
-            // RETREAT watchdog) and never refilled, so it drains to 0 over many
-            // teardown cycles regardless of how deep the search actually gets.
-            System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
         } else {
             trueStagnationCounter++;   // Stuck in a Yo-Yo loop.
         }
@@ -1405,15 +1481,7 @@ public class EternitySolver implements Runnable {
         }
 
         // --- CALCULATE THE CURRENT FOUNDATION ---
-        int currentBaseCamp = 0;
-        for (int p : flatResumeBoard) {
-            if (p != -1 && p != -2) {
-                currentBaseCamp++;
-            }
-        }
-        if (currentBaseCamp == 0) {
-            currentBaseCamp = deepestStep;
-        }
+        int currentBaseCamp = refreshAndCountBaseCamp();
 
         int lockedPieces;
 
@@ -2113,7 +2181,7 @@ public class EternitySolver implements Runnable {
                         if (!useGpu && deepestStep > variantSaveThreshold.get()) {
                             int variantHash = Arrays.hashCode(bestBoard);
                             if (savedVariantHashes.add(variantHash)) {
-                                logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
+//                                logger.info(">>> [HIGH DEPTH VARIANT] Unique %d-piece board detected! Generating Full Board Variant...", deepestStep);
                                 analyzeFullBoardPotential(bestBoard, deepestStep);
                             }
                         }

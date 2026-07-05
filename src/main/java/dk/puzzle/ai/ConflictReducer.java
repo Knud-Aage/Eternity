@@ -192,11 +192,11 @@ public class ConflictReducer {
             int afterRotation = rotationPass(board);
             int afterSwap     = swapPass(board);
 
-            if (verbose) {
-                logger.info(String.format(
-                        ">>> [CONFLICT REDUCER] Pass %d: %d → rot→%d → swap→%d",
-                        pass + 1, current, afterRotation, afterSwap));
-            }
+//            if (verbose) {
+//                logger.info(String.format(
+//                        ">>> [CONFLICT REDUCER] Pass %d: %d → rot→%d → swap→%d",
+//                        pass + 1, current, afterRotation, afterSwap));
+//            }
 
             if (afterSwap >= current) break; // no improvement — stop early
             current = afterSwap;
