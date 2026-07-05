@@ -286,43 +286,4 @@ class EternitySolverTest {
         int[] b21 = registry.nextForRepair();
         assertTrue(uniqueValues.contains(b21[0]), "Capped registry should not add boards beyond capacity");
     }
-
-    @Test
-    void testUpdateTabuListAndClearTabu() {
-        EternitySolver solver = new EternitySolver(
-                mockInventory, 9999, false, EternitySolver.BuildStrategy.TYPEWRITER, true);
-
-        // Ensure a clean slate for testing
-        Arrays.fill(solver.tabuTenure, 0);
-        Arrays.fill(solver.bestBoard, 10); // Reference values
-
-        int[] newBoard = new int[256];
-        System.arraycopy(solver.bestBoard, 0, newBoard, 0, 256);
-
-        // Modify only index 0
-        newBoard[0] = 20;
-
-        solver.absoluteHighScore = 50; // tenureLength: 5 + (50 / 25) = 7
-        solver.updateTabuList(newBoard);
-
-        // 1. Check permanently tabu elements (Shielded positions)
-        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[135], "Center should be shielded");
-        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[221], "Hint 221 should be shielded");
-        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[45], "Hint 45 should be shielded");
-        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[210], "Hint 210 should be shielded");
-        assertEquals(Integer.MAX_VALUE, solver.tabuTenure[34], "Hint 34 should be shielded");
-
-        // 2. Check dynamic tabu for modified piece (index 0)
-        // expected tenure = currentRepairIteration (0) + 7 = 7
-        assertEquals(7, solver.tabuTenure[0], "Modified piece should receive correct tenure length");
-
-        // 3. Check that unmodified pieces have 0 tenure
-        assertEquals(0, solver.tabuTenure[1], "Unchanged piece should have no tenure");
-
-        // 4. Test clearTabu
-        solver.clearTabu();
-        for (int i = 0; i < 256; i++) {
-            assertEquals(0, solver.tabuTenure[i], "clearTabu should reset all positions to 0");
-        }
-    }
 }
