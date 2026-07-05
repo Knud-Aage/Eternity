@@ -1,5 +1,6 @@
 package dk.puzzle.core;
 
+import dk.puzzle.ai.ConflictReducer;
 import dk.puzzle.ai.SeedSelector;
 import dk.puzzle.ai.SurgeonHeuristics;
 import dk.puzzle.gpu.GpuEngine;
@@ -38,6 +39,7 @@ public class EternitySolver implements Runnable {
     public static volatile int userCpuHandoffDepth = 8;
     public static volatile int userSurgeonHoles = 20;
     final SurgeonHeuristics surgeon;
+    final ConflictReducer conflictReducer;
     //    final int[] tabuTenure = new int[256];
     final int[] buildOrder = new int[256];
     final int[] bestBoard = new int[256];
@@ -87,6 +89,11 @@ public class EternitySolver implements Runnable {
     volatile int userBatchSizeOverride = -1;
     volatile int absoluteHighScore = 0;
     volatile int deepestStep = 0;
+    // Lowest full-board (256-piece) edge-conflict count found so far by the
+    // background Monte Carlo fill, ratcheting down across batches instead of
+    // each analyzeFullBoardPotential() call starting from scratch.
+    private volatile int bestFullBoardConflicts = Integer.MAX_VALUE;
+    private final int[] bestFullBoardEver = new int[256];
     volatile boolean manualOverrideRequested = false;
     volatile int manualBaseCampTarget = 0;
     volatile double extinctionThreshold = 0.98;
@@ -194,6 +201,7 @@ public class EternitySolver implements Runnable {
 
         this.compatIndex = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
         this.surgeon = new SurgeonHeuristics(lockCenter, 0.70);
+        this.conflictReducer = new ConflictReducer(inventory, lockCenter);
 
         loadCheckpointAndHints();
     }
@@ -487,7 +495,7 @@ public class EternitySolver implements Runnable {
                         lastSeedCount = currentSeeds;
                     } else if (System.currentTimeMillis() - lastSeedGrowthTime > 5000) {
 
-                        logger.warn(">>> Watchdog: Endgame Starvation Triggered! Executing immediate retreat.");
+//                        logger.warn(">>> Watchdog: Endgame Starvation Triggered! Executing immediate retreat.");
 
                         // 1. Clear the queue instantly so we don't waste time processing a dead branch
                         if (seedPool != null) {
@@ -508,8 +516,8 @@ public class EternitySolver implements Runnable {
                             int rollbackRow = Math.max(1, failedRow - 4);
                             int newSeedDepth = rollbackRow * 16;
 
-                            logger.warn(String.format(">>> [SMART RETREAT] Starved at depth %d. Rolling Base Camp to Row %d (Depth %d)",
-                                    deadEndDepth, rollbackRow, newSeedDepth));
+//                            logger.warn(String.format(">>> [SMART RETREAT] Starved at depth %d. Rolling Base Camp to Row %d (Depth %d)",
+//                                    deadEndDepth, rollbackRow, newSeedDepth));
 
                             // Sync the depth so the engine knows where it is
                             deepestStep = newSeedDepth;
@@ -661,7 +669,7 @@ public class EternitySolver implements Runnable {
 
         if (lockedPieces <= 5) {
             currentSeedDepth = 16;
-            logger.info(">>> [PHASE 1] Empty board. Setting fast GPU handoff depth to: " + currentSeedDepth);
+        //            logger.info(">>> [PHASE 1] Empty board. Setting fast GPU handoff depth to: " + currentSeedDepth);
         } else if (this.lockCenter && lockedPieces < SEED_DEPTH) {
             currentSeedDepth = lockedPieces + dynamicOffset;
         } else if (lockedPieces < SEED_DEPTH) {
@@ -848,6 +856,7 @@ public class EternitySolver implements Runnable {
             if (deepestStep > absoluteHighScore) {
                 absoluteHighScore = deepestStep;
                 System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+                System.arraycopy(bestBoardOut, 0, flatResumeBoard, 0, 256);
 
                 int hash = Arrays.hashCode(globalBestBoard);
                 logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", absoluteHighScore, hash);
@@ -870,7 +879,6 @@ public class EternitySolver implements Runnable {
         } else {
             // The GPU completely failed to beat the current local depth.
             consecutiveGpuStagnation++;
-//            analyzeFullBoardPotential(bestBoardOut, deepestStep);
         }
 
         // --- Seed generation for the next batch ---
@@ -888,6 +896,11 @@ public class EternitySolver implements Runnable {
             consecutiveExtinctions++;
             triggerBranchScrap();
         }
+
+        // Run the conflict-minimising analysis on the best board from THIS batch,
+        // win or not — background/throttled via pendingAnalyses, so this is safe
+        // to call every cycle rather than only on new records.
+        analyzeFullBoardPotential(bestBoard, deepestStep);
     }
 
     private void runPhase3_GpuSurgeon() {
@@ -1015,6 +1028,7 @@ public class EternitySolver implements Runnable {
                 absoluteHighScore = deepestStep;
                 lastReportedDepth = absoluteHighScore;
                 System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+                System.arraycopy(bestBoardOut, 0, flatResumeBoard, 0, 256);
 
                 int hash = Arrays.hashCode(globalBestBoard);
                 uniqueMaxScoreHashes.clear();
@@ -1040,6 +1054,11 @@ public class EternitySolver implements Runnable {
             consecutiveExtinctions++;
             triggerBranchScrap();
         }
+
+        // Run the conflict-minimising analysis on the best board from THIS batch,
+        // win or not — background/throttled via pendingAnalyses, so this is safe
+        // to call every cycle rather than only on new records.
+        analyzeFullBoardPotential(bestBoard, deepestStep);
     }
 
     private boolean checkPoisonAndRetreat(int currentBoardHash, int currentDepth) {
@@ -1163,11 +1182,27 @@ public class EternitySolver implements Runnable {
                 int[] bestBoard = monteCarloFillBoard(boardCopy, iterations, bestConflicts);
                 int totalConflicts = bestConflicts[0];
 
+                // Squeeze further via rotation/swap local search — cheap relative
+                // to the Monte Carlo fill and often finds a few more free wins.
+                if (totalConflicts > 0) {
+                    totalConflicts = conflictReducer.reducePostProcess(bestBoard, 50);
+                }
+
                 logger.info(">>> [FULL BOARD SCAN] Best result: %d / 480 edge conflicts after %,d iterations", totalConflicts, iterations);
                 if (totalConflicts < 30) {
                     logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
                 }
-                if ((baseScore >= absoluteHighScore - 1) || (totalConflicts < conflictSaveThreshold.get() && baseScore > variantSaveThreshold.get())) {
+
+                boolean newAllTimeLow = totalConflicts < bestFullBoardConflicts;
+                if (newAllTimeLow) {
+                    logger.warn(">>> [FULL BOARD RECORD] New all-time low: %d conflicts (previous best: %s)",
+                            totalConflicts, bestFullBoardConflicts == Integer.MAX_VALUE ? "none" : bestFullBoardConflicts);
+                    bestFullBoardConflicts = totalConflicts;
+                    System.arraycopy(bestBoard, 0, bestFullBoardEver, 0, 256);
+                }
+
+                if (newAllTimeLow || (baseScore >= absoluteHighScore - 1)
+                        || (totalConflicts < conflictSaveThreshold.get() && baseScore > variantSaveThreshold.get())) {
                     saveFullBoardVariant(bestBoard, baseScore, totalConflicts);
                 } else {
                     logger.info(">>> [FULL BOARD SCAN] Not saved: %d conflicts >= threshold %d and base score %d <= variant threshold %d",
@@ -1349,6 +1384,12 @@ public class EternitySolver implements Runnable {
         if (deepestStep > absolutePeakDepth) {
             absolutePeakDepth = deepestStep;
             trueStagnationCounter = 0; // We broke the ALL-TIME record! Reset the bomb.
+
+            // Bank this genuine forward progress into the CPU base camp. Without
+            // this, flatResumeBoard is only ever eroded (below, and in the SMART
+            // RETREAT watchdog) and never refilled, so it drains to 0 over many
+            // teardown cycles regardless of how deep the search actually gets.
+            System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
         } else {
             trueStagnationCounter++;   // Stuck in a Yo-Yo loop.
         }
@@ -1412,7 +1453,7 @@ public class EternitySolver implements Runnable {
         int newTargetDepth = Math.max(0, lockedPieces - 16);
         int piecesDropped = deepestStep - newTargetDepth;
 
-        logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping " + piecesDropped + " pieces to depth " + newTargetDepth + ".");
+//        logger.info(">>> [TEARDOWN] Deadlock trapped. Dropping " + piecesDropped + " pieces to depth " + newTargetDepth + ".");
 
         // CRITICAL: Update the ghost tracker
         deepestStep = newTargetDepth;
