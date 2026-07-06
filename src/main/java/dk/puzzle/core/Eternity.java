@@ -120,6 +120,20 @@ public class Eternity {
 
                 JLabel jlabelCpuDepth = new JLabel("CPU Handoff Depth: " + EternitySolver.userCpuHandoffDepth);
                 JLabel jlabelSurgeonHoles = new JLabel("Surgeon Holes (LNS): " + EternitySolver.userSurgeonHoles);
+                JLabel jlabelVanguardPct = new JLabel("Vanguard-Constrained Cores: " + EternitySolver.userVanguardPct + "%");
+                jlabelVanguardPct.setFont(labelFont);
+                jlabelVanguardPct.setForeground(textColor);
+                jlabelVanguardPct.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                JLabel jlabelPoisonBanLength = new JLabel("Poison Ban Length: " + EternitySolver.userPoisonBanLength);
+                jlabelPoisonBanLength.setFont(labelFont);
+                jlabelPoisonBanLength.setForeground(textColor);
+                jlabelPoisonBanLength.setAlignmentX(Component.CENTER_ALIGNMENT);
+
+                JLabel jlabelBatchOverride = new JLabel("GPU Batch Size Override: Auto");
+                jlabelBatchOverride.setFont(labelFont);
+                jlabelBatchOverride.setForeground(textColor);
+                jlabelBatchOverride.setAlignmentX(Component.CENTER_ALIGNMENT);
 
                 JSlider cpuDepthSlider = new JSlider(JSlider.HORIZONTAL, 2, 20, EternitySolver.userCpuHandoffDepth);
                 cpuDepthSlider.setMajorTickSpacing(2);
@@ -143,6 +157,60 @@ public class Eternity {
                     EternitySolver.userSurgeonHoles = value;
                     jlabelSurgeonHoles.setText("Surgeon Holes (LNS): " + value);
                 });
+
+                JSlider vanguardPctSlider = new JSlider(JSlider.HORIZONTAL, 0, 100, EternitySolver.userVanguardPct);
+                vanguardPctSlider.setMajorTickSpacing(20);
+                vanguardPctSlider.setMinorTickSpacing(5);
+                vanguardPctSlider.setPaintTicks(true);
+                vanguardPctSlider.setPaintLabels(true);
+
+                vanguardPctSlider.addChangeListener(e -> {
+                    int value = vanguardPctSlider.getValue();
+                    EternitySolver.userVanguardPct = value;
+                    jlabelVanguardPct.setText("Vanguard-Constrained Cores: " + value + "%");
+                });
+
+                JSlider poisonBanLengthSlider = new JSlider(JSlider.HORIZONTAL, 3, 20, EternitySolver.userPoisonBanLength);
+                poisonBanLengthSlider.setMajorTickSpacing(2);
+                poisonBanLengthSlider.setMinorTickSpacing(1);
+                poisonBanLengthSlider.setPaintTicks(true);
+                poisonBanLengthSlider.setPaintLabels(true);
+
+                poisonBanLengthSlider.addChangeListener(e -> {
+                    int value = poisonBanLengthSlider.getValue();
+                    EternitySolver.userPoisonBanLength = value;
+                    jlabelPoisonBanLength.setText("Poison Ban Length: " + value);
+                });
+
+                // 0 = Auto (use the depth-based getDynamicBatchSize tiers). Capped at
+                // 15,000 — GpuEngine pre-allocates device buffers for at most 16,000
+                // boards (MAX_BOARDS), so anything above that overruns the GPU buffer.
+                JSlider batchOverrideSlider = new JSlider(JSlider.HORIZONTAL, 0, 15000, 0);
+                batchOverrideSlider.setMajorTickSpacing(3000);
+                batchOverrideSlider.setMinorTickSpacing(500);
+                batchOverrideSlider.setPaintTicks(true);
+                batchOverrideSlider.setPaintLabels(true);
+
+                batchOverrideSlider.addChangeListener(e -> {
+                    int value = batchOverrideSlider.getValue();
+                    jlabelBatchOverride.setText("GPU Batch Size Override: " + (value == 0 ? "Auto" : String.valueOf(value)));
+                    if (!batchOverrideSlider.getValueIsAdjusting()) {
+                        pbpSolver.setBatchSizeOverride(value == 0 ? -1 : value);
+                    }
+                });
+
+                controlPanel.add(Box.createVerticalStrut(20));
+                controlPanel.add(jlabelVanguardPct);
+                controlPanel.add(Box.createVerticalStrut(5));
+                controlPanel.add(vanguardPctSlider);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(jlabelPoisonBanLength);
+                controlPanel.add(Box.createVerticalStrut(5));
+                controlPanel.add(poisonBanLengthSlider);
+                controlPanel.add(Box.createVerticalStrut(10));
+                controlPanel.add(jlabelBatchOverride);
+                controlPanel.add(Box.createVerticalStrut(5));
+                controlPanel.add(batchOverrideSlider);
 
                 JLabel thresholdLabel = new JLabel("Save Variants At Depth: 198");
                 thresholdLabel.setFont(labelFont);
