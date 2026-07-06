@@ -460,11 +460,26 @@ public class EternitySolver implements Runnable {
         logger.info(">>> Running 3-Phase Pipeline Orchestrator...");
         long lastPeriodicSave = System.currentTimeMillis();
 
+        // --- PROGRESS TRACKER ---
+        // Reports real solving progress over a rolling window (not instantaneous
+        // rate, which is too noisy/bursty to compare configs by — see the SPEED
+        // line discussion, and not the all-time record, which is rare enough
+        // (currently 220) that it tells you nothing on a minute-by-minute basis.
+        // windowMaxDepth tracks the highest depth actually touched in the last
+        // window, whether or not it ties/beats the session or all-time peak —
+        // that's the number that's actually comparable between two configs run
+        // for a few minutes each.
+        long lastProgressLogTime = System.currentTimeMillis();
+        int windowMaxDepth = deepestStep;
+        long lastProgressTrials = cumulativeTrials;
+
         long lastSeedGrowthTime = System.currentTimeMillis();
         int lastSeedCount = 0;
 
         while (true) {
             try {
+                windowMaxDepth = Math.max(windowMaxDepth, deepestStep);
+
                 if (manualOverrideRequested) {
                     manualOverrideRequested = false;
                     retreat(manualBaseCampTarget, ">>> User Override...");
@@ -499,6 +514,11 @@ public class EternitySolver implements Runnable {
                         boolean wasPoisoned = checkPoisonAndRetreat(currentDeadEndHash, deepestStep);
 
                         if (!wasPoisoned) {
+                            // Top flatResumeBoard back up from bestBoard first, so the
+                            // prefix we're about to "keep" below is real piece data and
+                            // not holes left over from an earlier drain (see
+                            // refreshAndCountBaseCamp for why this is needed).
+
                             int deadEndDepth = deepestStep;
 
                             // Calculate which row the engine died on (16 pieces per row)
@@ -597,6 +617,21 @@ public class EternitySolver implements Runnable {
                         CheckpointManager.saveSmartState(memoryToSave, saveProfile);
                     }
                     lastPeriodicSave = System.currentTimeMillis();
+                }
+
+                long sinceLastProgressLog = System.currentTimeMillis() - lastProgressLogTime;
+                if (sinceLastProgressLog > 60_000) {
+                    long trialsGain = cumulativeTrials - lastProgressTrials;
+                    double trialsPerSec = trialsGain / (sinceLastProgressLog / 1000.0);
+
+                    logger.info(">>> [PROGRESS] Last %.0fs: Highest depth touched %d/256 (all-time record: %d/256) | Trials: %,d (%,.0f/s avg)",
+                            sinceLastProgressLog / 1000.0,
+                            windowMaxDepth, absoluteHighScore,
+                            trialsGain, trialsPerSec);
+
+                    lastProgressLogTime = System.currentTimeMillis();
+                    windowMaxDepth = deepestStep;
+                    lastProgressTrials = cumulativeTrials;
                 }
             } catch (Exception e) {
                 logger.error(">>> [FATAL ERROR] PIPELINE CRASHED: ", e);
