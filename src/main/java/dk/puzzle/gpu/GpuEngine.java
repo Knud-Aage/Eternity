@@ -19,7 +19,7 @@ import static jcuda.driver.JCudaDriver.*;
  */
 public class GpuEngine {
 
-    private static final int MAX_BOARDS = 16_000;
+    private static final int MAX_BOARDS = 110_000;
 
     private CUfunction dfsFunction;
     private CUfunction repairFunction;

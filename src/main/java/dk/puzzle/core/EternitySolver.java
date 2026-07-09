@@ -1,5 +1,6 @@
 package dk.puzzle.core;
 
+import dk.puzzle.ai.ConflictReducer;
 import dk.puzzle.ai.SeedSelector;
 import dk.puzzle.ai.SurgeonHeuristics;
 import dk.puzzle.gpu.GpuEngine;
@@ -38,6 +39,7 @@ public class EternitySolver implements Runnable {
     public static volatile int userCpuHandoffDepth = 8;
     public static volatile int userSurgeonHoles = 20;
     final SurgeonHeuristics surgeon;
+    final ConflictReducer conflictReducer;
     //    final int[] tabuTenure = new int[256];
     final int[] buildOrder = new int[256];
     final int[] bestBoard = new int[256];
@@ -194,6 +196,7 @@ public class EternitySolver implements Runnable {
 
         this.compatIndex = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
         this.surgeon = new SurgeonHeuristics(lockCenter, 0.70);
+        this.conflictReducer = new ConflictReducer(inventory, lockCenter);
 
         loadCheckpointAndHints();
     }
@@ -1194,9 +1197,13 @@ public class EternitySolver implements Runnable {
         pendingAnalyses.incrementAndGet();
         backgroundAnalysisExecutor.submit(() -> {
             try {
-                int[] bestConflicts = {Integer.MAX_VALUE};
-                int[] bestBoard = monteCarloFillBoard(boardCopy, iterations, bestConflicts);
-                int totalConflicts = bestConflicts[0];
+                // MCV (most-constrained-variable) ordering: always fill whichever
+                // remaining hole has the most already-determined neighbour edges
+                // next, instead of a fixed/random visiting order. See
+                // ConflictReducer.mcvRestartFill's javadoc for why this beats a
+                // fixed back-to-front or row-order fill.
+                int[] bestBoard = conflictReducer.mcvRestartFill(boardCopy, iterations);
+                int totalConflicts = conflictReducer.countConflicts(bestBoard);
 
                 logger.info(">>> [FULL BOARD SCAN] Best result: %d / 480 edge conflicts after %,d iterations", totalConflicts, iterations);
                 if (totalConflicts < 30) {
@@ -1214,165 +1221,6 @@ public class EternitySolver implements Runnable {
                 pendingAnalyses.decrementAndGet();
             }
         });
-    }
-
-    /**
-     * Monte Carlo fill: randomly orders the empty spots, then for each spot places
-     * the unused piece (in any valid orientation) that produces the fewest conflicts
-     * with already-placed neighbours. Repeats {@code iterations} times and returns
-     * the board with the lowest total edge-conflict count.
-     */
-    private int[] monteCarloFillBoard(int[] fixedBoard, int iterations, int[] outBestConflicts) {
-        // --- identify empty spots and already-used physical pieces ---
-        boolean[] usedPhysical = new boolean[256];
-        List<Integer> emptyList = new ArrayList<>();
-
-        for (int i = 0; i < 256; i++) {
-            int p = fixedBoard[i];
-            if (p != -1 && p != -2) {
-                for (int oi = 0; oi < 1024; oi++) {
-                    if (inventory.allOrientations[oi] == p) {
-                        usedPhysical[inventory.physicalMapping[oi]] = true;
-                        break;
-                    }
-                }
-            } else {
-                emptyList.add(i);
-            }
-        }
-
-        int numEmpty = emptyList.size();
-        int[] emptyArr = new int[numEmpty];
-        for (int i = 0; i < numEmpty; i++) emptyArr[i] = emptyList.get(i);
-
-        // --- pre-compute edge flags and the set of orientations that satisfy
-        //     border constraints for each empty spot (done once, not per iteration) ---
-        boolean[] isNorthEdge = new boolean[256], isSouthEdge = new boolean[256];
-        boolean[] isWestEdge  = new boolean[256], isEastEdge  = new boolean[256];
-        int[][] spotValidOi   = new int[256][];
-        int[][] spotValidPhys = new int[256][];
-
-        for (int spot : emptyArr) {
-            isNorthEdge[spot] = (spot / 16 == 0);
-            isSouthEdge[spot] = (spot / 16 == 15);
-            isWestEdge[spot]  = (spot % 16 == 0);
-            isEastEdge[spot]  = (spot % 16 == 15);
-
-            // Two passes: count then fill, to avoid ArrayList overhead inside hot loop
-            int count = 0;
-            for (int oi = 0; oi < 1024; oi++) {
-                int p = inventory.allOrientations[oi];
-                if (isNorthEdge[spot] ? PieceUtils.getNorth(p) != 0 : PieceUtils.getNorth(p) == 0) continue;
-                if (isSouthEdge[spot] ? PieceUtils.getSouth(p) != 0 : PieceUtils.getSouth(p) == 0) continue;
-                if (isWestEdge[spot]  ? PieceUtils.getWest(p)  != 0 : PieceUtils.getWest(p)  == 0) continue;
-                if (isEastEdge[spot]  ? PieceUtils.getEast(p)  != 0 : PieceUtils.getEast(p)  == 0) continue;
-                count++;
-            }
-            spotValidOi[spot]   = new int[count];
-            spotValidPhys[spot] = new int[count];
-            int idx = 0;
-            for (int oi = 0; oi < 1024; oi++) {
-                int p = inventory.allOrientations[oi];
-                if (isNorthEdge[spot] ? PieceUtils.getNorth(p) != 0 : PieceUtils.getNorth(p) == 0) continue;
-                if (isSouthEdge[spot] ? PieceUtils.getSouth(p) != 0 : PieceUtils.getSouth(p) == 0) continue;
-                if (isWestEdge[spot]  ? PieceUtils.getWest(p)  != 0 : PieceUtils.getWest(p)  == 0) continue;
-                if (isEastEdge[spot]  ? PieceUtils.getEast(p)  != 0 : PieceUtils.getEast(p)  == 0) continue;
-                spotValidOi[spot][idx]   = oi;
-                spotValidPhys[spot][idx] = inventory.physicalMapping[oi];
-                idx++;
-            }
-        }
-
-        // --- Monte Carlo iterations ---
-        int[] bestBoard = null;
-        int bestConflicts = Integer.MAX_VALUE;
-
-        Random rng = new Random();
-        int[] order = Arrays.copyOf(emptyArr, numEmpty);
-        boolean[] localUsed = new boolean[256];
-        int[] board = new int[256];
-
-        for (int iter = 0; iter < iterations; iter++) {
-            System.arraycopy(fixedBoard, 0, board, 0, 256);
-            System.arraycopy(usedPhysical, 0, localUsed, 0, 256);
-
-            // Fisher-Yates shuffle of hole order
-            for (int i = numEmpty - 1; i > 0; i--) {
-                int j = rng.nextInt(i + 1);
-                int t = order[i]; order[i] = order[j]; order[j] = t;
-            }
-
-            for (int si = 0; si < numEmpty; si++) {
-                int spot = order[si];
-                int[] voi   = spotValidOi[spot];
-                int[] vphys = spotValidPhys[spot];
-                int vlen = voi.length;
-
-                int bestOi = -1, bestPhys = -1, bestScore = Integer.MAX_VALUE;
-
-                for (int vi = 0; vi < vlen; vi++) {
-                    int physId = vphys[vi];
-                    if (localUsed[physId]) continue;
-
-                    int p = inventory.allOrientations[voi[vi]];
-                    int score = 0;
-                    if (!isNorthEdge[spot] && board[spot - 16] != -1
-                            && PieceUtils.getNorth(p) != PieceUtils.getSouth(board[spot - 16])) score++;
-                    if (!isSouthEdge[spot] && board[spot + 16] != -1
-                            && PieceUtils.getSouth(p) != PieceUtils.getNorth(board[spot + 16])) score++;
-                    if (!isWestEdge[spot]  && board[spot - 1]  != -1
-                            && PieceUtils.getWest(p)  != PieceUtils.getEast(board[spot - 1]))  score++;
-                    if (!isEastEdge[spot]  && board[spot + 1]  != -1
-                            && PieceUtils.getEast(p)  != PieceUtils.getWest(board[spot + 1]))  score++;
-
-                    if (score < bestScore) {
-                        bestScore = score;
-                        bestOi   = voi[vi];
-                        bestPhys = physId;
-                        if (score == 0) break; // perfect fit — stop searching
-                    }
-                }
-
-                if (bestOi != -1) {
-                    board[spot] = inventory.allOrientations[bestOi];
-                    localUsed[bestPhys] = true;
-                } else {
-                    // No edge-valid piece left (extremely rare) — place anything unused
-                    for (int oi = 0; oi < 1024; oi++) {
-                        int physId = inventory.physicalMapping[oi];
-                        if (!localUsed[physId]) {
-                            board[spot] = inventory.allOrientations[oi];
-                            localUsed[physId] = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // count total internal edge conflicts
-            int conflicts = 0;
-            for (int row = 0; row < 16; row++) {
-                for (int col = 0; col < 16; col++) {
-                    int boardIdx = row * 16 + col;
-                    int p = board[boardIdx];
-                    if (p == -1) continue;
-                    if (col < 15 && PieceUtils.getEast(p)  != PieceUtils.getWest(board[boardIdx + 1]))  conflicts++;
-                    if (row < 15 && PieceUtils.getSouth(p) != PieceUtils.getNorth(board[boardIdx + 16])) conflicts++;
-                }
-            }
-
-            if (conflicts < bestConflicts) {
-                bestConflicts = conflicts;
-                bestBoard = Arrays.copyOf(board, 256);
-                if (bestConflicts == 0) {
-                    logger.warn(">>> [!!!] PERFECT FILL! Zero conflicts found after %,d Monte Carlo iterations!", iter + 1);
-                    break;
-                }
-            }
-        }
-
-        if (outBestConflicts != null && outBestConflicts.length > 0) outBestConflicts[0] = bestConflicts;
-        return bestBoard;
     }
 
     private void triggerBranchScrap() {
