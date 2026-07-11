@@ -6,7 +6,9 @@ import jcuda.Sizeof;
 import jcuda.driver.*;
 import jcuda.runtime.JCuda;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import static jcuda.driver.JCudaDriver.*;
 
 /**
@@ -38,8 +40,17 @@ public class GpuEngine {
     private final boolean lockCenter;
     private final long stepBudget;
 
+    // Reverse lookup (packed piece value -> physical id), built once so seed
+    // boards can be flattened with their physical ids already resolved —
+    // avoids the kernel having to linear-scan c_allOrientations (up to 1024
+    // entries) for every already-placed piece on every launch. Populated in
+    // orientation-index order so it agrees with the kernel's old behaviour
+    // of taking the first (lowest-index) match on any accidental collision.
+    private final Map<Integer, Integer> pieceValueToPhysicalId;
+
     // Persistent device buffers — allocated once, reused every launch
     private CUdeviceptr d_partialBoards;
+    private CUdeviceptr d_partialBoardPhysIds;
     private CUdeviceptr d_solution;
     private CUdeviceptr d_solvedFlag;
     private CUdeviceptr d_gpuHighScore;
@@ -52,6 +63,10 @@ public class GpuEngine {
         this.inventory  = inventory;
         this.lockCenter = lockCenter;
         this.stepBudget = lockCenter ? STEP_BUDGET_LOCKED : STEP_BUDGET_UNLOCKED;
+        this.pieceValueToPhysicalId = new HashMap<>();
+        for (int o = 0; o < 1024; o++) {
+            pieceValueToPhysicalId.putIfAbsent(inventory.allOrientations[o], inventory.physicalMapping[o]);
+        }
         initCUDA(buildOrder);
     }
 
@@ -88,7 +103,8 @@ public class GpuEngine {
     }
 
     private void allocatePersistentBuffers() {
-        d_partialBoards = alloc((long) MAX_BOARDS * 256 * Sizeof.INT);
+        d_partialBoards        = alloc((long) MAX_BOARDS * 256 * Sizeof.INT);
+        d_partialBoardPhysIds  = alloc((long) MAX_BOARDS * 256 * Sizeof.INT);
         d_solution      = alloc(256L * Sizeof.INT);
         d_solvedFlag    = alloc(Sizeof.INT);
         d_gpuHighScore  = alloc(Sizeof.INT);
@@ -111,11 +127,21 @@ public class GpuEngine {
         int numBoards = seeds.size();
         if (numBoards == 0) return new GpuResult(currentHighScore, false, 0, new int[0]);
 
-        int[] flatBoards = new int[numBoards * 256];
-        for (int i = 0; i < numBoards; i++)
-            System.arraycopy(seeds.get(i), 0, flatBoards, i * 256, 256);
+        int[] flatBoards  = new int[numBoards * 256];
+        int[] flatPhysIds = new int[numBoards * 256];
+        for (int i = 0; i < numBoards; i++) {
+            int[] seed = seeds.get(i);
+            System.arraycopy(seed, 0, flatBoards, i * 256, 256);
+            for (int c = 0; c < 256; c++) {
+                int piece = seed[c];
+                flatPhysIds[i * 256 + c] = piece == -1
+                        ? -1
+                        : pieceValueToPhysicalId.getOrDefault(piece, -1);
+            }
+        }
 
-        cuMemcpyHtoD(d_partialBoards, Pointer.to(flatBoards),           (long) numBoards * 256 * Sizeof.INT);
+        cuMemcpyHtoD(d_partialBoards,       Pointer.to(flatBoards),    (long) numBoards * 256 * Sizeof.INT);
+        cuMemcpyHtoD(d_partialBoardPhysIds, Pointer.to(flatPhysIds),   (long) numBoards * 256 * Sizeof.INT);
         cuMemcpyHtoD(d_solvedFlag,    Pointer.to(new int[]{0}),         Sizeof.INT);
         cuMemcpyHtoD(d_gpuHighScore,  Pointer.to(new int[]{currentHighScore}), Sizeof.INT);
         cuMemcpyHtoD(d_totalSteps,    Pointer.to(new long[]{0L}),       Sizeof.LONG);
@@ -133,7 +159,8 @@ public class GpuEngine {
                 Pointer.to(new int[]{lockCenter ? 1 : 0}),
                 Pointer.to(d_threadDepths),
                 Pointer.to(new int[]{0}),
-                Pointer.to(new long[]{stepBudget})
+                Pointer.to(new long[]{stepBudget}),
+                Pointer.to(d_partialBoardPhysIds)
         );
 
         int blockSize = 256;

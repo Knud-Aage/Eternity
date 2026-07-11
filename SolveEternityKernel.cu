@@ -158,7 +158,8 @@ extern "C" __global__ void solvePBP(
     int lockCenterFlag,
     int* d_threadDepths,
     int* p_radarLimit,
-    unsigned long long stepBudget
+    unsigned long long stepBudget,
+    const int* d_partialBoardPhysIds
 )
 {
     __shared__ short sm_byNorth     [NUM_COLORS * MAX_PER_COLOR];
@@ -186,12 +187,9 @@ extern "C" __global__ void solvePBP(
         placedOrientIdx[i] = -1;
         if (board[i] != -1) {
             piecesNow++;
-            for (int o = 0; o < 1024; o++) {
-                if (c_allOrientations[o] == board[i]) {
-                    int physId = c_physicalMapping[o];
-                    inventoryMask[physId/64] &= ~(1ULL << (physId%64));
-                    break;
-                }
+            int physId = d_partialBoardPhysIds[offset + i];
+            if (physId >= 0) {
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
             }
         }
     }
