@@ -7,6 +7,9 @@ import dk.puzzle.model.CompatibilityIndex;
 import dk.puzzle.model.PieceInventory;
 import dk.puzzle.util.PieceUtils;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -50,6 +53,8 @@ public class HoleSolver {
     // Generous but bounded, so a genuinely unsatisfiable hole shape fails fast
     // instead of hanging forever.
     private static final long STEP_BUDGET_PER_REGION = 200_000_000L;
+
+    private static final String PHYSICAL_LAYOUT_FILE = "physical_layout.txt";
 
     public static void main(String[] args) {
         if (args.length < 1) {
@@ -175,6 +180,7 @@ public class HoleSolver {
         System.out.println("=== " + solvedRegions + "/" + regions.size() + " region(s) solved exactly. " +
                 "Remaining unsolved cells: " + (256 - countPlaced(finalBoard)) + " ===");
 
+        int[] repaired = null;
         if (solvedRegions < regions.size()) {
             // Exact search couldn't reach zero conflicts for every region —
             // proves some conflict is unavoidable with this exact piece pool.
@@ -193,7 +199,7 @@ public class HoleSolver {
             ConflictReducer reducer = new ConflictReducer(inventory, false);
             int conflictsBefore = reducer.countConflicts(finalBoard);
 
-            int[] repaired = Arrays.copyOf(finalBoard, 256);
+            repaired = Arrays.copyOf(finalBoard, 256);
             for (int cell : unsolvedCells) repaired[cell] = -1;
 
             repaired = reducer.mcvRestartFill(repaired, 200_000);
@@ -207,6 +213,64 @@ public class HoleSolver {
 
         String link = BucasExporter.exportBoard(finalBoard);
         System.out.println(link);
+
+        writePhysicalLayoutFile(inventory, finalBoard, repaired);
+    }
+
+    // ------------------------------------------------------------------
+    // Physical piece layout export — for placing a solution on the real
+    // Eternity II board. Reports each cell's real physical piece number
+    // (the numbering already baked into pieces.csv, row i -> piece i) and
+    // how many 90-degree CLOCKWISE turns to apply from that piece's
+    // reference orientation as recorded in pieces.csv (rotation 0).
+    // ------------------------------------------------------------------
+
+    private static void writePhysicalLayoutFile(PieceInventory inventory, int[] finalBoard, int[] repaired) {
+        try (PrintWriter out = new PrintWriter(new FileWriter(PHYSICAL_LAYOUT_FILE))) {
+            if (repaired != null) {
+                writePhysicalLayout(out, "Heuristic fallback board (repaired)", repaired, inventory);
+            }
+            writePhysicalLayout(out, "Final board", finalBoard, inventory);
+            System.out.println();
+            System.out.println("Physical piece layout written to " + PHYSICAL_LAYOUT_FILE);
+        } catch (IOException e) {
+            System.out.println("WARNING: couldn't write " + PHYSICAL_LAYOUT_FILE + ": " + e.getMessage());
+        }
+    }
+
+    private static void writePhysicalLayout(PrintWriter out, String label, int[] board, PieceInventory inventory) {
+        out.println("=== " + label + " (" + findConflicts(board).size() + " edge conflicts) ===");
+        out.println("Cell format: <physical piece number>@<clockwise rotation in degrees from its pieces.csv reference orientation>");
+        out.println("Row 0 = north/top edge of the board, Col 0 = west/left edge.");
+        out.println();
+        for (int row = 0; row < H; row++) {
+            StringBuilder line = new StringBuilder();
+            for (int col = 0; col < W; col++) {
+                int p = board[row * W + col];
+                String cell;
+                if (p == -1) {
+                    cell = "EMPTY";
+                } else {
+                    int[] pieceAndRotation = physicalPieceAndRotation(inventory, p);
+                    cell = pieceAndRotation[0] == -1
+                            ? "?"
+                            : (pieceAndRotation[0] + "@" + pieceAndRotation[1]);
+                }
+                line.append(String.format("%-9s", cell));
+            }
+            out.println(line.toString().stripTrailing());
+        }
+        out.println();
+    }
+
+    /** Returns {physical piece number (1-256), clockwise rotation in degrees from its pieces.csv reference orientation}, or {-1,-1} if not found. */
+    private static int[] physicalPieceAndRotation(PieceInventory inventory, int packedPiece) {
+        for (int oi = 0; oi < 1024; oi++) {
+            if (inventory.allOrientations[oi] == packedPiece) {
+                return new int[]{inventory.physicalMapping[oi] + 1, (oi % 4) * 90};
+            }
+        }
+        return new int[]{-1, -1};
     }
 
     private static int countPlaced(int[] board) {
