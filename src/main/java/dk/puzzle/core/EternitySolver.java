@@ -9,6 +9,7 @@ import dk.puzzle.io.CheckpointManager;
 import dk.puzzle.io.RecordManager;
 import dk.puzzle.model.CompatibilityIndex;
 import dk.puzzle.model.PieceInventory;
+import dk.puzzle.tools.HoleSolver;
 import dk.puzzle.util.PieceUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -1206,10 +1207,21 @@ public class EternitySolver implements Runnable {
                 int totalConflicts = conflictReducer.countConflicts(bestBoard);
 
                 logger.info(">>> [FULL BOARD SCAN] Best result: %d / 480 edge conflicts after %,d iterations", totalConflicts, iterations);
-                if (totalConflicts < 30) {
+                if (totalConflicts < 25) {
                     logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
                 }
                 if ((baseScore >= absoluteHighScore - 1) || (totalConflicts < conflictSaveThreshold.get() && baseScore > variantSaveThreshold.get())) {
+                    // Board already cleared the save bar — worth the exact per-region
+                    // search's extra cost now (rare event, off the hot GPU-batch path)
+                    // to see if HoleSolver can beat the MCV/polish result before we save it.
+                    int[] holeSolved = HoleSolver.solveConflicts(bestBoard, inventory, false).bestBoard();
+                    int holeSolvedConflicts = conflictReducer.countConflicts(holeSolved);
+                    if (holeSolvedConflicts < totalConflicts) {
+                        logger.info(">>> [HOLE SOLVER] Improved %d -> %d conflicts before saving.",
+                                totalConflicts, holeSolvedConflicts);
+                        bestBoard = holeSolved;
+                        totalConflicts = holeSolvedConflicts;
+                    }
                     saveFullBoardVariant(bestBoard, baseScore, totalConflicts);
                 } else {
                     logger.info(">>> [FULL BOARD SCAN] Not saved: %d conflicts >= threshold %d and base score %d <= variant threshold %d",

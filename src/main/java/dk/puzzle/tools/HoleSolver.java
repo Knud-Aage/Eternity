@@ -69,8 +69,38 @@ public class HoleSolver {
         }
 
         int[] board = decodeBoard(boardEdges);
-
         PieceInventory inventory = new PieceInventory(Eternity.loadPieces());
+
+        ConflictSolveResult result = solveConflicts(board, inventory, true);
+
+        String link = BucasExporter.exportBoard(result.finalBoard());
+        System.out.println(link);
+
+        writePhysicalLayoutFile(inventory, result.finalBoard(), result.repairedBoard());
+    }
+
+    /**
+     * Paired result of {@link #solveConflicts}: {@code finalBoard} is the exact-search
+     * board (original conflicts left in place for any region the search couldn't clear),
+     * and {@code repairedBoard} is only non-null when at least one region couldn't be
+     * solved exactly, holding the heuristic-repaired board covering those leftover cells.
+     */
+    public record ConflictSolveResult(int[] finalBoard, int[] repairedBoard) {
+        /** The single board to use downstream: the heuristic repair when present, otherwise the (fully exact) finalBoard. */
+        public int[] bestBoard() {
+            return repairedBoard != null ? repairedBoard : finalBoard;
+        }
+    }
+
+    /**
+     * Finds every connected region of edge-conflicting (or empty) cells on {@code board}
+     * and re-solves each region exactly using only the physical pieces already sitting in
+     * it plus whatever's unused elsewhere on the board. Falls back to MCV heuristic refill
+     * for any region the exact search can't clear within budget. Pass verbose=true to also
+     * print the same step-by-step diagnostics the CLI tool shows; the computation itself is
+     * identical either way.
+     */
+    public static ConflictSolveResult solveConflicts(int[] board, PieceInventory inventory, boolean verbose) {
         CompatibilityIndex compat = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
 
         int[] physicalIdAt = new int[256];
@@ -82,17 +112,21 @@ public class HoleSolver {
                 continue; // genuinely empty — not a piece to identify
             }
             physicalIdAt[i] = findPhysicalId(inventory, board[i]);
-            if (physicalIdAt[i] == -1) {
+            if (physicalIdAt[i] == -1 && verbose) {
                 System.out.println("WARNING: cell " + i + " (piece " + Integer.toHexString(board[i]) +
                         ") doesn't match any orientation in pieces.csv. Is this the right piece dataset for this link?");
             }
         }
 
         List<int[]> conflicts = findConflicts(board); // each entry: {cellA, cellB} (cellB = -1 for border conflicts)
-        System.out.println("Decoded board: " + conflicts.size() + " edge conflicts, " + emptyCells + " empty cell(s).");
+        if (verbose) {
+            System.out.println("Decoded board: " + conflicts.size() + " edge conflicts, " + emptyCells + " empty cell(s).");
+        }
         if (conflicts.isEmpty() && emptyCells == 0) {
-            System.out.println("Nothing to fix — board is already complete and conflict-free.");
-            return;
+            if (verbose) {
+                System.out.println("Nothing to fix — board is already complete and conflict-free.");
+            }
+            return new ConflictSolveResult(Arrays.copyOf(board, 256), null);
         }
 
         // A region to resolve is either a real edge mismatch OR a genuinely
@@ -108,8 +142,10 @@ public class HoleSolver {
         }
 
         List<List<Integer>> regions = connectedComponents(inHole);
-        System.out.println("Found " + regions.size() + " connected region(s) needing resolution: " +
-                regions.stream().map(List::size).toList());
+        if (verbose) {
+            System.out.println("Found " + regions.size() + " connected region(s) needing resolution: " +
+                    regions.stream().map(List::size).toList());
+        }
 
         // Physical pieces used ANYWHERE on the whole board (before any region
         // gets cleared below) — these are the pieces NOT available to draw on
@@ -124,8 +160,10 @@ public class HoleSolver {
         List<Integer> unsolvedCells = new ArrayList<>();
 
         for (List<Integer> region : regions) {
-            System.out.println();
-            System.out.println("--- Region: " + region.size() + " cells " + region + " ---");
+            if (verbose) {
+                System.out.println();
+                System.out.println("--- Region: " + region.size() + " cells " + region + " ---");
+            }
 
             // Pool = whichever physical pieces this region's own (placed,
             // conflicting) cells currently hold, UNION every physical piece
@@ -141,7 +179,9 @@ public class HoleSolver {
                 if (finalBoard[cell] == -1) continue; // nothing to reclaim from an already-empty cell
                 int physId = physicalIdAt[cell];
                 if (physId == -1) {
-                    System.out.println("Skipping region: contains an unidentified piece, can't build a safe pool.");
+                    if (verbose) {
+                        System.out.println("Skipping region: contains an unidentified piece, can't build a safe pool.");
+                    }
                     skipRegion = true;
                     break;
                 }
@@ -156,8 +196,10 @@ public class HoleSolver {
             boolean solved = solver.solve();
 
             if (solved) {
-                System.out.println("SOLVED — zero conflicts in this region after " +
-                        String.format("%,d", solver.stepsTaken) + " search steps.");
+                if (verbose) {
+                    System.out.println("SOLVED — zero conflicts in this region after " +
+                            String.format("%,d", solver.stepsTaken) + " search steps.");
+                }
                 for (int cell : region) {
                     finalBoard[cell] = solver.board[cell];
                     // Claim this piece out of the shared leftover pool so a
@@ -167,18 +209,22 @@ public class HoleSolver {
                 }
                 solvedRegions++;
             } else {
-                System.out.println("NOT solved within the step budget (" +
-                        String.format("%,d", solver.stepsTaken) + " steps tried, budget " +
-                        String.format("%,d", STEP_BUDGET_PER_REGION) + "). " +
-                        "Either no zero-conflict rearrangement of these exact pieces exists, " +
-                        "or it needs a larger step budget.");
+                if (verbose) {
+                    System.out.println("NOT solved within the step budget (" +
+                            String.format("%,d", solver.stepsTaken) + " steps tried, budget " +
+                            String.format("%,d", STEP_BUDGET_PER_REGION) + "). " +
+                            "Either no zero-conflict rearrangement of these exact pieces exists, " +
+                            "or it needs a larger step budget.");
+                }
                 unsolvedCells.addAll(region);
             }
         }
 
-        System.out.println();
-        System.out.println("=== " + solvedRegions + "/" + regions.size() + " region(s) solved exactly. " +
-                "Remaining unsolved cells: " + (256 - countPlaced(finalBoard)) + " ===");
+        if (verbose) {
+            System.out.println();
+            System.out.println("=== " + solvedRegions + "/" + regions.size() + " region(s) solved exactly. " +
+                    "Remaining unsolved cells: " + (256 - countPlaced(finalBoard)) + " ===");
+        }
 
         int[] repaired = null;
         if (solvedRegions < regions.size()) {
@@ -194,8 +240,6 @@ public class HoleSolver {
             // nudge one piece at a time and easily gets stuck — a full
             // clear-and-refill can reach rearrangements a single swap can't.
             // Finish with a rotation+swap polish pass over the result.
-            System.out.println();
-            System.out.println("Falling back to conflict-reduction heuristics for the still-unsolved region(s)...");
             ConflictReducer reducer = new ConflictReducer(inventory, false);
             int conflictsBefore = reducer.countConflicts(finalBoard);
 
@@ -206,15 +250,16 @@ public class HoleSolver {
             int afterFill = reducer.countConflicts(repaired);
             int afterPolish = reducer.reducePostProcess(repaired, 100);
 
-            System.out.println("Best result: " + conflictsBefore + " (start) -> " + afterFill +
-                    " (clear + MCV refill) -> " + afterPolish + " (rotation+swap polish) edge conflicts.");
-            System.out.println(BucasExporter.exportBoard(repaired));
+            if (verbose) {
+                System.out.println();
+                System.out.println("Falling back to conflict-reduction heuristics for the still-unsolved region(s)...");
+                System.out.println("Best result: " + conflictsBefore + " (start) -> " + afterFill +
+                        " (clear + MCV refill) -> " + afterPolish + " (rotation+swap polish) edge conflicts.");
+                System.out.println(BucasExporter.exportBoard(repaired));
+            }
         }
 
-        String link = BucasExporter.exportBoard(finalBoard);
-        System.out.println(link);
-
-        writePhysicalLayoutFile(inventory, finalBoard, repaired);
+        return new ConflictSolveResult(finalBoard, repaired);
     }
 
     // ------------------------------------------------------------------

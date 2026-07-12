@@ -149,7 +149,7 @@ public class Eternity {
                 thresholdLabel.setForeground(textColor);
                 thresholdLabel.setAlignmentX(Component.CENTER_ALIGNMENT);
 
-                JSlider thresholdSlider = new JSlider(JSlider.HORIZONTAL, 190, 256, 208);
+                JSlider thresholdSlider = new JSlider(JSlider.HORIZONTAL, 90, 256, 208);
                 thresholdSlider.setBackground(new Color(40, 42, 45));
                 thresholdSlider.setMajorTickSpacing(10);
                 thresholdSlider.setMinorTickSpacing(2);
