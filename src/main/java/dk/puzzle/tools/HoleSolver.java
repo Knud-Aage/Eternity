@@ -31,10 +31,17 @@ import java.util.List;
  * from today's.</p>
  *
  * Usage: paste a bucas link (or just its board_edges value) as argv[0].
+ * Optionally pass the MCV fallback repair's trial count as argv[1]
+ * (default {@link #DEFAULT_TRIALS}) — higher values dig harder for the
+ * still-unsolved regions at the cost of longer runtime.
  */
 public class HoleSolver {
 
     private static final int W = 16, H = 16;
+
+    // Default trial count for the MCV fallback repair (see solveConflicts),
+    // overridable via argv[1] on the CLI.
+    private static final int DEFAULT_TRIALS = 200_000;
 
     // BucasExporter's TheSil -> Bucas color remap. Bucas links use the
     // Bucas numbering, everything else in this codebase (PieceInventory,
@@ -58,7 +65,7 @@ public class HoleSolver {
 
     public static void main(String[] args) {
         if (args.length < 1) {
-            System.out.println("Usage: HoleSolver <bucas link or raw board_edges string>");
+            System.out.println("Usage: HoleSolver <bucas link or raw board_edges string> [trials]");
             return;
         }
 
@@ -68,10 +75,19 @@ public class HoleSolver {
             return;
         }
 
+        int trials = DEFAULT_TRIALS;
+        if (args.length >= 2) {
+            try {
+                trials = Integer.parseInt(args[1]);
+            } catch (NumberFormatException e) {
+                System.out.println("Invalid trials value '" + args[1] + "', expected an integer. Using default " + DEFAULT_TRIALS + ".");
+            }
+        }
+
         int[] board = decodeBoard(boardEdges);
         PieceInventory inventory = new PieceInventory(Eternity.loadPieces());
 
-        ConflictSolveResult result = solveConflicts(board, inventory, true);
+        ConflictSolveResult result = solveConflicts(board, inventory, true, trials);
 
         String link = BucasExporter.exportBoard(result.finalBoard());
         System.out.println(link);
@@ -92,15 +108,20 @@ public class HoleSolver {
         }
     }
 
+    /** Same as {@link #solveConflicts(int[], PieceInventory, boolean, int)} using {@link #DEFAULT_TRIALS}. */
+    public static ConflictSolveResult solveConflicts(int[] board, PieceInventory inventory, boolean verbose) {
+        return solveConflicts(board, inventory, verbose, DEFAULT_TRIALS);
+    }
+
     /**
      * Finds every connected region of edge-conflicting (or empty) cells on {@code board}
      * and re-solves each region exactly using only the physical pieces already sitting in
      * it plus whatever's unused elsewhere on the board. Falls back to MCV heuristic refill
-     * for any region the exact search can't clear within budget. Pass verbose=true to also
-     * print the same step-by-step diagnostics the CLI tool shows; the computation itself is
-     * identical either way.
+     * (using {@code trials} restarts) for any region the exact search can't clear within
+     * budget. Pass verbose=true to also print the same step-by-step diagnostics the CLI
+     * tool shows; the computation itself is identical either way.
      */
-    public static ConflictSolveResult solveConflicts(int[] board, PieceInventory inventory, boolean verbose) {
+    public static ConflictSolveResult solveConflicts(int[] board, PieceInventory inventory, boolean verbose, int trials) {
         CompatibilityIndex compat = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
 
         int[] physicalIdAt = new int[256];
@@ -246,7 +267,7 @@ public class HoleSolver {
             repaired = Arrays.copyOf(finalBoard, 256);
             for (int cell : unsolvedCells) repaired[cell] = -1;
 
-            repaired = reducer.mcvRestartFill(repaired, 200_000);
+            repaired = reducer.mcvRestartFill(repaired, trials);
             int afterFill = reducer.countConflicts(repaired);
             int afterPolish = reducer.reducePostProcess(repaired, 100);
 
