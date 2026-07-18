@@ -349,7 +349,7 @@ public class HoleSolver {
     // Decoding / encoding
     // ------------------------------------------------------------------
 
-    private static String extractBoardEdges(String input) {
+    public static String extractBoardEdges(String input) {
         int idx = input.indexOf("board_edges=");
         if (idx == -1) {
             return input.trim();
@@ -359,7 +359,7 @@ public class HoleSolver {
         return (amp == -1 ? rest : rest.substring(0, amp)).trim();
     }
 
-    private static int[] decodeBoard(String boardEdges) {
+    public static int[] decodeBoard(String boardEdges) {
         int[] board = new int[256];
         for (int i = 0; i < 256; i++) {
             // BucasExporter's own encoding uses the literal string "aaaa" as a
