@@ -128,7 +128,7 @@ public class SurgeonHeuristics {
             int[] allShuffled = Arrays.copyOf(placedIndices, placedCount);
             hotStuffled(rnd, randomHoles, clonedBoard, punched, randPicked, allShuffled);
 
-            if (currentHighScore < 256) {
+            if (currentHighScore < 256 && !isLocked[buildOrder[currentHighScore]]) {
                 clonedBoard[buildOrder[currentHighScore]] = -2;
             }
             swissCheeseBoards.add(clonedBoard);
@@ -238,7 +238,9 @@ public class SurgeonHeuristics {
             }
 
             // Explicitly flag the stuck index as the next target for the solver
-            clonedBoard[stuckIndex] = -2;
+            if (!isLocked[stuckIndex]) {
+                clonedBoard[stuckIndex] = -2;
+            }
 
             excavatedBoards.add(clonedBoard);
         }

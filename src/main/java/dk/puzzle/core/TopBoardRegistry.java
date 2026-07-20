@@ -61,8 +61,10 @@ public class TopBoardRegistry {
     /**
      * Exposes the registry for the CheckpointManager so it can be saved to disk.
      */
-    public List<int[]> getRawRegistry() {
-        return new ArrayList<>(this.entries.stream().map(e -> e.board).toList());
+    public synchronized List<int[]> getRawRegistry() {
+        List<int[]> result = new ArrayList<>(entries.size());
+        for (Entry e : entries) result.add(Arrays.copyOf(e.board, 256));
+        return result;
     }
 
     public static class Entry {

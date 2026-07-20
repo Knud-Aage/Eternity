@@ -193,4 +193,22 @@ class PieceInventoryTest {
 
         assertArrayEquals(new int[]{50, 1, 2, 3}, colors);
     }
+
+    @Test
+    void testGetBaseColorsRejectsIdBelowOne() {
+        int[] basePieces = buildCraftedBasePieces();
+        PieceInventory inventory = new PieceInventory(basePieces);
+
+        assertThrows(IllegalArgumentException.class, () -> inventory.getBaseColors(0),
+                "physicalId is documented as 1-based; 0 is out of range and must be rejected, not silently misread");
+    }
+
+    @Test
+    void testGetBaseColorsRejectsIdAboveTwoFiftySix() {
+        int[] basePieces = buildCraftedBasePieces();
+        PieceInventory inventory = new PieceInventory(basePieces);
+
+        assertThrows(IllegalArgumentException.class, () -> inventory.getBaseColors(257),
+                "physicalId must be <= 256; a malformed import file could otherwise trigger an opaque array-bounds crash");
+    }
 }

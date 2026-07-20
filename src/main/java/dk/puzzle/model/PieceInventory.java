@@ -94,6 +94,11 @@ public class PieceInventory {
      * @return An array of 4 integers representing {North, East, South, West}.
      */
     public int[] getBaseColors(int physicalId) {
+        if (physicalId < 1 || physicalId > 256) {
+            throw new IllegalArgumentException(
+                    "physicalId must be a 1-based ID in [1, 256], got: " + physicalId);
+        }
+
         // 1. Convert the 1-based ID from the text file to your 0-based Java index
         int arrayIndex = physicalId - 1;
 

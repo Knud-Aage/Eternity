@@ -212,21 +212,28 @@ class SeedSelectorTest {
     }
 
     @Test
-    void testIsEdgeConsistentTreatsSurgeonHoleAsARealPiece() {
-        // Unlike EternitySolver.verifyBoardStrict (which explicitly skips -2
-        // "surgeon hole" markers), isEdgeConsistent has no such special case.
-        // board[1] = -2 gets bit-masked like a real piece: (-2 & 0xFF) = 254,
-        // which will not match a normal color id, so this deterministically
-        // reports a false conflict. This looks like a latent inconsistency
-        // with the rest of the codebase's -2 handling convention, documented
-        // here rather than silently assumed away.
+    void testIsEdgeConsistentTreatsSurgeonHoleAsEmpty() {
+        // -2 "surgeon hole" markers must be skipped like -1, matching
+        // EternitySolver.verifyBoardStrict's convention, not bit-masked and
+        // compared as if they were a real piece's packed colors.
         int[] board = new int[256];
         Arrays.fill(board, -1);
         board[0] = PieceUtils.pack(1, 2, 3, 4);
         board[1] = -2;
 
-        assertFalse(SeedSelector.isEdgeConsistent(board),
-                "Current behavior: a -2 hole marker is bit-masked and compared like a real piece, not skipped");
+        assertTrue(SeedSelector.isEdgeConsistent(board),
+                "A -2 hole marker must be treated as empty, not compared as a real piece's colors");
+    }
+
+    @Test
+    void testIsEdgeConsistentTreatsSurgeonHoleOnSouthNeighborAsEmpty() {
+        int[] board = new int[256];
+        Arrays.fill(board, -1);
+        board[0] = PieceUtils.pack(1, 2, 3, 4);
+        board[16] = -2;
+
+        assertTrue(SeedSelector.isEdgeConsistent(board),
+                "A -2 hole marker on the south neighbor must be treated as empty, not compared as a real piece's colors");
     }
 
     // ── hammingDistance ──
@@ -377,13 +384,13 @@ class SeedSelectorTest {
     }
 
     @Test
-    void testSelectBestCanExceedTargetCountWhenTierQuotasEachFloorToOne() {
-        // Each tier count is Math.max(1, targetCount * pct / 100). For a small
-        // targetCount, elite+diverse+restart can each floor up to 1 and sum
-        // to more than targetCount, and only the fallback pass (not the three
-        // main tiers) checks result.size() against targetCount. With ample,
-        // sufficiently diverse supply this means selectBest can return MORE
-        // boards than requested - documented here as a discovered quirk.
+    void testSelectBestNeverExceedsTargetCountEvenWhenTierQuotasEachFloorToOne() {
+        // Each tier count is Math.max(1, targetCount * pct / 100), so for a
+        // small targetCount, elite+diverse+restart can each floor up to 1 and
+        // sum to more than targetCount. Every tier's loop is capped on
+        // result.size() < targetCount as a hard ceiling, so selectBest must
+        // never return more boards than requested regardless of how the
+        // individual tier quotas add up.
         SeedSelector.setElitePct(15);
         SeedSelector.setDiversePct(55);
 
@@ -393,8 +400,8 @@ class SeedSelectorTest {
         List<int[]> result = SeedSelector.selectBest(
                 boards, threadDepths, 2, identityBuildOrder(), buildOutOfRangeReferenceBoard(), new Random(5));
 
-        assertTrue(result.size() > 2,
-                "eliteCount(1) + diverseCount(1) + restartCount(1) = 3 exceeds the requested targetCount of 2");
+        assertEquals(2, result.size(),
+                "eliteCount(1) + diverseCount(1) + restartCount(1) = 3 would exceed targetCount(2) without the hard cap");
     }
 
     @Test
