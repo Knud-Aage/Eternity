@@ -63,6 +63,20 @@ class EternitySolverTest {
         return (double) field.get(surgeon);
     }
 
+    private int[] getHintPositions() throws Exception {
+        java.lang.reflect.Field field = EternitySolver.class.getDeclaredField("HINT_POSITIONS");
+        field.setAccessible(true);
+        return (int[]) field.get(null);
+    }
+
+    private int getAtomicIntField(EternitySolver solver, String fieldName) throws Exception {
+        java.lang.reflect.Field field = EternitySolver.class.getDeclaredField(fieldName);
+        field.setAccessible(true);
+        java.util.concurrent.atomic.AtomicInteger atomic =
+                (java.util.concurrent.atomic.AtomicInteger) field.get(solver);
+        return atomic.get();
+    }
+
     @Test
     void testConstructorBuildOrderTypewriter() {
         EternitySolver solver = new EternitySolver(
@@ -285,6 +299,169 @@ class EternitySolverTest {
         // 21st call should return a board whose val is in uniqueValues (no new boards beyond capacity of 20)
         int[] b21 = registry.nextForRepair();
         assertTrue(uniqueValues.contains(b21[0]), "Capped registry should not add boards beyond capacity");
+    }
+
+    @Test
+    void testLockCenterLocksCenterAndHintPositions() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, true);
+
+        assertNotEquals(-1, solver.bestBoard[135], "Center position must be locked when lockCenter=true");
+        for (int hPos : getHintPositions()) {
+            assertNotEquals(-1, solver.bestBoard[hPos], "Hint position " + hPos + " must be locked when lockCenter=true");
+        }
+    }
+
+    @Test
+    void testUnlockedConstructorLeavesHintsAndCenterEmpty() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        assertEquals(-1, solver.bestBoard[135], "Center must stay empty when lockCenter=false");
+        for (int hPos : getHintPositions()) {
+            assertEquals(-1, solver.bestBoard[hPos], "Hint position " + hPos + " must stay empty when lockCenter=false");
+        }
+    }
+
+    @Test
+    void testRetreatWithLockCenterRestoresHintPositions() throws Exception {
+        int centerPiece = 8888;
+        EternitySolver solver = new EternitySolver(
+                mockInventory, centerPiece, false, EternitySolver.BuildStrategy.TYPEWRITER, true);
+
+        int[] hintPositions = getHintPositions();
+        int[] lockedHintValues = new int[hintPositions.length];
+        for (int i = 0; i < hintPositions.length; i++) {
+            lockedHintValues[i] = solver.bestBoard[hintPositions[i]];
+        }
+
+        Arrays.fill(solver.bestBoard, 1);
+        solver.retreat(0, null);
+
+        assertEquals(centerPiece, solver.bestBoard[135], "Retreat must restore the locked center piece");
+        for (int i = 0; i < hintPositions.length; i++) {
+            assertEquals(lockedHintValues[i], solver.bestBoard[hintPositions[i]],
+                    "Retreat must restore locked hint values even when retreating to depth 0");
+        }
+    }
+
+    @Test
+    void testGetDynamicBatchSizeThresholds() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        java.lang.reflect.Method method = EternitySolver.class.getDeclaredMethod("getDynamicBatchSize");
+        method.setAccessible(true);
+
+        solver.deepestStep = 0;
+        assertEquals(5000, (int) method.invoke(solver), "Below 50: small board still uses a large batch");
+
+        solver.deepestStep = 75;
+        assertEquals(15000, (int) method.invoke(solver), "Mid-range depth uses the largest default batch");
+
+        solver.deepestStep = 150;
+        assertEquals(5000, (int) method.invoke(solver), ">=100 depth throttles the batch size down");
+
+        solver.deepestStep = 190;
+        assertEquals(1000, (int) method.invoke(solver), ">=180 depth throttles further for precision");
+
+        solver.deepestStep = 220;
+        assertEquals(250, (int) method.invoke(solver), ">=200 depth uses the smallest endgame batch");
+    }
+
+    @Test
+    void testBoardHashDeterministicAndPositionSensitive() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        java.lang.reflect.Method method = EternitySolver.class.getDeclaredMethod("boardHash", int[].class);
+        method.setAccessible(true);
+
+        int[] empty = new int[256];
+        Arrays.fill(empty, -1);
+        assertEquals(0, (int) method.invoke(solver, (Object) empty), "An all-empty board must hash to 0");
+
+        int[] boardA = new int[256];
+        Arrays.fill(boardA, -1);
+        boardA[10] = 500;
+
+        int[] boardB = new int[256];
+        Arrays.fill(boardB, -1);
+        boardB[20] = 500; // same piece value, different position
+
+        int hashA1 = (int) method.invoke(solver, (Object) boardA);
+        int hashA2 = (int) method.invoke(solver, (Object) boardA);
+        int hashB = (int) method.invoke(solver, (Object) boardB);
+
+        assertEquals(hashA1, hashA2, "boardHash must be deterministic for the same board contents");
+        assertNotEquals(hashA1, hashB, "boardHash must be position-sensitive, not just content-sensitive");
+    }
+
+    @Test
+    void testGenerateHashForBoardNullAndValue() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        java.lang.reflect.Method method = EternitySolver.class.getDeclaredMethod("generateHashForBoard", int[].class);
+        method.setAccessible(true);
+
+        assertEquals("EMPTY_BOARD", method.invoke(solver, new Object[]{null}));
+
+        int[] board = new int[256];
+        Arrays.fill(board, -1);
+        board[5] = 42;
+
+        String expected = Integer.toHexString(Arrays.hashCode(board)).toUpperCase();
+        assertEquals(expected, method.invoke(solver, (Object) board));
+    }
+
+    @Test
+    void testRescueBoardClearsConflictingNeighborsAndReturnsValidCount() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        java.lang.reflect.Method method = EternitySolver.class.getDeclaredMethod("rescueBoard", int[].class);
+        method.setAccessible(true);
+
+        int[] board = new int[256];
+        Arrays.fill(board, -1);
+        board[0] = PieceUtils.pack(1, 2, 3, 4);     // North=1 East=2 South=3 West=4
+        board[1] = PieceUtils.pack(5, 6, 7, 9);     // West=9 conflicts with East=2 of index 0
+        board[16] = PieceUtils.pack(3, 8, 9, 10);   // caught in the conflict's erasure radius (south of index 0)
+        board[2] = PieceUtils.pack(20, 21, 22, 23); // isolated piece outside the conflict radius
+
+        int validPieces = (int) method.invoke(solver, (Object) board);
+
+        assertEquals(-1, board[0], "Conflicting piece itself must be erased");
+        assertEquals(-1, board[1], "Conflicting neighbor must be erased");
+        assertEquals(-1, board[16], "Neighbor within the erasure radius must be erased even without its own conflict");
+        assertEquals(PieceUtils.pack(20, 21, 22, 23), board[2], "Untouched piece outside the conflict radius must survive");
+        assertEquals(1, validPieces, "Only the untouched piece should remain valid");
+        assertTrue(solver.verifyBoardStrict(board), "Board must be conflict-free after rescue");
+    }
+
+    @Test
+    void testSetVariantAndConflictSaveThresholds() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        solver.setVariantSaveThreshold(230);
+        solver.setConflictSaveThreshold(15);
+
+        assertEquals(230, getAtomicIntField(solver, "variantSaveThreshold"));
+        assertEquals(15, getAtomicIntField(solver, "conflictSaveThreshold"));
+    }
+
+    @Test
+    void testVerifyBoardStrictTreatsSurgeonHolesAsEmpty() {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = new int[256];
+        Arrays.fill(board, -1);
+
+        // Index 1's West would conflict with index 0's East if it were a real
+        // piece, but -2 marks a surgeon hole and must be skipped, not compared.
+        board[0] = PieceUtils.pack(1, 2, 3, 4);
+        board[1] = -2;
+
+        assertTrue(solver.verifyBoardStrict(board), "Surgeon holes (-2) must not be treated as conflicting pieces");
     }
 
 }
