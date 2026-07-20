@@ -157,7 +157,8 @@ extern "C" __global__ void solvePBP(
     unsigned long long* d_totalSteps,
     int lockCenterFlag,
     int* d_threadDepths,
-    int* p_radarLimit
+    int* p_radarLimit,
+    unsigned long long stepBudget
 )
 {
     __shared__ short sm_byNorth     [NUM_COLORS * MAX_PER_COLOR];
@@ -199,7 +200,7 @@ extern "C" __global__ void solvePBP(
     int bestPiecesPlaced = piecesNow;
     int bestLocalBoard[256];
     unsigned long long stepCounter = 0;
-    const unsigned long long STEP_BUDGET = 75000ULL;
+    const unsigned long long STEP_BUDGET = stepBudget;
 
     while (step >= startingStep && step < 256) {
         if (stepCounter >= STEP_BUDGET) break;

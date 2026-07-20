@@ -184,9 +184,19 @@ public class SurgeonHeuristics {
 
             Set<Integer> toRemove = new HashSet<>();
             List<Integer> frontier = new ArrayList<>();
+            // Tracks every cell ever pushed, so each of the 256 cells is
+            // pushed (and therefore popped) at most once. Without this, a
+            // popped cell's neighbors were re-pushed unconditionally even
+            // when the cell itself was skipped (empty or locked) — with no
+            // visited check, the same handful of cells in a contiguous empty
+            // or locked region could be re-pushed forever, growing frontier
+            // without bound and hanging this thread indefinitely whenever
+            // numHoles could never actually be satisfied from stuckIndex.
+            Set<Integer> visited = new HashSet<>();
 
             // Seed the crater at the exact point of failure
             frontier.add(stuckIndex);
+            visited.add(stuckIndex);
 
             // Grow the crater organically until we hit the requested hole size
             while (toRemove.size() < numHoles && !frontier.isEmpty()) {
@@ -194,36 +204,30 @@ public class SurgeonHeuristics {
                 int randomIndex = rnd.nextInt(frontier.size());
                 int current = frontier.remove(randomIndex);
 
-                if (toRemove.contains(current)) {
-                    continue;
-                }
-
                 // Validate before removing: Must be placed, not locked, not tabu
                 if (clonedBoard[current] != -1 && clonedBoard[current] != -2) {
-                    if (isLocked[current]) {
-                        continue;
-                    }
+                    if (!isLocked[current]) {
 //                    if (tabuTenure[current] > currentIteration) {
 //                        continue;
 //                    }
-
-                    toRemove.add(current);
+                        toRemove.add(current);
+                    }
                 }
 
                 // Geographically expand the search to all neighbors (BFS)
                 int row = current / 16;
                 int col = current % 16;
 
-                if (row > 0) {
+                if (row > 0  && visited.add(current - 16)) {
                     frontier.add(current - 16);  // North
                 }
-                if (row < 15) {
+                if (row < 15 && visited.add(current + 16)) {
                     frontier.add(current + 16); // South
                 }
-                if (col > 0) {
+                if (col > 0  && visited.add(current - 1)) {
                     frontier.add(current - 1);   // West
                 }
-                if (col < 15) {
+                if (col < 15 && visited.add(current + 1)) {
                     frontier.add(current + 1);  // East
                 }
             }

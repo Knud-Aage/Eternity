@@ -19,7 +19,16 @@ import static jcuda.driver.JCudaDriver.*;
  */
 public class GpuEngine {
 
-    private static final int MAX_BOARDS = 16_000;
+    private static final int MAX_BOARDS = 110_000;
+
+    // Per-thread iteration cap for solvePBP. Locked runs pre-commit 5 core
+    // cells (see lockCenterFlag in the kernel), which removes some of the
+    // contradictions that would otherwise trigger a fast dead-end/backtrack,
+    // so locked threads tend to ride the budget out instead of exiting early
+    // — that's what was making locked batches take ~13s vs ~3-5s unlocked
+    // at the old fixed 75000 cap. Give locked a smaller budget to compensate.
+    private static final long STEP_BUDGET_UNLOCKED = 75_000L;
+    private static final long STEP_BUDGET_LOCKED   = 30_000L;
 
     private CUfunction dfsFunction;
     private CUfunction repairFunction;
@@ -27,6 +36,7 @@ public class GpuEngine {
 
     private final PieceInventory inventory;
     private final boolean lockCenter;
+    private final long stepBudget;
 
     // Persistent device buffers — allocated once, reused every launch
     private CUdeviceptr d_partialBoards;
@@ -41,6 +51,7 @@ public class GpuEngine {
         JCuda.cudaSetDeviceFlags(JCuda.cudaDeviceScheduleBlockingSync);
         this.inventory  = inventory;
         this.lockCenter = lockCenter;
+        this.stepBudget = lockCenter ? STEP_BUDGET_LOCKED : STEP_BUDGET_UNLOCKED;
         initCUDA(buildOrder);
     }
 
@@ -121,7 +132,8 @@ public class GpuEngine {
                 Pointer.to(d_totalSteps),
                 Pointer.to(new int[]{lockCenter ? 1 : 0}),
                 Pointer.to(d_threadDepths),
-                Pointer.to(new int[]{0})
+                Pointer.to(new int[]{0}),
+                Pointer.to(new long[]{stepBudget})
         );
 
         int blockSize = 256;
