@@ -231,6 +231,27 @@ class SurgeonHeuristicsTest {
     }
 
     @Test
+    void testPunchHolesForcedFrontierHoleSkipsLockedPosition() {
+        SurgeonHeuristics surgeon = new SurgeonHeuristics(true, 0.5); // locks index 135
+        int[] board = buildFullyPlacedBoard();
+        int originalCenterValue = board[135];
+        int[] tabuTenure = new int[256];
+        int[] buildOrder = identityBuildOrder();
+
+        // buildOrder[135] == 135, which is locked. numHoles=0 isolates the
+        // forced frontier-hole behavior from the regular targeted/random
+        // hole selection (which already excludes locked positions).
+        List<int[]> clones = surgeon.punchHoles(board, 3, 0, tabuTenure, 0, 135, buildOrder);
+
+        for (int[] clone : clones) {
+            assertEquals(originalCenterValue, clone[135],
+                    "The forced frontier hole must not overwrite a locked position");
+            assertEquals(0, countValue(clone, -2),
+                    "No hole should be punched at all when the only candidate (the frontier slot) is locked");
+        }
+    }
+
+    @Test
     void testPunchHolesReturnsIndependentBoardCopiesAndDoesNotMutateSource() {
         SurgeonHeuristics surgeon = new SurgeonHeuristics(false, 0.5);
         int[] board = buildFullyPlacedBoard();
@@ -302,6 +323,23 @@ class SurgeonHeuristicsTest {
         for (int[] clone : clones) {
             int removed = countValue(clone, -1);
             assertTrue(removed <= 5, "The crater must never remove more than the requested numHoles cells");
+        }
+    }
+
+    @Test
+    void testExcavateFrontierForcedStuckIndexSkipsLockedPosition() {
+        SurgeonHeuristics surgeon = new SurgeonHeuristics(true, 0.5); // locks index 135
+        int[] board = buildFullyPlacedBoard();
+        int originalCenterValue = board[135];
+        int[] buildOrder = identityBuildOrder();
+
+        // buildOrder[135] == 135, so the stuck index itself is the locked center.
+        List<int[]> clones = surgeon.excavateFrontier(board, 3, 5, 0, 135, buildOrder);
+
+        for (int[] clone : clones) {
+            assertEquals(originalCenterValue, clone[135],
+                    "The forced stuck-index hole must not overwrite a locked position");
+            assertNotEquals(-2, clone[135]);
         }
     }
 

@@ -58,16 +58,16 @@ public class SeedSelector {
 
     public static boolean isEdgeConsistent(int[] board) {
         for (int i = 0; i < 256; i++) {
-            if (board[i] == -1) continue;
+            if (board[i] == -1 || board[i] == -2) continue;
             int row = i / 16;
             int col = i % 16;
 
-            if (col < 15 && board[i + 1] != -1) {
+            if (col < 15 && board[i + 1] != -1 && board[i + 1] != -2) {
                 int myEast    = (board[i]     >> 16) & 0xFF;
                 int theirWest =  board[i + 1]        & 0xFF;
                 if (myEast != theirWest) return false;
             }
-            if (row < 15 && board[i + 16] != -1) {
+            if (row < 15 && board[i + 16] != -1 && board[i + 16] != -2) {
                 int mySouth    = (board[i]      >>  8) & 0xFF;
                 int theirNorth = (board[i + 16] >> 24) & 0xFF;
                 if (mySouth != theirNorth) return false;
@@ -143,7 +143,11 @@ public class SeedSelector {
         List<int[]> eliteList = new ArrayList<>(eliteCount);
 
         // ── TIER 1: Elite ──
-        for (int i = 0; i < indices.length && eliteList.size() < eliteCount; i++) {
+        // Each tier's own count floors to at least 1 (see above), so their sum
+        // can exceed targetCount for small targetCount values; result.size() <
+        // targetCount is checked in every tier's loop condition as the hard
+        // cap so selectBest never returns more than requested.
+        for (int i = 0; i < indices.length && eliteList.size() < eliteCount && result.size() < targetCount; i++) {
             int[] board = allBoards.get(indices[i]);
             if (isEdgeConsistent(board)) {
                 int[] copy = Arrays.copyOf(board, 256);
@@ -154,7 +158,7 @@ public class SeedSelector {
 
         // ── TIER 2: Diverse ──
         int diverseFilled = 0;
-        for (int i = 0; i < indices.length && diverseFilled < diverseCount; i++) {
+        for (int i = 0; i < indices.length && diverseFilled < diverseCount && result.size() < targetCount; i++) {
             int[] board = allBoards.get(indices[i]);
             if (!isEdgeConsistent(board)) continue;
 
@@ -177,7 +181,7 @@ public class SeedSelector {
 
         int restartFilled = 0;
         for (int idx : shuffled) {
-            if (restartFilled >= restartCount) break;
+            if (restartFilled >= restartCount || result.size() >= targetCount) break;
             int[] board = allBoards.get(idx);
             if (!isEdgeConsistent(board)) continue;
 

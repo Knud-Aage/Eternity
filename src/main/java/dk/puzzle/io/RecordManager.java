@@ -152,8 +152,7 @@ public class RecordManager {
             }
             for (int c = 0; c < 16; c++) {
                 int piece = mainBoard[r][c];
-                if (piece != -1 && piece != PieceUtils.pack(PieceUtils.WILDCARD, PieceUtils.WILDCARD,
-                        PieceUtils.WILDCARD, PieceUtils.WILDCARD)) {
+                if (piece != -1) {
                     drawPiece(g2d, c * PIECE_SIZE, r * PIECE_SIZE, piece);
                 }
             }
