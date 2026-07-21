@@ -56,8 +56,19 @@ public class EternitySolver implements Runnable {
     // Threading and Concurrency
     private final ExecutorService executor;
     private final int numCores;
-    private final ExecutorService backgroundAnalysisExecutor = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "monte-carlo-analysis");
+    // Full-board Monte Carlo scans are queued far faster than a single thread can
+    // drain them (13k+ [HIGH DEPTH VARIANT] triggers/day observed vs. one board at
+    // a time), so almost all candidate boards were silently dropped via the
+    // pendingAnalyses cap before ever being evaluated. MIN_PRIORITY keeps these
+    // threads from stealing cycles from the primary CPU search.
+    private static final int ANALYSIS_THREADS = 4;
+    // A small buffer beyond ANALYSIS_THREADS so submissions aren't rejected the
+    // instant every worker is busy, without letting a long backlog of stale
+    // board snapshots build up.
+    private static final int ANALYSIS_QUEUE_CAP = ANALYSIS_THREADS + 2;
+    private final java.util.concurrent.atomic.AtomicInteger analysisThreadCounter = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final ExecutorService backgroundAnalysisExecutor = Executors.newFixedThreadPool(ANALYSIS_THREADS, r -> {
+        Thread t = new Thread(r, "monte-carlo-analysis-" + analysisThreadCounter.incrementAndGet());
         t.setDaemon(true);
         t.setPriority(Thread.MIN_PRIORITY);
         return t;
@@ -1191,7 +1202,7 @@ public class EternitySolver implements Runnable {
         final int iterations = 200_000;
         logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
 
-        if (pendingAnalyses.get() >= 2) {
+        if (pendingAnalyses.get() >= ANALYSIS_QUEUE_CAP) {
             logger.info(">>> [FULL BOARD SCAN] Skipped — %d analyses already queued.", pendingAnalyses.get());
             return;
         }
