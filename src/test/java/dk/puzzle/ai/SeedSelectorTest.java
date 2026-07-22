@@ -405,23 +405,6 @@ class SeedSelectorTest {
     }
 
     @Test
-    @SuppressWarnings("deprecation")
-    void testDeprecatedSelectBestOverloadMatchesFullOverloadWithIdentityBuildOrderAndNullReference() {
-        List<int[]> boards = buildDiverseBoardSet(4);
-        int[] threadDepths = {0, 1, 2, 3};
-
-        List<int[]> viaDeprecated = SeedSelector.selectBest(boards, threadDepths, 3, new Random(9));
-        List<int[]> viaFull = SeedSelector.selectBest(
-                boards, threadDepths, 3, identityBuildOrder(), null, new Random(9));
-
-        assertEquals(viaFull.size(), viaDeprecated.size());
-        for (int i = 0; i < viaFull.size(); i++) {
-            assertArrayEquals(viaFull.get(i), viaDeprecated.get(i),
-                    "Deprecated overload must delegate to the full overload with an identity build order and null reference");
-        }
-    }
-
-    @Test
     void testSelectBestDoesNotMutateInputBoards() {
         List<int[]> boards = buildDiverseBoardSet(3);
         List<int[]> snapshots = new ArrayList<>();

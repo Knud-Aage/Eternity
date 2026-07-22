@@ -214,29 +214,4 @@ public class SeedSelector {
 
         return result;
     }
-
-    /**
-     * Backwards-compatible overload that omits {@code buildOrder} and
-     * {@code referenceBoard}. Falls back to the old score-only strategy
-     * without diversity enforcement — use the full overload where possible.
-     *
-     * @deprecated Use
-     * {@link #selectBest(List, int[], int, int[], int[], Random)} instead.
-     */
-    @Deprecated
-    public static List<int[]> selectBest(
-            List<int[]> allBoards,
-            int[] threadDepths,
-            int targetCount,
-            Random random)
-    {
-        return selectBest(allBoards, threadDepths, targetCount,
-                defaultBuildOrder(), null, random);
-    }
-
-    private static int[] defaultBuildOrder() {
-        int[] order = new int[256];
-        for (int i = 0; i < 256; i++) order[i] = i;
-        return order;
-    }
 }

@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Unit tests for GpuEngine's hardware-independent logic.
  *
  * <p>Every other code path in this class (initCUDA, runDeepDfs/runRepairMode
- * beyond the empty-input guard, hardReset) calls directly into the CUDA
+ * beyond the empty-input guard) calls directly into the CUDA
  * driver via JCuda static natives with no abstraction seam, and the
  * constructor performs real device initialization (cuInit, cuCtxCreate,
  * cuModuleLoad, VRAM allocation) as a side effect of construction. That

@@ -109,20 +109,4 @@ public class CompatibilityIndex {
         return !result.isEmpty();
     }
 
-    /**
-     * Returns a BitSet of physical piece IDs (not orientation indices) that
-     * satisfy the constraints. Useful when you just need to know WHICH pieces
-     * are available, not which specific rotation.
-     */
-    public BitSet physicalCandidatesFor(int northColor, int eastColor, int southColor, int westColor,
-                                        boolean[] localUsed) {
-        BitSet orientations = candidatesFor(northColor, eastColor, southColor, westColor);
-        andNotUsed(orientations, localUsed);
-
-        BitSet physical = new BitSet(256);
-        for (int oi = orientations.nextSetBit(0); oi >= 0; oi = orientations.nextSetBit(oi + 1)) {
-            physical.set(physicalMapping[oi]);
-        }
-        return physical;
-    }
 }

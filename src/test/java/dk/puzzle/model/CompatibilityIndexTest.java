@@ -204,43 +204,4 @@ class CompatibilityIndexTest {
         assertFalse(index.hasAnyCandidate(21, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, noneUsed()));
     }
 
-    @Test
-    void testPhysicalCandidatesForReturnsPhysicalIdsNotOrientationIndices() {
-        int[] orientations = newFilledOrientations();
-        orientations[0] = PieceUtils.pack(2, 3, 4, 5);   // physical 0
-        orientations[4] = PieceUtils.pack(2, 10, 11, 12); // physical 1
-        CompatibilityIndex index = new CompatibilityIndex(orientations, newPhysicalMapping());
-
-        BitSet physical = index.physicalCandidatesFor(2, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, noneUsed());
-
-        assertEquals(2, physical.cardinality());
-        assertTrue(physical.get(0), "Physical piece 0 must be reported (not its orientation index 0)");
-        assertTrue(physical.get(1), "Physical piece 1 must be reported (not its orientation index 4)");
-    }
-
-    @Test
-    void testPhysicalCandidatesForExcludesUsedPieces() {
-        int[] orientations = newFilledOrientations();
-        orientations[0] = PieceUtils.pack(2, 3, 4, 5);   // physical 0
-        orientations[4] = PieceUtils.pack(2, 10, 11, 12); // physical 1
-        CompatibilityIndex index = new CompatibilityIndex(orientations, newPhysicalMapping());
-
-        boolean[] used = noneUsed();
-        used[0] = true;
-
-        BitSet physical = index.physicalCandidatesFor(2, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, used);
-
-        assertEquals(1, physical.cardinality());
-        assertFalse(physical.get(0));
-        assertTrue(physical.get(1));
-    }
-
-    @Test
-    void testPhysicalCandidatesForEmptyWhenNoOrientationMatches() {
-        CompatibilityIndex index = new CompatibilityIndex(newFilledOrientations(), newPhysicalMapping());
-
-        BitSet physical = index.physicalCandidatesFor(21, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, CompatibilityIndex.WILDCARD, noneUsed());
-
-        assertTrue(physical.isEmpty());
-    }
 }

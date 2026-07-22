@@ -212,24 +212,5 @@ public class GpuEngine {
         return new GpuResult(resultHighScore[0], solved[0] == 1, steps, new int[0]);
     }
 
-    public void hardReset() {
-        freePersistentBuffers();
-        allocatePersistentBuffers();
-    }
-
-    private void freePersistentBuffers() {
-        free(d_partialBoards); d_partialBoards = null;
-        free(d_solution);      d_solution      = null;
-        free(d_solvedFlag);    d_solvedFlag    = null;
-        free(d_gpuHighScore);  d_gpuHighScore  = null;
-        free(d_bestBoardOut);  d_bestBoardOut  = null;
-        free(d_totalSteps);    d_totalSteps    = null;
-        free(d_threadDepths);  d_threadDepths  = null;
-    }
-
-    private static void free(CUdeviceptr p) {
-        if (p != null) cuMemFree(p);
-    }
-
     public record GpuResult(int newHighScore, boolean solved, long stepsTaken, int[] threadDepths) {}
 }
