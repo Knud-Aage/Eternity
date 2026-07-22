@@ -464,4 +464,154 @@ class EternitySolverTest {
         assertTrue(solver.verifyBoardStrict(board), "Surgeon holes (-2) must not be treated as conflicting pieces");
     }
 
+    private int computeValidPrefixLength(EternitySolver solver, int[] board) throws Exception {
+        java.lang.reflect.Method method = EternitySolver.class.getDeclaredMethod("computeValidPrefixLength", int[].class);
+        method.setAccessible(true);
+        return (int) method.invoke(solver, (Object) board);
+    }
+
+    /** Fills a full 16x16 board with border-correct, mutually-matching pieces (zero conflicts anywhere). */
+    private int[] buildCleanFullBoard() {
+        int[] board = new int[256];
+        for (int idx = 0; idx < 256; idx++) {
+            int row = idx / 16, col = idx % 16;
+            int north = (row == 0) ? PieceUtils.BORDER_COLOR : (100 + idx - 16);
+            int west = (col == 0) ? PieceUtils.BORDER_COLOR : (100 + idx - 1);
+            int east = (col == 15) ? PieceUtils.BORDER_COLOR : (100 + idx);
+            int south = (row == 15) ? PieceUtils.BORDER_COLOR : (100 + idx);
+            board[idx] = PieceUtils.pack(north, east, south, west);
+        }
+        return board;
+    }
+
+    @Test
+    void testComputeValidPrefixLengthFullyCleanBoardCountsAllPieces() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        assertEquals(256, computeValidPrefixLength(solver, buildCleanFullBoard()));
+    }
+
+    @Test
+    void testComputeValidPrefixLengthStopsAtNorthMismatch() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        // idx 20's north edge no longer matches idx 4's south - this is the only kind of
+        // edge the typewriter method can actually check at placement time (the neighbor
+        // above is already placed), so it must be caught immediately, right at idx 20.
+        int p = board[20];
+        board[20] = PieceUtils.pack(9999, PieceUtils.getEast(p), PieceUtils.getSouth(p), PieceUtils.getWest(p));
+
+        assertEquals(20, computeValidPrefixLength(solver, board));
+    }
+
+    @Test
+    void testComputeValidPrefixLengthStopsAtWestMismatch() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        // idx 21's west edge no longer matches idx 20's east.
+        int p = board[21];
+        board[21] = PieceUtils.pack(PieceUtils.getNorth(p), PieceUtils.getEast(p), PieceUtils.getSouth(p), 9999);
+
+        assertEquals(21, computeValidPrefixLength(solver, board));
+    }
+
+    @Test
+    void testComputeValidPrefixLengthDoesNotCheckSouthAgainstUnplacedNeighbor() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        // idx 40 (interior) gets a bad south edge. The typewriter method never checks
+        // south against a neighbor that isn't placed yet, so the walk must sail straight
+        // past idx 40 - it only notices once it reaches idx 56 and checks *that* tile's
+        // north edge (the same physical edge, seen from the other, already-placed side).
+        int p = board[40];
+        board[40] = PieceUtils.pack(PieceUtils.getNorth(p), PieceUtils.getEast(p), 9999, PieceUtils.getWest(p));
+
+        assertEquals(56, computeValidPrefixLength(solver, board),
+                "South edges must only be caught later via the neighbor's own north check, never at the tile itself");
+    }
+
+    @Test
+    void testComputeValidPrefixLengthDoesNotCheckEastAgainstUnplacedNeighbor() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        // idx 40 (interior) gets a bad east edge - only caught later at idx 41's west check.
+        int p = board[40];
+        board[40] = PieceUtils.pack(PieceUtils.getNorth(p), 9999, PieceUtils.getSouth(p), PieceUtils.getWest(p));
+
+        assertEquals(41, computeValidPrefixLength(solver, board),
+                "East edges must only be caught later via the neighbor's own west check, never at the tile itself");
+    }
+
+    @Test
+    void testComputeValidPrefixLengthStopsAtTopRowWrongOutwardEdge() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        // idx 5 is on the top row (row 0); give it a non-grey north edge.
+        int p = board[5];
+        board[5] = PieceUtils.pack(9999, PieceUtils.getEast(p), PieceUtils.getSouth(p), PieceUtils.getWest(p));
+
+        assertEquals(5, computeValidPrefixLength(solver, board));
+    }
+
+    @Test
+    void testComputeValidPrefixLengthStopsAtBottomRowWrongOutwardEdge() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        // idx 241 is on the bottom row (row 15); its south border color is an intrinsic
+        // property of the piece, knowable immediately - no neighbor needed to check it.
+        int p = board[241];
+        board[241] = PieceUtils.pack(PieceUtils.getNorth(p), PieceUtils.getEast(p), 9999, PieceUtils.getWest(p));
+
+        assertEquals(241, computeValidPrefixLength(solver, board));
+    }
+
+    @Test
+    void testComputeValidPrefixLengthStopsAtRightColumnWrongOutwardEdge() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        // idx 47 is on the right column (col 15); its east border color is likewise
+        // intrinsic and checked immediately, unlike an actual neighbor comparison.
+        int p = board[47];
+        board[47] = PieceUtils.pack(PieceUtils.getNorth(p), 9999, PieceUtils.getSouth(p), PieceUtils.getWest(p));
+
+        assertEquals(47, computeValidPrefixLength(solver, board));
+    }
+
+    @Test
+    void testComputeValidPrefixLengthStopsAtEmptyCell() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        board[30] = -1;
+
+        assertEquals(30, computeValidPrefixLength(solver, board));
+    }
+
+    @Test
+    void testComputeValidPrefixLengthStopsAtSurgeonHole() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+
+        int[] board = buildCleanFullBoard();
+        board[60] = -2;
+
+        assertEquals(60, computeValidPrefixLength(solver, board));
+    }
+
 }

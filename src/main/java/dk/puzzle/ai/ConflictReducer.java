@@ -460,6 +460,17 @@ public class ConflictReducer {
             if (row < 15 && board[i+16] != -1 && board[i+16] != -2) {
                 if (PieceUtils.getSouth(p) != PieceUtils.getNorth(board[i+16])) total++;
             }
+            // Frame violations: a border-row/column piece whose outward edge
+            // isn't grey is just as much a conflict as a mismatched neighbor,
+            // but has no neighbor to mismatch against — must be checked
+            // explicitly. Matches HoleSolver.findConflicts's definition;
+            // omitting this let every heuristic below silently trade an
+            // internal conflict for a new frame violation and report it as
+            // an improvement.
+            if (row == 0  && PieceUtils.getNorth(p) != PieceUtils.BORDER_COLOR) total++;
+            if (row == 15 && PieceUtils.getSouth(p) != PieceUtils.BORDER_COLOR) total++;
+            if (col == 0  && PieceUtils.getWest(p)  != PieceUtils.BORDER_COLOR) total++;
+            if (col == 15 && PieceUtils.getEast(p)  != PieceUtils.BORDER_COLOR) total++;
         }
         return total;
     }
@@ -474,6 +485,11 @@ public class ConflictReducer {
             if (row < 15 && board[i+16] != -1 && PieceUtils.getSouth(p) != PieceUtils.getNorth(board[i+16])) score[i]++;
             if (col > 0  && board[i-1]  != -1 && PieceUtils.getWest(p)  != PieceUtils.getEast(board[i-1]))  score[i]++;
             if (col < 15 && board[i+1]  != -1 && PieceUtils.getEast(p)  != PieceUtils.getWest(board[i+1]))  score[i]++;
+            // Frame violations — see the matching comment in countConflicts.
+            if (row == 0  && PieceUtils.getNorth(p) != PieceUtils.BORDER_COLOR) score[i]++;
+            if (row == 15 && PieceUtils.getSouth(p) != PieceUtils.BORDER_COLOR) score[i]++;
+            if (col == 0  && PieceUtils.getWest(p)  != PieceUtils.BORDER_COLOR) score[i]++;
+            if (col == 15 && PieceUtils.getEast(p)  != PieceUtils.BORDER_COLOR) score[i]++;
         }
         return score;
     }

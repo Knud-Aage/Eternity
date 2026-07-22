@@ -1202,6 +1202,19 @@ public class EternitySolver implements Runnable {
         final int iterations = 200_000;
         logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
 
+        // Sanity check on baseScore's use for the save-threshold gating
+        // decision below (baseScore >= absoluteHighScore - 1, etc.) — this no
+        // longer affects the saved filename, which now computes its own
+        // "Base" label directly from the actual board in saveFullBoardVariant
+        // (see computeValidPrefixLength) and can't go stale the way this
+        // parameter historically could.
+        int placedNow = 256 - numEmpty;
+        if (Math.abs(placedNow - baseScore) > 1) {
+            logger.warn(">>> [BASE SCORE MISMATCH] analyzeFullBoardPotential called with baseScore=%d but the " +
+                    "board actually has %d placed pieces (expected within 1 of each other) — gating decision below " +
+                    "may be using a stale depth.", baseScore, placedNow);
+        }
+
         if (pendingAnalyses.get() >= ANALYSIS_QUEUE_CAP) {
             logger.info(">>> [FULL BOARD SCAN] Skipped — %d analyses already queued.", pendingAnalyses.get());
             return;
@@ -1233,7 +1246,7 @@ public class EternitySolver implements Runnable {
                         bestBoard = holeSolved;
                         totalConflicts = holeSolvedConflicts;
                     }
-                    saveFullBoardVariant(bestBoard, baseScore, totalConflicts);
+                    saveFullBoardVariant(bestBoard, totalConflicts);
                 } else {
                     logger.info(">>> [FULL BOARD SCAN] Not saved: %d conflicts >= threshold %d and base score %d <= variant threshold %d",
                             totalConflicts, conflictSaveThreshold.get(), baseScore, variantSaveThreshold.get());
@@ -1247,7 +1260,14 @@ public class EternitySolver implements Runnable {
     }
 
     private void triggerBranchScrap() {
-        analyzeFullBoardPotential(bestBoard, deepestStep);
+        // countPieces(bestBoard), not deepestStep: this method fires on every
+        // stagnation/teardown cycle (hundreds of thousands of times over a
+        // long run), and teardown below resets deepestStep without touching
+        // bestBoard — if bestBoard hasn't been refreshed since an earlier
+        // peak, deepestStep can already be a much lower, unrelated number by
+        // the time this call fires. The label must describe the board being
+        // analyzed, not whatever the depth counter currently reads.
+        analyzeFullBoardPotential(bestBoard, countPieces(bestBoard));
         consecutiveExtinctions++;
 
         // --- TRUE STAGNATION TRACKER (GPU) ---
@@ -1626,7 +1646,59 @@ public class EternitySolver implements Runnable {
         }
     }
 
-    private void saveFullBoardVariant(int[] simulatedBoard, int baseScore, int conflicts) {
+    /**
+     * Counts how many pieces, walking buildOrder from the start, form a
+     * genuinely valid prefix the way the typewriter method itself builds and
+     * checks a board: a tile's north/west edges are validated against the
+     * already-placed neighbor above/to-the-left of it (or against the grey
+     * border color when it sits on the top/left edge), and nothing else —
+     * south/east are never compared against a neighbor, because during an
+     * actual typewriter build that neighbor doesn't exist yet at the moment
+     * this tile is placed. The one exception is the outward border color on
+     * the bottom/right edge (row 15 / col 15): that's an intrinsic property
+     * of the piece itself, not a comparison against a neighbor, so it's
+     * knowable and checked immediately. This is what "Base" in a saved
+     * filename is supposed to mean, and it's computed directly from the
+     * actual board being saved — unlike deepestStep or bestBoard, it can
+     * never go stale or drift from what a manual bucas inspection of that
+     * exact link would show, regardless of how the board got here
+     * (incremental search, Monte Carlo fill, or HoleSolver polish).
+     */
+    private int computeValidPrefixLength(int[] board) {
+        int validCount = 0;
+        for (int step = 0; step < 256; step++) {
+            int idx = buildOrder[step];
+            int p = board[idx];
+            if (p == -1 || p == -2) break;
+
+            int row = idx / 16, col = idx % 16;
+            boolean ok;
+            if (row == 0) {
+                ok = PieceUtils.getNorth(p) == PieceUtils.BORDER_COLOR;
+            } else {
+                ok = PieceUtils.getNorth(p) == PieceUtils.getSouth(board[idx - 16]);
+            }
+            if (ok && row == 15) {
+                ok = PieceUtils.getSouth(p) == PieceUtils.BORDER_COLOR;
+            }
+            if (ok) {
+                if (col == 0) {
+                    ok = PieceUtils.getWest(p) == PieceUtils.BORDER_COLOR;
+                } else {
+                    ok = PieceUtils.getWest(p) == PieceUtils.getEast(board[idx - 1]);
+                }
+            }
+            if (ok && col == 15) {
+                ok = PieceUtils.getEast(p) == PieceUtils.BORDER_COLOR;
+            }
+
+            if (!ok) break;
+            validCount++;
+        }
+        return validCount;
+    }
+
+    private void saveFullBoardVariant(int[] simulatedBoard, int conflicts) {
         String fullProfileFolder = saveProfile + "_FULL";
         java.io.File folder = new java.io.File(fullProfileFolder);
         if (!folder.exists()) {
@@ -1634,7 +1706,7 @@ public class EternitySolver implements Runnable {
         }
 
         String timeId = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss_SSS"));
-        int displayScore = baseScore + 1; // radar holds one piece back; show the true count
+        int displayScore = computeValidPrefixLength(simulatedBoard);
         String baseFilename = "Errors" + conflicts + "_Base" + displayScore + "_" + timeId;
 
         try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, "Raw_Board_Output_" + displayScore + ".txt"))) {
@@ -1662,7 +1734,7 @@ public class EternitySolver implements Runnable {
                 }
                 writer.println(line);
             }
-            logger.info(String.format(">>> [FULL BOARD SCAN] Saved raw board text for BoardImporter: Raw_Board_Output_%d.txt", baseScore));
+            logger.info(String.format(">>> [FULL BOARD SCAN] Saved raw board text for BoardImporter: Raw_Board_Output_%d.txt", displayScore));
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving Raw Board Text: %s", e.getMessage()));
         }
@@ -1715,6 +1787,15 @@ public class EternitySolver implements Runnable {
             logger.info(String.format(">>> Saved full board PNG image: %s.png", baseFilename));
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving PNG image: %s", e.getMessage()));
+        }
+
+        try {
+            HoleSolver.writePhysicalLayoutFile(
+                    new java.io.File(folder, baseFilename + "_physical_layout.txt").getAbsolutePath(),
+                    inventory, simulatedBoard, null);
+            logger.info(String.format(">>> Saved physical piece layout: %s_physical_layout.txt", baseFilename));
+        } catch (Exception e) {
+            logger.error(String.format(">>> Error saving physical layout: %s", e.getMessage()));
         }
     }
 

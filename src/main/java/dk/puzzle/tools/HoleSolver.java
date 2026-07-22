@@ -10,6 +10,8 @@ import dk.puzzle.util.PieceUtils;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -61,11 +63,12 @@ public class HoleSolver {
     // instead of hanging forever.
     private static final long STEP_BUDGET_PER_REGION = 200_000_000L;
 
-    private static final String PHYSICAL_LAYOUT_FILE = "physical_layout.txt";
-
     public static void main(String[] args) {
         if (args.length < 1) {
-            System.out.println("Usage: HoleSolver <bucas link or raw board_edges string> [trials]");
+            System.out.println("Usage: HoleSolver <bucas link or raw board_edges string> [trials] [baseLabel]");
+            System.out.println("  baseLabel: optional, e.g. the source board's piece count (\"214\") -- woven");
+            System.out.println("  into the saved filenames as \"Base214\" alongside the conflict count. HoleSolver");
+            System.out.println("  only ever sees a bucas link, so it can't derive this on its own.");
             return;
         }
 
@@ -83,16 +86,29 @@ public class HoleSolver {
                 System.out.println("Invalid trials value '" + args[1] + "', expected an integer. Using default " + DEFAULT_TRIALS + ".");
             }
         }
+        String baseLabel = args.length >= 3 ? args[2] : null;
 
         int[] board = decodeBoard(boardEdges);
         PieceInventory inventory = new PieceInventory(Eternity.loadPieces());
 
         ConflictSolveResult result = solveConflicts(board, inventory, true, trials);
 
-        String link = BucasExporter.exportBoard(result.finalBoard());
+        // bestBoard(), not finalBoard() — when the fallback repair ran and
+        // improved things, finalBoard() is the pre-fallback board, and
+        // printing it here as "the" result silently threw away the
+        // improvement the verbose output above just showed.
+        int[] best = result.bestBoard();
+        String link = BucasExporter.exportBoard(best);
+        System.out.println();
+        System.out.println("=== Final result (use this link) ===");
         System.out.println(link);
 
-        writePhysicalLayoutFile(inventory, result.finalBoard(), result.repairedBoard());
+        int finalConflicts = findConflicts(best).size();
+        String timeId = LocalTime.now().format(DateTimeFormatter.ofPattern("HHmmss_SSS"));
+        String prefix = "Errors" + finalConflicts + (baseLabel != null ? "_Base" + baseLabel : "") + "_" + timeId;
+
+        writePhysicalLayoutFile(prefix + "_physical_layout.txt", inventory, result.finalBoard(), result.repairedBoard());
+        writeRawBoardFile(prefix + "_RawBoard.txt", inventory, best);
     }
 
     /**
@@ -291,16 +307,60 @@ public class HoleSolver {
     // reference orientation as recorded in pieces.csv (rotation 0).
     // ------------------------------------------------------------------
 
-    private static void writePhysicalLayoutFile(PieceInventory inventory, int[] finalBoard, int[] repaired) {
-        try (PrintWriter out = new PrintWriter(new FileWriter(PHYSICAL_LAYOUT_FILE))) {
+    /**
+     * Writes the physical piece layout ("physical piece number @ rotation" grid,
+     * for placing a solution on the real board) to {@code filename}. Public so
+     * EternitySolver's own automatic save path can reuse the exact same format
+     * instead of duplicating it.
+     */
+    public static void writePhysicalLayoutFile(String filename, PieceInventory inventory, int[] finalBoard, int[] repaired) {
+        try (PrintWriter out = new PrintWriter(new FileWriter(filename))) {
             if (repaired != null) {
                 writePhysicalLayout(out, "Heuristic fallback board (repaired)", repaired, inventory);
             }
             writePhysicalLayout(out, "Final board", finalBoard, inventory);
             System.out.println();
-            System.out.println("Physical piece layout written to " + PHYSICAL_LAYOUT_FILE);
+            System.out.println("Physical piece layout written to " + filename);
         } catch (IOException e) {
-            System.out.println("WARNING: couldn't write " + PHYSICAL_LAYOUT_FILE + ": " + e.getMessage());
+            System.out.println("WARNING: couldn't write " + filename + ": " + e.getMessage());
+        }
+    }
+
+    /**
+     * Same physId/rotation grid format EternitySolver's saveFullBoardVariant
+     * writes (Raw_Board_Output_*.txt), for direct compatibility with
+     * BoardImporter and anything else that already consumes that format.
+     */
+    /**
+     * Same physId/rotation grid format EternitySolver's saveFullBoardVariant
+     * writes (Raw_Board_Output_*.txt), for direct compatibility with
+     * BoardImporter and anything else that already consumes that format.
+     * Public for the same reason as {@link #writePhysicalLayoutFile}.
+     */
+    public static void writeRawBoardFile(String filename, PieceInventory inventory, int[] board) {
+        try (PrintWriter out = new PrintWriter(new FileWriter(filename))) {
+            for (int row = 0; row < H; row++) {
+                StringBuilder line = new StringBuilder();
+                for (int col = 0; col < W; col++) {
+                    int p = board[row * W + col];
+                    if (p == -1 || p == -2) {
+                        line.append("0/0");
+                    } else {
+                        int[] pieceAndRotation = physicalPieceAndRotation(inventory, p);
+                        int physId = pieceAndRotation[0];
+                        if (physId == -1) {
+                            line.append("0/0");
+                        } else {
+                            line.append(physId).append("/").append(pieceAndRotation[1] / 90);
+                        }
+                    }
+                    if (col < W - 1) line.append(" ");
+                }
+                out.println(line);
+            }
+            System.out.println("Raw board written to " + filename);
+        } catch (IOException e) {
+            System.out.println("WARNING: couldn't write " + filename + ": " + e.getMessage());
         }
     }
 

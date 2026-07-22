@@ -71,9 +71,11 @@ class ConflictReducerTest {
     void testCountConflictsMatchingAdjacentPiecesIsZero() {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
         int[] board = emptyBoard();
-        board[0] = PieceUtils.pack(1, 2, 3, 4);
-        board[1] = PieceUtils.pack(5, 6, 7, 2);   // West=2 matches East of index 0
-        board[16] = PieceUtils.pack(3, 8, 9, 10); // North=3 matches South of index 0
+        // Interior cells (row1/col1, row1/col2, row2/col1) so the frame-violation
+        // check below can't contribute — this test is about internal mismatches only.
+        board[17] = PieceUtils.pack(1, 2, 3, 4);
+        board[18] = PieceUtils.pack(5, 6, 7, 2);   // West=2 matches East of index 17
+        board[33] = PieceUtils.pack(3, 8, 9, 10);  // North=3 matches South of index 17
         assertEquals(0, reducer.countConflicts(board));
     }
 
@@ -81,9 +83,9 @@ class ConflictReducerTest {
     void testCountConflictsCountsHorizontalAndVerticalMismatches() {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
         int[] board = emptyBoard();
-        board[0] = PieceUtils.pack(1, 2, 3, 4);
-        board[1] = PieceUtils.pack(5, 6, 7, 9);  // West=9 mismatches East=2 -> 1 conflict
-        board[16] = PieceUtils.pack(9, 8, 9, 10); // North=9 mismatches South=3 -> 1 conflict
+        board[17] = PieceUtils.pack(1, 2, 3, 4);
+        board[18] = PieceUtils.pack(5, 6, 7, 9);   // West=9 mismatches East=2 -> 1 conflict
+        board[33] = PieceUtils.pack(9, 8, 9, 10);  // North=9 mismatches South=3 -> 1 conflict
         assertEquals(2, reducer.countConflicts(board));
     }
 
@@ -91,9 +93,38 @@ class ConflictReducerTest {
     void testCountConflictsIgnoresSurgeonHoles() {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
         int[] board = emptyBoard();
-        board[0] = PieceUtils.pack(1, 2, 3, 4);
-        board[1] = -2; // surgeon hole; would mismatch (West unknown) but must be skipped
+        board[17] = PieceUtils.pack(1, 2, 3, 4);
+        board[18] = -2; // surgeon hole; would mismatch (West unknown) but must be skipped
         assertEquals(0, reducer.countConflicts(board));
+    }
+
+    @Test
+    void testCountConflictsDetectsFrameViolationOnBorderCell() {
+        ConflictReducer reducer = new ConflictReducer(mockInventory, false);
+        int[] board = emptyBoard();
+        // Row 0: North edge must be BORDER_COLOR (0). This piece's North=1 is a
+        // frame violation even though it has no neighbor to mismatch against.
+        board[5] = PieceUtils.pack(1, 0, 0, 0);
+        assertEquals(1, reducer.countConflicts(board),
+                "A non-border-colored outward edge on a border cell must count as a conflict");
+    }
+
+    @Test
+    void testCountConflictsAcceptsCorrectBorderColorOnBorderCell() {
+        ConflictReducer reducer = new ConflictReducer(mockInventory, false);
+        int[] board = emptyBoard();
+        board[5] = PieceUtils.pack(0, 7, 8, 9); // North=0 (BORDER_COLOR) -> no frame violation
+        assertEquals(0, reducer.countConflicts(board));
+    }
+
+    @Test
+    void testCountConflictsDetectsBothFrameViolationsAtACorner() {
+        ConflictReducer reducer = new ConflictReducer(mockInventory, false);
+        int[] board = emptyBoard();
+        // Index 0 is row0/col0: both North and West must be BORDER_COLOR.
+        board[0] = PieceUtils.pack(1, 5, 6, 4);
+        assertEquals(2, reducer.countConflicts(board),
+                "A corner cell violating both outward edges must count as 2 conflicts");
     }
 
     // -----------------------------------------------------------------------
@@ -104,17 +135,30 @@ class ConflictReducerTest {
     void testScoreConflictsAssignsScoreToBothSidesOfAMismatch() throws Exception {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
         int[] board = emptyBoard();
-        board[0] = PieceUtils.pack(1, 2, 3, 4);   // East=2
-        board[1] = PieceUtils.pack(5, 6, 7, 9);   // West=9 mismatches East(0)=2
-        board[2] = PieceUtils.pack(20, 21, 22, 6); // West=6 matches East(1)=6 -> no conflict here
+        board[17] = PieceUtils.pack(1, 2, 3, 4);    // East=2
+        board[18] = PieceUtils.pack(5, 6, 7, 9);    // West=9 mismatches East(17)=2
+        board[19] = PieceUtils.pack(20, 21, 22, 6); // West=6 matches East(18)=6 -> no conflict here
 
         Method m = ConflictReducer.class.getDeclaredMethod("scoreConflicts", int[].class);
         m.setAccessible(true);
         int[] score = (int[]) m.invoke(reducer, (Object) board);
 
-        assertEquals(1, score[0], "Position 0 must be credited with its East mismatch");
-        assertEquals(1, score[1], "Position 1 must be credited with its West mismatch");
-        assertEquals(0, score[2], "Position 2 has no mismatches and must score 0");
+        assertEquals(1, score[17], "Position 17 must be credited with its East mismatch");
+        assertEquals(1, score[18], "Position 18 must be credited with its West mismatch");
+        assertEquals(0, score[19], "Position 19 has no mismatches and must score 0");
+    }
+
+    @Test
+    void testScoreConflictsCreditsFrameViolationToItsOwnCell() throws Exception {
+        ConflictReducer reducer = new ConflictReducer(mockInventory, false);
+        int[] board = emptyBoard();
+        board[5] = PieceUtils.pack(1, 0, 0, 0); // row0: North=1 is a frame violation
+
+        Method m = ConflictReducer.class.getDeclaredMethod("scoreConflicts", int[].class);
+        m.setAccessible(true);
+        int[] score = (int[]) m.invoke(reducer, (Object) board);
+
+        assertEquals(1, score[5], "The bordering cell itself must be credited with its own frame violation");
     }
 
     // -----------------------------------------------------------------------
@@ -203,15 +247,19 @@ class ConflictReducerTest {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
 
         int[] board = emptyBoard();
-        board[0] = mockInventory.allOrientations[3 * 4 + 1]; // non-ideal rotation (East != 2)
-        board[1] = PieceUtils.pack(50, 51, 52, 2);            // requires East(0) == 2 to match
+        // Interior cells: none of this piece's rotations ever expose a
+        // BORDER_COLOR edge, so testing this on an actual border cell would
+        // make the conflict unresolvable by rotation alone regardless of
+        // the East/West match this test is actually about.
+        board[17] = mockInventory.allOrientations[3 * 4 + 1]; // non-ideal rotation (East != 2)
+        board[18] = PieceUtils.pack(50, 51, 52, 2);            // requires East(17) == 2 to match
 
         Method m = ConflictReducer.class.getDeclaredMethod("rotationPass", int[].class);
         m.setAccessible(true);
         int after = (int) m.invoke(reducer, (Object) board);
 
         assertEquals(0, after, "rotationPass should find the orientation whose East==2, eliminating the conflict");
-        assertEquals(2, PieceUtils.getEast(board[0]), "Winning orientation's East edge must equal 2 to match the neighbour's West");
+        assertEquals(2, PieceUtils.getEast(board[17]), "Winning orientation's East edge must equal 2 to match the neighbour's West");
     }
 
     @Test
@@ -241,8 +289,12 @@ class ConflictReducerTest {
     void testSwapPassSwapsPiecesToReduceConflicts() throws Exception {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
         int[] board = emptyBoard();
-        board[0] = PieceUtils.pack(0, 9, 0, 0); // East=9
-        board[1] = PieceUtils.pack(0, 0, 0, 7); // West=7 -> mismatches East=9
+        // Interior cells: at a border cell, swapping these two specific pieces
+        // would fix the East/West mismatch but introduce a new frame violation
+        // (net conflicts unchanged), so swapPass would correctly reject the
+        // swap — this test is about the swap mechanics, not border interplay.
+        board[17] = PieceUtils.pack(0, 9, 0, 0); // East=9
+        board[18] = PieceUtils.pack(0, 0, 0, 7); // West=7 -> mismatches East=9
 
         Method m = ConflictReducer.class.getDeclaredMethod("swapPass", int[].class);
         m.setAccessible(true);
@@ -251,8 +303,8 @@ class ConflictReducerTest {
 
         assertEquals(1, before);
         assertEquals(0, after, "swapPass should find a swap that eliminates the conflict");
-        assertEquals(PieceUtils.pack(0, 0, 0, 7), board[0]);
-        assertEquals(PieceUtils.pack(0, 9, 0, 0), board[1]);
+        assertEquals(PieceUtils.pack(0, 0, 0, 7), board[17]);
+        assertEquals(PieceUtils.pack(0, 9, 0, 0), board[18]);
     }
 
     @Test
@@ -280,8 +332,8 @@ class ConflictReducerTest {
     void testReduceLiveShortCircuitsWhenBoardHasNoConflicts() {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
         int[] board = emptyBoard();
-        board[0] = PieceUtils.pack(1, 2, 3, 4);
-        board[1] = PieceUtils.pack(5, 6, 7, 2); // matches, no conflicts
+        board[17] = PieceUtils.pack(1, 2, 3, 4);
+        board[18] = PieceUtils.pack(5, 6, 7, 2); // matches, no conflicts
         int[] before = Arrays.copyOf(board, 256);
 
         int result = reducer.reduceLive(board, 3);
@@ -297,8 +349,8 @@ class ConflictReducerTest {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
 
         int[] board = emptyBoard();
-        board[0] = mockInventory.allOrientations[9 * 4 + 1]; // mismatched rotation
-        board[1] = PieceUtils.pack(50, 51, 52, 2);
+        board[17] = mockInventory.allOrientations[9 * 4 + 1]; // mismatched rotation
+        board[18] = PieceUtils.pack(50, 51, 52, 2);
 
         int result = reducer.reduceLive(board, 2);
 
@@ -313,8 +365,8 @@ class ConflictReducerTest {
         ConflictReducer reducer = new ConflictReducer(mockInventory, false);
 
         int[] board = emptyBoard();
-        board[0] = mockInventory.allOrientations[9 * 4 + 1];
-        board[1] = PieceUtils.pack(50, 51, 52, 2);
+        board[17] = mockInventory.allOrientations[9 * 4 + 1];
+        board[18] = PieceUtils.pack(50, 51, 52, 2);
 
         int result = reducer.reducePostProcess(board, 20);
 
