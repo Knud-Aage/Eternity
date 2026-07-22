@@ -5,10 +5,6 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 
-/**
- * Holder for de bedste brætter fundet under søgningen.
- * Bruges af Phase 3 til at køre LNS på top-N brætter i stedet for kun ét.
- */
 public class TopBoardRegistry {
 
     public static final int MAX_SIZE = 20;
@@ -16,7 +12,6 @@ public class TopBoardRegistry {
     private final List<Entry> entries = new ArrayList<>();
 
     public synchronized void offer(int[] board, int score) {
-        // Tjek om vi allerede har dette bræt (undgå dubletter med samme score)
         for (Entry e : entries) {
             if (e.score == score && Arrays.equals(e.board, board)) return;
         }
@@ -29,20 +24,17 @@ public class TopBoardRegistry {
         }
     }
 
-    /** Returnerer det bedste bræt, eller null hvis tom. */
     public synchronized int[] getBest() {
         if (entries.isEmpty()) return null;
         return Arrays.copyOf(entries.get(0).board, 256);
     }
 
-    /** Returnerer alle top-brætter som en liste (kopi). */
     public synchronized List<int[]> getAll() {
         List<int[]> result = new ArrayList<>(entries.size());
         for (Entry e : entries) result.add(Arrays.copyOf(e.board, 256));
         return result;
     }
 
-    /** Returnerer det næste bræt i round-robin rækkefølge til LNS-kørsel. */
     private int roundRobinIdx = 0;
     public synchronized int[] nextForRepair() {
         if (entries.isEmpty()) return null;

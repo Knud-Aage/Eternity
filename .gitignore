@@ -37,3 +37,7 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### Generated log analysis ###
+logs/progress.csv
+logs/progress_daily_summary.csv
