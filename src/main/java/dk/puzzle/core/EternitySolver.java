@@ -31,6 +31,28 @@ public class EternitySolver implements Runnable {
     private final Set<Integer> savedVariantHashes = ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.atomic.AtomicInteger variantSaveThreshold = new java.util.concurrent.atomic.AtomicInteger(210);
     private final java.util.concurrent.atomic.AtomicInteger conflictSaveThreshold = new java.util.concurrent.atomic.AtomicInteger(60);
+
+    // --- Two-stage seed selection (fitness = fill quality, not just depth) ---
+    // How many stage-1 leaders get their fill evaluated per batch. 0 = disabled,
+    // which restores pure depth-ranked elite selection.
+    private final java.util.concurrent.atomic.AtomicInteger seedEvalPoolSize =
+            new java.util.concurrent.atomic.AtomicInteger(64);
+    // Restart count handed to mcvRestartFill during evaluation. Deliberately
+    // tiny next to the 200_000 used for record analysis: here we only need a
+    // consistent RELATIVE ranking across seeds, not the best achievable fill.
+    private final java.util.concurrent.atomic.AtomicInteger seedEvalIterations =
+            new java.util.concurrent.atomic.AtomicInteger(30);
+    // Minimum current-batch depth (maxDepthInBatch, NOT deepestStep -- after a
+    // teardown/retreat the working seed pool can be far shallower than the
+    // session's all-time peak) before fitness evaluation activates at all.
+    // Below this, holes number in the hundreds: filling them is both far more
+    // expensive per seed and far noisier as a ranking signal (30 trials over
+    // ~240 holes barely differentiates seeds), and the whole point of this
+    // feature -- distinguishing near-endgame fills like 220->21 vs 221->23
+    // conflicts -- only applies once conflicts are actually confined to the
+    // residual bottom region (empirically rows ~12-16, i.e. depth >= ~190).
+    private final java.util.concurrent.atomic.AtomicInteger seedEvalMinDepth =
+            new java.util.concurrent.atomic.AtomicInteger(190);
     public static final int SEED_DEPTH = 110;
     public static final int LNS_THRESHOLD = 200;
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
@@ -895,22 +917,37 @@ public class EternitySolver implements Runnable {
             }
 
             // 2. ONLY if it beats the Global Record do we save to disk
-            if (deepestStep > absoluteHighScore) {
-                absoluteHighScore = deepestStep;
-                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+            // Synchronized on displayLock: promoteToGlobalRecordIfHigher (called
+            // from background analysis threads) now also mutates absoluteHighScore/
+            // globalBestBoard, so this check-and-claim step genuinely races across
+            // threads and needs the same lock those uses share.
+            int[] newRecordBoard = null;
+            int newRecordScore = 0;
+            synchronized (displayLock) {
+                if (deepestStep > absoluteHighScore) {
+                    absoluteHighScore = deepestStep;
+                    System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
 
-                int hash = Arrays.hashCode(globalBestBoard);
-                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", absoluteHighScore, hash);
-                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
-                uniqueMaxScoreHashes.clear();
-                uniqueMaxScoreHashes.add(hash);
+                    int hash = Arrays.hashCode(globalBestBoard);
+                    logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", absoluteHighScore, hash);
+                    logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
+                    uniqueMaxScoreHashes.clear();
+                    uniqueMaxScoreHashes.add(hash);
 
-                int[] displayBoard = extendRecordGreedily(globalBestBoard, absoluteHighScore);
-                int displayScore = countPieces(displayBoard);
+                    int[] displayBoard = extendRecordGreedily(globalBestBoard, absoluteHighScore);
+                    int displayScore = countPieces(displayBoard);
+                    RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
 
-                RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
+                    newRecordBoard = displayBoard;
+                    newRecordScore = displayScore;
+                }
+            }
+            // Google Drive upload happens outside the lock -- a slow/unavailable
+            // connection must not stall the live progress display or other threads
+            // waiting on displayLock.
+            if (newRecordBoard != null) {
                 try {
-                    saveAndUploadBucasLink(displayBoard, displayScore);
+                    saveAndUploadBucasLink(newRecordBoard, newRecordScore);
                 } catch (Exception e) {
                     logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
                 }
@@ -925,14 +962,29 @@ public class EternitySolver implements Runnable {
 
         // --- Seed generation for the next batch ---
         if (consecutiveGpuStagnation < 4) {
+            // Gate on maxDepthInBatch (this batch's actual depth), not deepestStep
+            // (the session's all-time peak) -- after a teardown/retreat the two can
+            // diverge sharply, and evaluating a shallow, hundreds-of-holes batch is
+            // both expensive and too noisy to give a meaningful ranking.
+            int evalPool = maxDepthInBatch >= seedEvalMinDepth.get() ? seedEvalPoolSize.get() : 0;
+            long evalStart = System.currentTimeMillis();
             seedPool.addAll(SeedSelector.selectBest(
                     seeds,
                     result.threadDepths(),
                     getDynamicBatchSize(),
                     buildOrder,
                     bestBoard,
-                    new Random()
+                    new Random(),
+                    evalPool > 0 ? this::evaluateSeedConflicts : null,
+                    evalPool
             ));
+            if (evalPool > 0 && SeedSelector.getLastEvaluatedCount() > 0) {
+                logger.info(">>> [FITNESS] Evaluated %d seeds in %d ms | fill conflicts best=%d worst=%d",
+                        SeedSelector.getLastEvaluatedCount(),
+                        System.currentTimeMillis() - evalStart,
+                        SeedSelector.getLastBestConflicts(),
+                        SeedSelector.getLastWorstConflicts());
+            }
         } else {
             logger.warn(">>> [!!!] Phase 2 GPU stagnated! Activating Teardown...");
             consecutiveExtinctions++;
@@ -1061,24 +1113,36 @@ public class EternitySolver implements Runnable {
                     deepestStep, Arrays.hashCode(bestBoard));
 
             // Only save to disk when beating the absolute global record
-            if (deepestStep > absoluteHighScore) {
-                absoluteHighScore = deepestStep;
-                lastReportedDepth = absoluteHighScore;
-                System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
+            int[] newRecordBoard = null;
+            int newRecordScore = 0;
+            synchronized (displayLock) {
+                if (deepestStep > absoluteHighScore) {
+                    absoluteHighScore = deepestStep;
+                    lastReportedDepth = absoluteHighScore;
+                    System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
 
-                int hash = Arrays.hashCode(globalBestBoard);
-                uniqueMaxScoreHashes.clear();
-                uniqueMaxScoreHashes.add(hash);
+                    int hash = Arrays.hashCode(globalBestBoard);
+                    uniqueMaxScoreHashes.clear();
+                    uniqueMaxScoreHashes.add(hash);
 
-                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X",
-                        absoluteHighScore, hash);
-                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
+                    logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X",
+                            absoluteHighScore, hash);
+                    logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
 
-                int[] displayBoard = extendRecordGreedily(globalBestBoard, absoluteHighScore);
-                int displayScore = countPieces(displayBoard);
+                    int[] displayBoard = extendRecordGreedily(globalBestBoard, absoluteHighScore);
+                    int displayScore = countPieces(displayBoard);
+                    RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
 
-                RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
-                saveAndUploadBucasLink(displayBoard, displayScore);
+                    newRecordBoard = displayBoard;
+                    newRecordScore = displayScore;
+                }
+            }
+            if (newRecordBoard != null) {
+                try {
+                    saveAndUploadBucasLink(newRecordBoard, newRecordScore);
+                } catch (Exception e) {
+                    logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
+                }
                 analyzeFullBoardPotential(globalBestBoard, absoluteHighScore);
             }
 
@@ -1189,6 +1253,43 @@ public class EternitySolver implements Runnable {
             }
         }
         logger.info(">>> Injected Entropy: Randomly removed " + piecesToRip + " internal pieces to scramble the pathfinder.");
+    }
+
+    /**
+     * Fitness function for seed selection: fill this seed's empty cells and
+     * report the resulting edge-conflict count.
+     *
+     * Reuses ConflictReducer.mcvRestartFill — the same MCV fill the record
+     * analysis uses — so a seed's evaluation score is directly comparable with
+     * the numbers reported by [FULL BOARD SCAN], just computed from far fewer
+     * restarts.
+     *
+     * Called on the hot path (up to seedEvalPoolSize times per GPU batch), so
+     * it must stay cheap; the input is defensively copied because the caller's
+     * seed list is reused for the next generation.
+     */
+    int evaluateSeedConflicts(int[] seedBoard) {
+        int[] copy = Arrays.copyOf(seedBoard, 256);
+        int[] filled = conflictReducer.mcvRestartFill(copy, seedEvalIterations.get());
+        return conflictReducer.countConflicts(filled);
+    }
+
+    /** GUI hook: 0 disables conflict-based elite selection. */
+    public void setSeedEvalPoolSize(int size) {
+        this.seedEvalPoolSize.set(Math.max(0, size));
+        logger.info(">>> [CONFIG] Seed evaluation pool size set to: %d", size);
+    }
+
+    /** GUI hook: restarts per seed evaluation (higher = better signal, slower). */
+    public void setSeedEvalIterations(int iterations) {
+        this.seedEvalIterations.set(Math.max(1, iterations));
+        logger.info(">>> [CONFIG] Seed evaluation iterations set to: %d", iterations);
+    }
+
+    /** GUI hook: current-batch depth (not deepestStep) below which evaluation is skipped entirely. */
+    public void setSeedEvalMinDepth(int depth) {
+        this.seedEvalMinDepth.set(Math.max(0, depth));
+        logger.info(">>> [CONFIG] Seed evaluation minimum depth set to: %d", depth);
     }
 
     private void analyzeFullBoardPotential(int[] recordBoard) {
@@ -1647,27 +1748,33 @@ public class EternitySolver implements Runnable {
     }
 
     /**
-     * Counts how many pieces, walking buildOrder from the start, form a
-     * genuinely valid prefix the way the typewriter method itself builds and
-     * checks a board: a tile's north/west edges are validated against the
-     * already-placed neighbor above/to-the-left of it (or against the grey
-     * border color when it sits on the top/left edge), and nothing else —
-     * south/east are never compared against a neighbor, because during an
-     * actual typewriter build that neighbor doesn't exist yet at the moment
-     * this tile is placed. The one exception is the outward border color on
-     * the bottom/right edge (row 15 / col 15): that's an intrinsic property
-     * of the piece itself, not a comparison against a neighbor, so it's
-     * knowable and checked immediately. This is what "Base" in a saved
-     * filename is supposed to mean, and it's computed directly from the
-     * actual board being saved — unlike deepestStep or bestBoard, it can
-     * never go stale or drift from what a manual bucas inspection of that
-     * exact link would show, regardless of how the board got here
-     * (incremental search, Monte Carlo fill, or HoleSolver polish).
+     * Counts how many pieces, scanning the board in pure geometric row-major
+     * order (top-left to bottom-right, exactly how a human reads the bucas
+     * visualisation), form a genuinely valid prefix: a tile's north/west
+     * edges are validated against the neighbor above/to-the-left of it (or
+     * against the grey border color when it sits on the top/left edge), and
+     * nothing else — south/east are never compared against a neighbor,
+     * because a human scanning left-to-right/top-to-bottom hasn't "seen"
+     * that neighbor yet either. The one exception is the outward border
+     * color on the bottom/right edge (row 15 / col 15): that's an intrinsic
+     * property of the piece itself, not a comparison against a neighbor, so
+     * it's knowable and checked immediately.
+     *
+     * Deliberately does NOT use buildOrder: this is what "Base" in a saved
+     * filename is supposed to mean, and it's the board's own static
+     * geometry, not however the solver's search happened to traverse it
+     * internally. For the constrained/locked profile, buildOrder starts at
+     * the center hint (135) and the other hints, not index 0 — walking that
+     * order compares cells whose "earlier" neighbor was never actually
+     * validated, so it can report a wildly wrong Base (seen in practice:
+     * Base 1 on a board that's genuinely Base 194+ by manual inspection).
+     * Pure geometric order needs no such assumption: idx-16 and idx-1 are
+     * always at a smaller idx, so they're always already checked by the
+     * time idx itself is reached, regardless of any internal build order.
      */
     private int computeValidPrefixLength(int[] board) {
         int validCount = 0;
-        for (int step = 0; step < 256; step++) {
-            int idx = buildOrder[step];
+        for (int idx = 0; idx < 256; idx++) {
             int p = board[idx];
             if (p == -1 || p == -2) break;
 
@@ -1698,6 +1805,66 @@ public class EternitySolver implements Runnable {
         return validCount;
     }
 
+    /**
+     * If a full-board-scan variant's geometrically-valid prefix beats the
+     * current all-time record, promote it to a genuine new record. The
+     * ordinary GPU/CPU search only ever sets a record via strict zero-
+     * conflict backtracking, but computeValidPrefixLength measures exactly
+     * the same thing on a variant's MCV-filled result -- how many pieces
+     * read cleanly in geometric order -- just reached by a different route
+     * (MCV fill + polish instead of backtracking). A clean N-piece geometric
+     * prefix is a genuine N-piece record either way; there is no reason the
+     * two paths should ever disagree about whether a record was set.
+     *
+     * Runs on a backgroundAnalysisExecutor thread, not the SolverThread, so
+     * (unlike before) the record check now genuinely races against the GPU/
+     * CPU search's own record updates -- all three share displayLock for the
+     * check-and-claim step. The comparatively slow Google Drive upload is
+     * deliberately done after releasing the lock so a slow/unavailable
+     * connection can't stall the live progress display.
+     *
+     * Deliberately skips extendRecordGreedily's cosmetic extension: that
+     * method walks buildOrder starting at a given depth, which for the
+     * constrained profile does not correspond to a geometric cell index
+     * (buildOrder starts with the center hint and quarter hints, not index
+     * 0) -- reusing it here with a geometric prefix length would silently
+     * corrupt the extension.
+     */
+    private void promoteToGlobalRecordIfHigher(int[] simulatedBoard, int displayScore) {
+        int[] recordBoard = null;
+        int recordScore = 0;
+        synchronized (displayLock) {
+            if (displayScore > absoluteHighScore) {
+                absoluteHighScore = displayScore;
+
+                int[] truncatedBoard = new int[256];
+                Arrays.fill(truncatedBoard, -1);
+                System.arraycopy(simulatedBoard, 0, truncatedBoard, 0, displayScore);
+                System.arraycopy(truncatedBoard, 0, globalBestBoard, 0, 256);
+
+                int hash = Arrays.hashCode(globalBestBoard);
+                uniqueMaxScoreHashes.clear();
+                uniqueMaxScoreHashes.add(hash);
+
+                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X (via full-board-scan variant)",
+                        absoluteHighScore, hash);
+                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
+
+                RecordManager.saveRecord(buildDisplayBoard(truncatedBoard), displayScore, saveProfile);
+
+                recordBoard = truncatedBoard;
+                recordScore = displayScore;
+            }
+        }
+        if (recordBoard != null) {
+            try {
+                saveAndUploadBucasLink(recordBoard, recordScore);
+            } catch (Exception e) {
+                logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
+            }
+        }
+    }
+
     private void saveFullBoardVariant(int[] simulatedBoard, int conflicts) {
         String fullProfileFolder = saveProfile + "_FULL";
         java.io.File folder = new java.io.File(fullProfileFolder);
@@ -1707,6 +1874,7 @@ public class EternitySolver implements Runnable {
 
         String timeId = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HHmmss_SSS"));
         int displayScore = computeValidPrefixLength(simulatedBoard);
+        promoteToGlobalRecordIfHigher(simulatedBoard, displayScore);
         String baseFilename = "Errors" + conflicts + "_Base" + displayScore + "_" + timeId;
 
         try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, "Raw_Board_Output_" + displayScore + ".txt"))) {
@@ -2355,11 +2523,11 @@ public class EternitySolver implements Runnable {
             if (row < 15 && localBoard[idx + 16] == -1) {
                 int reqN = PieceUtils.getSouth(p);
                 int reqE = (col == 15) ? 0 : (localBoard[idx + 17] != -1 ? PieceUtils.getWest(localBoard[idx + 17]) :
-                                              CompatibilityIndex.WILDCARD);
+                        CompatibilityIndex.WILDCARD);
                 int reqW = (col == 0) ? 0 : (localBoard[idx + 15] != -1 ? PieceUtils.getEast(localBoard[idx + 15]) :
-                                             CompatibilityIndex.WILDCARD);
+                        CompatibilityIndex.WILDCARD);
                 int reqS = (row == 14) ? 0 : (localBoard[idx + 32] != -1 ? PieceUtils.getNorth(localBoard[idx + 32])
-                                              : CompatibilityIndex.WILDCARD);
+                        : CompatibilityIndex.WILDCARD);
 
                 java.util.BitSet southCandidates = compatIndex.candidatesFor(reqN, reqE, reqS, reqW);
                 compatIndex.andNotUsed(southCandidates, localUsed);
@@ -2387,11 +2555,11 @@ public class EternitySolver implements Runnable {
             if (col < 15 && localBoard[idx + 1] == -1) {
                 int reqW = PieceUtils.getEast(p);
                 int reqN = (row == 0) ? 0 : (localBoard[idx - 15] != -1 ? PieceUtils.getSouth(localBoard[idx - 15]) :
-                                             CompatibilityIndex.WILDCARD);
+                        CompatibilityIndex.WILDCARD);
                 int reqE = (col == 14) ? 0 : (localBoard[idx + 2] != -1 ? PieceUtils.getWest(localBoard[idx + 2]) :
-                                              CompatibilityIndex.WILDCARD);
+                        CompatibilityIndex.WILDCARD);
                 int reqS = (row == 15) ? 0 : (localBoard[idx + 17] != -1 ? PieceUtils.getNorth(localBoard[idx + 17])
-                                              : CompatibilityIndex.WILDCARD);
+                        : CompatibilityIndex.WILDCARD);
                 return compatIndex.hasAnyCandidate(reqN, reqE, reqS, reqW, localUsed);
             }
             return true;

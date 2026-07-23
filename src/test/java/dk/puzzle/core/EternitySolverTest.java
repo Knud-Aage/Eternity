@@ -7,14 +7,19 @@ import dk.puzzle.util.PieceUtils;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.MockedStatic;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 
@@ -612,6 +617,83 @@ class EternitySolverTest {
         board[60] = -2;
 
         assertEquals(60, computeValidPrefixLength(solver, board));
+    }
+
+    @Test
+    void testComputeValidPrefixLengthIgnoresBuildOrderForLockedProfile() throws Exception {
+        // lockCenter=true reorders buildOrder to visit the center hint (135) and
+        // HINT_POSITIONS ({221, 45, 210, 34}) before anything else - a real bug
+        // (Base 1 reported on a board that was genuinely Base 194+) happened
+        // because the old implementation walked buildOrder and treated whatever
+        // came earlier IN THAT ORDER as "already validated", when idx 221's true
+        // geometric north neighbor (idx 205) was never actually checked first.
+        // "Base" must reflect pure top-left-to-bottom-right geometric reading
+        // order regardless of the solver's internal build/search order.
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, true);
+
+        int[] board = buildCleanFullBoard();
+        // Break idx 221's north edge against its true geometric neighbor (idx 205).
+        // Under the old buildOrder-walk this surfaces at step 1 (right after the
+        // center hint) -> validCount=1. Under pure geometric order, idx 0-220 are
+        // all still genuinely clean, so the walk must reach all the way to 221.
+        int p = board[221];
+        board[221] = PieceUtils.pack(9999, PieceUtils.getEast(p), PieceUtils.getSouth(p), PieceUtils.getWest(p));
+
+        assertEquals(221, computeValidPrefixLength(solver, board),
+                "Base must reflect geometric reading order, not the locked profile's hint-first internal build order");
+    }
+
+    // ── promoteToGlobalRecordIfHigher ──
+
+    private void promoteToGlobalRecordIfHigher(EternitySolver solver, int[] board, int displayScore) throws Exception {
+        java.lang.reflect.Method method = EternitySolver.class.getDeclaredMethod(
+                "promoteToGlobalRecordIfHigher", int[].class, int.class);
+        method.setAccessible(true);
+        method.invoke(solver, board, displayScore);
+    }
+
+    private void setSaveProfile(EternitySolver solver, String path) throws Exception {
+        java.lang.reflect.Field field = EternitySolver.class.getDeclaredField("saveProfile");
+        field.setAccessible(true);
+        field.set(solver, path);
+    }
+
+    @Test
+    void testPromoteToGlobalRecordIfHigherSavesAndUpdatesStateWhenGenuinelyHigher(@TempDir Path tempDir) throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        setSaveProfile(solver, tempDir.resolve("profile").toString());
+
+        int[] board = buildCleanFullBoard();
+        assertEquals(0, solver.absoluteHighScore, "Freshly constructed solver should start with no record");
+
+        promoteToGlobalRecordIfHigher(solver, board, 194);
+
+        assertEquals(194, solver.absoluteHighScore, "A genuinely higher geometric prefix must become the new record");
+        for (int i = 0; i < 194; i++) {
+            assertEquals(board[i], solver.globalBestBoard[i], "First 194 cells of globalBestBoard must match the source board");
+        }
+        for (int i = 194; i < 256; i++) {
+            assertEquals(-1, solver.globalBestBoard[i], "Cells beyond the valid geometric prefix must be cleared, not carried over with (possibly conflicting) content");
+        }
+        recordMock.verify(() -> RecordManager.saveRecord(any(), eq(194), anyString()));
+    }
+
+    @Test
+    void testPromoteToGlobalRecordIfHigherDoesNothingWhenNotHigherThanCurrentRecord(@TempDir Path tempDir) throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        setSaveProfile(solver, tempDir.resolve("profile").toString());
+        solver.absoluteHighScore = 205;
+
+        int[] board = buildCleanFullBoard();
+        promoteToGlobalRecordIfHigher(solver, board, 205);
+
+        assertEquals(205, solver.absoluteHighScore, "A tied (not strictly higher) score must not be treated as a new record");
+        recordMock.verifyNoInteractions();
+        assertFalse(Files.exists(tempDir.resolve("profile").resolve("bucas_link_205.txt")),
+                "No record file should be written when the score does not beat the existing record");
     }
 
 }

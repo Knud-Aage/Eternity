@@ -235,9 +235,9 @@ public class ConflictReducer {
         }
 
         int polished = reducePostProcess(bestBoard, 50);
-        logger.info(String.format(
-                ">>> [MCV RESTART FILL] %d trials on %d holes → best fill %d conflicts → polished to %d.",
-                trials, holePositions.size(), bestConflicts, polished));
+//        logger.info(String.format(
+//                ">>> [MCV RESTART FILL] %d trials on %d holes → best fill %d conflicts → polished to %d.",
+//                trials, holePositions.size(), bestConflicts, polished));
         return bestBoard;
     }
 
@@ -345,11 +345,11 @@ public class ConflictReducer {
         }
 
         int after = countConflicts(board);
-        if (after < before) {
-            logger.info(String.format(
-                    ">>> [CONFLICT REDUCER] %d → %d conflicts (-%d) on %d-piece board.",
-                    before, after, before - after, countPieces(board)));
-        }
+//        if (after < before) {
+//            logger.info(String.format(
+//                    ">>> [CONFLICT REDUCER] %d → %d conflicts (-%d) on %d-piece board.",
+//                    before, after, before - after, countPieces(board)));
+//        }
         return after;
     }
 

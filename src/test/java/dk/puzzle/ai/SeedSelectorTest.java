@@ -419,4 +419,91 @@ class SeedSelectorTest {
             assertArrayEquals(snapshots.get(i), boards.get(i), "selectBest must not mutate its input boards");
         }
     }
+
+    // ── STAGE 2: conflict-evaluated elite selection ──
+
+    /** Counts how many of the first `filledSlots` SHARED_INDICES entries are actually placed. */
+    private int[] buildBoardWithDepth(int boardId, int filledSlots) {
+        int[] board = new int[256];
+        Arrays.fill(board, -1);
+        for (int slot = 0; slot < filledSlots; slot++) {
+            board[SHARED_INDICES[slot]] = 1 + boardId * 1000 + slot;
+        }
+        return board;
+    }
+
+    @Test
+    void testEvaluatedPoolIsDepthStratifiedNotFlatTopN() {
+        SeedSelector.setElitePct(15);
+        SeedSelector.setDiversePct(55);
+
+        // 20 "deep" seeds (depth 20, all SHARED_INDICES filled) that fill badly,
+        // plus 1 "shallow" seed (depth 10) that fills cleanly. A flat top-N pool
+        // (evalPoolSize=5) ranked by scoreBoard() would be entirely deep seeds,
+        // since depthReached*100 swamps everything else -- the shallow-but-clean
+        // seed would never even be evaluated, let alone win the elite slot.
+        List<int[]> boards = new ArrayList<>();
+        int[] threadDepths = new int[21];
+        for (int i = 0; i < 20; i++) {
+            boards.add(buildBoardWithDepth(i, 20));
+            threadDepths[i] = 20;
+        }
+        int[] shallowCleanSeed = buildBoardWithDepth(999, 10);
+        boards.add(shallowCleanSeed);
+        threadDepths[20] = 10;
+
+        SeedSelector.ConflictEvaluator evaluator = seedBoard -> {
+            int filled = 0;
+            for (int idx : SHARED_INDICES) if (seedBoard[idx] != -1) filled++;
+            return filled >= 20 ? 50 : 3; // deep seeds fill badly; the shallow one fills cleanly
+        };
+
+        // targetCount=10, elitePct=15 -> eliteCount = max(1, 1) = 1: exactly one
+        // elite slot, so the winner is unambiguous.
+        List<int[]> result = SeedSelector.selectBest(
+                boards, threadDepths, 10, identityBuildOrder(), null, new Random(1),
+                evaluator, 5);
+
+        assertTrue(SeedSelector.getLastEvaluatedCount() >= 2,
+                "The depth-10 seed must be part of the evaluated pool despite 20 higher-scoring depth-20 seeds");
+        assertEquals(3, SeedSelector.getLastBestConflicts(),
+                "The shallow-but-clean seed's conflict count must be visible to the evaluator");
+        assertArrayEquals(shallowCleanSeed, result.get(0),
+                "The single elite slot must go to the shallow-but-clean seed, not one of the deeper-but-dirtier ones");
+    }
+
+    @Test
+    void testEvaluatedEliteTierDoesNotContainDuplicateBoards() {
+        SeedSelector.setElitePct(15);
+        SeedSelector.setDiversePct(55);
+
+        // Two seeds with IDENTICAL content (same board content can legitimately
+        // appear twice in a GPU batch) both tie for the best evaluated conflict
+        // count, plus one distinct seed with a worse-but-still-evaluated count.
+        // With eliteCount=2, a correct implementation must not burn both elite
+        // slots on the same board twice - it should dedupe and pull in the
+        // distinct third seed for the second slot. Elite entries are always the
+        // first `eliteCount` entries of result (added before Diverse/Restart/
+        // Fallback ever run), so checking result.get(0)/(1) directly isolates
+        // the elite tier from those later, unrelated tiers.
+        int[] boardA = buildBoardWithDepth(1, 20);
+        int[] boardADuplicate = buildBoardWithDepth(1, 20); // identical content, different array instance
+        int[] boardB = buildBoardWithDepth(2, 20);
+
+        List<int[]> boards = List.of(boardA, boardADuplicate, boardB);
+        int[] threadDepths = {20, 20, 20};
+
+        SeedSelector.ConflictEvaluator evaluator = seedBoard ->
+                Arrays.equals(seedBoard, boardB) ? 10 : 3; // A/A' tie for best; B is worse but usable
+
+        // targetCount=14, elitePct=15 -> eliteCount = 14*15/100 = 2 exactly.
+        List<int[]> result = SeedSelector.selectBest(
+                boards, threadDepths, 14, identityBuildOrder(), null, new Random(1),
+                evaluator, 10);
+
+        assertTrue(result.size() >= 2, "Expected at least the 2 elite slots to be filled");
+        assertArrayEquals(boardA, result.get(0), "First elite slot should be the (tied-for-best) duplicate-content board");
+        assertArrayEquals(boardB, result.get(1),
+                "Second elite slot must be the genuinely distinct board, not a second copy of the first");
+    }
 }

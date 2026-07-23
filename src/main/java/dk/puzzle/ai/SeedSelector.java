@@ -20,6 +20,29 @@ public class SeedSelector {
         diversePct = Math.max(10, Math.min(70, pct));
     }
 
+    /**
+     * Supplied by the caller so SeedSelector needs no PieceInventory /
+     * ConflictReducer dependency. Given a seed board, returns the edge-conflict
+     * count of the best full board that seed fills to.
+     *
+     * This is the objective that actually matters: a shorter prefix that fills
+     * cleanly beats a longer one that fills badly (220 -> 21 conflicts vs
+     * 221 -> 23). Depth alone cannot express that.
+     */
+    @FunctionalInterface
+    public interface ConflictEvaluator {
+        int fullBoardConflicts(int[] seedBoard);
+    }
+
+    // Diagnostics from the most recent evaluated selection (for logging).
+    private static volatile int lastEvaluatedCount = 0;
+    private static volatile int lastBestConflicts  = -1;
+    private static volatile int lastWorstConflicts = -1;
+
+    public static int getLastEvaluatedCount() { return lastEvaluatedCount; }
+    public static int getLastBestConflicts()  { return lastBestConflicts;  }
+    public static int getLastWorstConflicts() { return lastWorstConflicts; }
+
     private static final int[] POSITION_WEIGHT = buildPositionWeights();
 
     private static int[] buildPositionWeights() {
@@ -89,6 +112,7 @@ public class SeedSelector {
         return diff;
     }
 
+    /** Existing signature — unchanged behaviour (depth-ranked elite). */
     public static List<int[]> selectBest(
             List<int[]> allBoards,
             int[] threadDepths,
@@ -96,6 +120,33 @@ public class SeedSelector {
             int[] buildOrder,
             int[] referenceBoard,
             Random random)
+    {
+        return selectBest(allBoards, threadDepths, targetCount,
+                buildOrder, referenceBoard, random, null, 0);
+    }
+
+    /**
+     * Two-stage selection.
+     *
+     * STAGE 1 (cheap, every board): rank by scoreBoard() as before.
+     * STAGE 2 (costly, top {@code evalPoolSize} only): fill each leader and
+     *   count resulting conflicts, then choose the ELITE tier by fewest
+     *   conflicts instead of greatest depth.
+     *
+     * Diverse and Restart tiers keep the stage-1 ordering — their job is
+     * spread, not quality, and re-ranking them would work against that.
+     *
+     * evaluator == null reproduces the original behaviour exactly.
+     */
+    public static List<int[]> selectBest(
+            List<int[]> allBoards,
+            int[] threadDepths,
+            int targetCount,
+            int[] buildOrder,
+            int[] referenceBoard,
+            Random random,
+            ConflictEvaluator evaluator,
+            int evalPoolSize)
     {
         int n = allBoards.size();
         if (n == 0) return new ArrayList<>();
@@ -147,13 +198,89 @@ public class SeedSelector {
         // can exceed targetCount for small targetCount values; result.size() <
         // targetCount is checked in every tier's loop condition as the hard
         // cap so selectBest never returns more than requested.
+        // STAGE 2: re-rank the stage-1 leaders by how cleanly they FILL rather
+        // than how deep they GO, and draw elites from that ordering instead.
+        //
+        // The candidate pool is NOT a flat top-evalPoolSize by scores[] --
+        // scoreBoard() is depth-dominated (depthReached*100 swamps the
+        // posScore/dangerPenalty terms), so a flat top-N is effectively just
+        // "the N deepest seeds" and would never let a shallower-but-cleaner
+        // seed be evaluated at all -- exactly the case this feature exists to
+        // catch (220->21 vs 221->23 conflicts). Instead: guarantee at least
+        // one representative from every distinct depth present in the batch
+        // first, then spend the remaining budget on the overall stage-1
+        // ordering (still depth-leaning, but no longer an absolute gate).
+        List<Integer> eliteOrder = new ArrayList<>();
+        if (evaluator != null && evalPoolSize > 0) {
+            Map<Integer, List<Integer>> byDepth = new LinkedHashMap<>();
+            for (int idx : indices) {
+                if (!isEdgeConsistent(allBoards.get(idx))) continue;
+                int depth = idx < threadDepths.length ? threadDepths[idx] : 0;
+                byDepth.computeIfAbsent(depth, d -> new ArrayList<>()).add(idx);
+            }
+
+            Set<Integer> pooled = new LinkedHashSet<>();
+            for (List<Integer> bucket : byDepth.values()) {
+                if (pooled.size() >= evalPoolSize) break;
+                pooled.add(bucket.get(0)); // each bucket's own best-scoring member
+            }
+            for (int idx : indices) {
+                if (pooled.size() >= evalPoolSize) break;
+                if (isEdgeConsistent(allBoards.get(idx))) pooled.add(idx);
+            }
+
+            List<Integer> pool = new ArrayList<>(pooled);
+            if (!pool.isEmpty()) {
+                final int[] conflicts = new int[n];
+                Arrays.fill(conflicts, Integer.MAX_VALUE);
+
+                // Each evaluation is an independent MCV fill + polish on its own
+                // board copy (no shared mutable state), so run the pool in
+                // parallel -- on the caller's thread, evalPoolSize evaluations
+                // otherwise cost evalPoolSize times a single evaluation's
+                // wall-clock time, which was blocking the next GPU batch launch
+                // for several seconds per round.
+                pool.parallelStream().forEach(idx ->
+                        conflicts[idx] = evaluator.fullBoardConflicts(allBoards.get(idx)));
+
+                int best = Integer.MAX_VALUE, worst = -1;
+                for (int idx : pool) {
+                    int cf = conflicts[idx];
+                    if (cf < best)  best  = cf;
+                    if (cf > worst) worst = cf;
+                }
+                lastEvaluatedCount = pool.size();
+                lastBestConflicts  = best;
+                lastWorstConflicts = worst;
+
+                // Fewest conflicts first; ties broken by stage-1 score, so among
+                // equally clean fills the deeper board still wins.
+                pool.sort((a, b) -> conflicts[a] != conflicts[b]
+                        ? conflicts[a] - conflicts[b]
+                        : scores[b] - scores[a]);
+                eliteOrder = pool;
+            }
+        }
+
+        for (int i = 0; i < eliteOrder.size() && eliteList.size() < eliteCount && result.size() < targetCount; i++) {
+            int[] copy = Arrays.copyOf(allBoards.get(eliteOrder.get(i)), 256);
+            boolean dup = false;
+            for (int[] e : eliteList) if (Arrays.equals(e, copy)) { dup = true; break; }
+            if (dup) continue;
+            eliteList.add(copy);
+            result.add(copy);
+        }
+        // Top up from the stage-1 ordering when the evaluated pool was too
+        // small, or when no evaluator was supplied (the original path).
         for (int i = 0; i < indices.length && eliteList.size() < eliteCount && result.size() < targetCount; i++) {
             int[] board = allBoards.get(indices[i]);
-            if (isEdgeConsistent(board)) {
-                int[] copy = Arrays.copyOf(board, 256);
-                eliteList.add(copy);
-                result.add(copy);
-            }
+            if (!isEdgeConsistent(board)) continue;
+            int[] copy = Arrays.copyOf(board, 256);
+            boolean dup = false;
+            for (int[] e : eliteList) if (Arrays.equals(e, copy)) { dup = true; break; }
+            if (dup) continue;
+            eliteList.add(copy);
+            result.add(copy);
         }
 
         // ── TIER 2: Diverse ──
