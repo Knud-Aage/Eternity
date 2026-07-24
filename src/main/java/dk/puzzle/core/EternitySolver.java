@@ -66,8 +66,8 @@ public class EternitySolver implements Runnable {
     //    final int[] tabuTenure = new int[256];
     final int[] buildOrder = new int[256];
     final int[] bestBoard = new int[256];
-    final int[] globalBestBoard = new int[256];
     final TopBoardRegistry topBoards = new TopBoardRegistry();
+    final RecordTracker recordTracker = new RecordTracker();
     private final ConcurrentHashMap<Integer, Integer> hashStrikeCount = new ConcurrentHashMap<>();
     private final Set<Integer> poisonedHashes = ConcurrentHashMap.newKeySet();
     // Core Solver Components
@@ -116,12 +116,10 @@ public class EternitySolver implements Runnable {
             new java.util.concurrent.atomic.AtomicInteger(0);
     private final java.util.concurrent.atomic.AtomicInteger restartWins =
             new java.util.concurrent.atomic.AtomicInteger(0);
-    private final Set<Integer> uniqueMaxScoreHashes = ConcurrentHashMap.newKeySet();
     private final int[] hintPackedValues = new int[]{-1, -1, -1, -1};
     private final int[] hintPhysicalIndices = new int[]{-1, -1, -1, -1};
     private final long lastDisplayUpdateTime = 0;
     volatile int userBatchSizeOverride = -1;
-    volatile int absoluteHighScore = 0;
     volatile int deepestStep = 0;
     volatile boolean manualOverrideRequested = false;
     volatile int manualBaseCampTarget = 0;
@@ -171,7 +169,6 @@ public class EternitySolver implements Runnable {
     public EternitySolver(PieceInventory inventory, int trueCenterPiece, boolean useGpu, BuildStrategy strategy,
                           boolean lockCenter) {
         Arrays.fill(bestBoard, -1);
-        Arrays.fill(globalBestBoard, -1);
         Arrays.fill(flatResumeBoard, -1);
 
         this.inventory = inventory;
@@ -240,7 +237,7 @@ public class EternitySolver implements Runnable {
 
         if (loadedState != null) {
             restoreBoardState(loadedState.bestBoard);
-            this.uniqueMaxScoreHashes.addAll(loadedState.uniqueMaxScoreHashes);
+            recordTracker.restoreHashes(loadedState.uniqueMaxScoreHashes);
             this.cumulativeTrials = loadedState.cumulativeTrials;
             for (int[] historicBoard : loadedState.topBoardsRegistry) {
                 this.topBoards.offer(historicBoard, loadedState.score);
@@ -284,7 +281,7 @@ public class EternitySolver implements Runnable {
                     hintPhysicalIndices[h] = physId;
 
                     bestBoard[HINT_POSITIONS[h]] = foundPacked;
-                    globalBestBoard[HINT_POSITIONS[h]] = foundPacked;
+                    recordTracker.setCell(HINT_POSITIONS[h], foundPacked);
                     flatResumeBoard[HINT_POSITIONS[h]] = foundPacked;
 
                     logger.info(">>> [HINT LOCKED] Successfully locked Hint " + (h + 1) + " (Piece " + exactHintIds[h] + ") at position " + HINT_POSITIONS[h]);
@@ -309,7 +306,7 @@ public class EternitySolver implements Runnable {
             if (centerPacked != -1) {
                 flatResumeBoard[135] = centerPacked;
                 bestBoard[135] = centerPacked;
-                globalBestBoard[135] = centerPacked;
+                recordTracker.setCell(135, centerPacked);
                 this.centerPhysicalIdx = centerPhysId; // Ensure CPU worker marks it as used!
                 logger.info(">>> [CENTER LOCKED] Successfully locked Center (Piece 139) at position 135");
             } else {
@@ -336,20 +333,20 @@ public class EternitySolver implements Runnable {
                 int p = loaded[r][c];
                 if (p != -1 && p != 0 && p != -2) {
                     bestBoard[r * 16 + c] = p;
-                    globalBestBoard[r * 16 + c] = p;
+                    recordTracker.setCell(r * 16 + c, p);
                     loadedCount++;
                 }
             }
         }
         if (loadedCount > 0) {
-            this.absoluteHighScore = loadedCount;
+            recordTracker.setHighScore(loadedCount);
             this.deepestStep = loadedCount;
             if (lockCenter) {
                 bestBoard[135] = targetPiece;
-                globalBestBoard[135] = targetPiece;
+                recordTracker.setCell(135, targetPiece);
             }
             System.arraycopy(bestBoard, 0, flatResumeBoard, 0, 256);
-            updateDisplay(absoluteHighScore, buildDisplayBoard(globalBestBoard));
+            updateDisplay(recordTracker.highScore(), buildDisplayBoard(recordTracker.boardSnapshot()));
         }
     }
 
@@ -384,7 +381,7 @@ public class EternitySolver implements Runnable {
 
         logger.info("Starting Solver Orchestrator...");
 
-        if (this.absoluteHighScore > 0) {
+        if (recordTracker.highScore() > 0) {
             logger.info(">>> [BOOT] Checkpoint detected! Setting up Base Camp to resume search...");
             triggerBranchScrap();
         }
@@ -466,9 +463,9 @@ public class EternitySolver implements Runnable {
                 }
                 cumulativeTrials += globalCpuTrialCount.getAndSet(0) + globalGpuTrialCount.getAndSet(0);
                 SolverState memoryToSave = new SolverState(
-                        buildDisplayBoard(globalBestBoard),
-                        absoluteHighScore,
-                        this.uniqueMaxScoreHashes,
+                        buildDisplayBoard(recordTracker.boardSnapshot()),
+                        recordTracker.highScore(),
+                        recordTracker.hashSnapshot(),
                         this.topBoards.getRawRegistry(),
                         cumulativeTrials
                 );
@@ -645,9 +642,9 @@ public class EternitySolver implements Runnable {
                     synchronized (displayLock) {
                         cumulativeTrials += globalCpuTrialCount.getAndSet(0) + globalGpuTrialCount.getAndSet(0);
                         SolverState memoryToSave = new SolverState(
-                                buildDisplayBoard(globalBestBoard),
-                                absoluteHighScore,
-                                this.uniqueMaxScoreHashes,
+                                buildDisplayBoard(recordTracker.boardSnapshot()),
+                                recordTracker.highScore(),
+                                recordTracker.hashSnapshot(),
                                 this.topBoards.getRawRegistry(),
                                 cumulativeTrials
                         );
@@ -663,7 +660,7 @@ public class EternitySolver implements Runnable {
 
                     logger.info(">>> [PROGRESS] Last %.0fs: Highest depth touched %d/256 (all-time record: %d/256) | Trials: %,d (%,.0f/s avg)",
                             sinceLastProgressLog / 1000.0,
-                            windowMaxDepth, absoluteHighScore,
+                            windowMaxDepth, recordTracker.highScore(),
                             trialsGain, trialsPerSec);
 
                     lastProgressLogTime = System.currentTimeMillis();
@@ -893,7 +890,7 @@ public class EternitySolver implements Runnable {
             deepestStep = result.newHighScore();
             consecutiveGpuStagnation = 0;
 
-            if (deepestStep >= absoluteHighScore - 5) {
+            if (deepestStep >= recordTracker.highScore() - 5) {
                 consecutiveExtinctions = 0;
             }
 
@@ -917,41 +914,27 @@ public class EternitySolver implements Runnable {
             }
 
             // 2. ONLY if it beats the Global Record do we save to disk
-            // Synchronized on displayLock: promoteToGlobalRecordIfHigher (called
-            // from background analysis threads) now also mutates absoluteHighScore/
-            // globalBestBoard, so this check-and-claim step genuinely races across
-            // threads and needs the same lock those uses share.
-            int[] newRecordBoard = null;
-            int newRecordScore = 0;
-            synchronized (displayLock) {
-                if (deepestStep > absoluteHighScore) {
-                    absoluteHighScore = deepestStep;
-                    System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
-
-                    int hash = Arrays.hashCode(globalBestBoard);
-                    logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X", absoluteHighScore, hash);
-                    logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
-                    uniqueMaxScoreHashes.clear();
-                    uniqueMaxScoreHashes.add(hash);
-
-                    int[] displayBoard = extendRecordGreedily(globalBestBoard, absoluteHighScore);
-                    int displayScore = countPieces(displayBoard);
-                    RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
-
-                    newRecordBoard = displayBoard;
-                    newRecordScore = displayScore;
-                }
-            }
-            // Google Drive upload happens outside the lock -- a slow/unavailable
-            // connection must not stall the live progress display or other threads
-            // waiting on displayLock.
+            // recordTracker.tryClaim is self-synchronized, so this check-and-claim
+            // step is safe even though promoteToGlobalRecordIfHigher (background
+            // analysis threads) can race against it -- no displayLock needed here.
+            int[] newRecordBoard = recordTracker.tryClaim(bestBoardOut, deepestStep, true);
             if (newRecordBoard != null) {
+                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X",
+                        deepestStep, Arrays.hashCode(newRecordBoard));
+                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
+
+                int[] displayBoard = extendRecordGreedily(newRecordBoard, deepestStep);
+                int displayScore = countPieces(displayBoard);
+                RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
+
+                // Google Drive upload happens outside any lock -- a slow/unavailable
+                // connection must not stall the live progress display or other threads.
                 try {
-                    saveAndUploadBucasLink(newRecordBoard, newRecordScore);
+                    saveAndUploadBucasLink(displayBoard, displayScore);
                 } catch (Exception e) {
                     logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
                 }
-                analyzeFullBoardPotential(globalBestBoard, absoluteHighScore);
+                analyzeFullBoardPotential(newRecordBoard, deepestStep);
             }
 
         } else {
@@ -1113,37 +1096,23 @@ public class EternitySolver implements Runnable {
                     deepestStep, Arrays.hashCode(bestBoard));
 
             // Only save to disk when beating the absolute global record
-            int[] newRecordBoard = null;
-            int newRecordScore = 0;
-            synchronized (displayLock) {
-                if (deepestStep > absoluteHighScore) {
-                    absoluteHighScore = deepestStep;
-                    lastReportedDepth = absoluteHighScore;
-                    System.arraycopy(bestBoardOut, 0, globalBestBoard, 0, 256);
-
-                    int hash = Arrays.hashCode(globalBestBoard);
-                    uniqueMaxScoreHashes.clear();
-                    uniqueMaxScoreHashes.add(hash);
-
-                    logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X",
-                            absoluteHighScore, hash);
-                    logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
-
-                    int[] displayBoard = extendRecordGreedily(globalBestBoard, absoluteHighScore);
-                    int displayScore = countPieces(displayBoard);
-                    RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
-
-                    newRecordBoard = displayBoard;
-                    newRecordScore = displayScore;
-                }
-            }
+            int[] newRecordBoard = recordTracker.tryClaim(bestBoardOut, deepestStep, true);
             if (newRecordBoard != null) {
+                lastReportedDepth = deepestStep;
+                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X",
+                        deepestStep, Arrays.hashCode(newRecordBoard));
+                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
+
+                int[] displayBoard = extendRecordGreedily(newRecordBoard, deepestStep);
+                int displayScore = countPieces(displayBoard);
+                RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
+
                 try {
-                    saveAndUploadBucasLink(newRecordBoard, newRecordScore);
+                    saveAndUploadBucasLink(displayBoard, displayScore);
                 } catch (Exception e) {
                     logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
                 }
-                analyzeFullBoardPotential(globalBestBoard, absoluteHighScore);
+                analyzeFullBoardPotential(newRecordBoard, deepestStep);
             }
 
         } else {
@@ -1293,7 +1262,7 @@ public class EternitySolver implements Runnable {
     }
 
     private void analyzeFullBoardPotential(int[] recordBoard) {
-        analyzeFullBoardPotential(recordBoard, absoluteHighScore);
+        analyzeFullBoardPotential(recordBoard, recordTracker.highScore());
     }
 
     private void analyzeFullBoardPotential(int[] recordBoard, int baseScore) {
@@ -1304,7 +1273,7 @@ public class EternitySolver implements Runnable {
         logger.info(">>> [FULL BOARD SCAN] Queuing Monte Carlo fill: %d empty spots, %,d iterations (background)", numEmpty, iterations);
 
         // Sanity check on baseScore's use for the save-threshold gating
-        // decision below (baseScore >= absoluteHighScore - 1, etc.) — this no
+        // decision below (baseScore >= recordTracker.highScore() - 1, etc.) — this no
         // longer affects the saved filename, which now computes its own
         // "Base" label directly from the actual board in saveFullBoardVariant
         // (see computeValidPrefixLength) and can't go stale the way this
@@ -1335,7 +1304,7 @@ public class EternitySolver implements Runnable {
                 if (totalConflicts < 25) {
                     logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
                 }
-                if ((baseScore >= absoluteHighScore - 1) || (totalConflicts < conflictSaveThreshold.get() && baseScore > variantSaveThreshold.get())) {
+                if ((baseScore >= recordTracker.highScore() - 1) || (totalConflicts < conflictSaveThreshold.get() && baseScore > variantSaveThreshold.get())) {
                     // Board already cleared the save bar — worth the exact per-region
                     // search's extra cost now (rare event, off the hot GPU-batch path)
                     // to see if HoleSolver can beat the MCV/polish result before we save it.
@@ -1690,7 +1659,7 @@ public class EternitySolver implements Runnable {
     private void updateDisplay(int depth, int[][] displayBoard) {
         long now = System.currentTimeMillis();
 
-        boolean isNewRecord = depth >= absoluteHighScore;
+        boolean isNewRecord = depth >= recordTracker.highScore();
         boolean timeToRefresh = (now - lastVisualUpdate) >= 300_000;
 
         if (!isNewRecord && !timeToRefresh) {
@@ -1700,7 +1669,7 @@ public class EternitySolver implements Runnable {
         // If we passed the gate, update the timer
         lastVisualUpdate = now;
 
-        Eternity.updateDisplay(depth + 1, this.absoluteHighScore + 1, displayBoard);
+        Eternity.updateDisplay(depth + 1, recordTracker.highScore() + 1, displayBoard);
     }
 
     private void saveAndUploadBucasLink(int[] board, int score) {
@@ -1831,37 +1800,25 @@ public class EternitySolver implements Runnable {
      * corrupt the extension.
      */
     private void promoteToGlobalRecordIfHigher(int[] simulatedBoard, int displayScore) {
-        int[] recordBoard = null;
-        int recordScore = 0;
-        synchronized (displayLock) {
-            if (displayScore > absoluteHighScore) {
-                absoluteHighScore = displayScore;
+        int[] truncatedBoard = new int[256];
+        Arrays.fill(truncatedBoard, -1);
+        System.arraycopy(simulatedBoard, 0, truncatedBoard, 0, displayScore);
 
-                int[] truncatedBoard = new int[256];
-                Arrays.fill(truncatedBoard, -1);
-                System.arraycopy(simulatedBoard, 0, truncatedBoard, 0, displayScore);
-                System.arraycopy(truncatedBoard, 0, globalBestBoard, 0, 256);
-
-                int hash = Arrays.hashCode(globalBestBoard);
-                uniqueMaxScoreHashes.clear();
-                uniqueMaxScoreHashes.add(hash);
-
-                logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X (via full-board-scan variant)",
-                        absoluteHighScore, hash);
-                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
-
-                RecordManager.saveRecord(buildDisplayBoard(truncatedBoard), displayScore, saveProfile);
-
-                recordBoard = truncatedBoard;
-                recordScore = displayScore;
-            }
+        int[] recordBoard = recordTracker.tryClaim(truncatedBoard, displayScore, true);
+        if (recordBoard == null) {
+            return;
         }
-        if (recordBoard != null) {
-            try {
-                saveAndUploadBucasLink(recordBoard, recordScore);
-            } catch (Exception e) {
-                logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
-            }
+
+        logger.info(">>> [NEW GLOBAL RECORD] Depth: %d / 256 | Board Hash: %08X (via full-board-scan variant)",
+                displayScore, Arrays.hashCode(recordBoard));
+        logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
+
+        RecordManager.saveRecord(buildDisplayBoard(recordBoard), displayScore, saveProfile);
+
+        try {
+            saveAndUploadBucasLink(recordBoard, displayScore);
+        } catch (Exception e) {
+            logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
         }
     }
 
@@ -2131,6 +2088,81 @@ public class EternitySolver implements Runnable {
         }
     }
 
+    /**
+     * Owns the all-time record state (score + board + seen-hashes) and the
+     * single synchronized check-and-claim operation that keeps it consistent
+     * across every thread that can set a record: the SolverThread (Phase 2/3
+     * GPU paths), the background analysis pool (full-board-scan variants),
+     * and the Phase 1 CPU worker pool in pure-CPU mode. Same shape as
+     * TopBoardRegistry above, which already does this safely today.
+     *
+     * Lock ordering: this class's own intrinsic lock is always the INNERMOST
+     * lock. Code holding displayLock may call into RecordTracker; RecordTracker
+     * must never call anything that acquires displayLock.
+     */
+    class RecordTracker {
+        private int highScore = 0;
+        private final int[] board = new int[256];
+        private final Set<Integer> seenHashes = new HashSet<>();
+
+        RecordTracker() {
+            Arrays.fill(board, -1);
+        }
+
+        /** Construction-time only (checkpoint restore, hint/center locking): patches a single cell, leaves highScore untouched. */
+        synchronized void setCell(int idx, int piece) {
+            board[idx] = piece;
+        }
+
+        /** Construction-time only: sets the score after a checkpoint restore has populated cells via setCell. */
+        synchronized void setHighScore(int score) {
+            highScore = score;
+        }
+
+        /** Construction-time only: merges hashes restored from a checkpoint's SolverState. */
+        synchronized void restoreHashes(Collection<Integer> hashes) {
+            seenHashes.addAll(hashes);
+        }
+
+        synchronized int highScore() {
+            return highScore;
+        }
+
+        synchronized int[] boardSnapshot() {
+            return Arrays.copyOf(board, 256);
+        }
+
+        synchronized Set<Integer> hashSnapshot() {
+            return new HashSet<>(seenHashes);
+        }
+
+        /**
+         * If candidateScore beats the current record, claims it (replaces
+         * the recorded score and board) and returns a defensive copy of the
+         * newly-recorded board. Returns null -- state left untouched -- if
+         * candidateScore does not beat the record; ties do not reclaim.
+         *
+         * trackHash controls whether this claim also resets the seen-hash
+         * set to {this board's hash}. The GPU/variant record paths do this
+         * (used to dedupe [HIGH DEPTH VARIANT] logging); the CPU-worker
+         * paths never have. Preserved here as a parameter rather than
+         * silently unified, since that divergence is intentional (pure-CPU
+         * mode is not meant to behave identically to hybrid mode).
+         */
+        synchronized int[] tryClaim(int[] candidateBoard, int candidateScore, boolean trackHash) {
+            if (candidateScore <= highScore) {
+                return null;
+            }
+            highScore = candidateScore;
+            System.arraycopy(candidateBoard, 0, board, 0, 256);
+            if (trackHash) {
+                seenHashes.clear();
+                seenHashes.add(Arrays.hashCode(board));
+            }
+            return Arrays.copyOf(board, 256);
+        }
+    }
+
     private class CpuSearchWorker implements Callable<Boolean> {
         private final int[] localBoard = new int[256];
         private final int[] localResumeBoard = new int[256];
@@ -2199,15 +2231,16 @@ public class EternitySolver implements Runnable {
             }
 
             if (step == 256) {
-                synchronized (displayLock) {
-                    if (step > absoluteHighScore) {
-                        absoluteHighScore = step;
-                        System.arraycopy(localBoard, 0, globalBestBoard, 0, 256);
-                        RecordManager.saveRecord(buildDisplayBoard(globalBestBoard), absoluteHighScore, saveProfile);
-                        saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
-                        logger.info(">>> [CPU MODE] VICTORY! ETERNITY II SOLVED! <<<");
-                        logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
-                    }
+                // trackHash=false: the CPU-worker paths have never updated the
+                // seen-hash set, unlike the GPU/variant record paths -- preserved
+                // rather than silently unified (pure-CPU mode is not meant to
+                // behave identically to hybrid mode).
+                int[] newRecordBoard = recordTracker.tryClaim(localBoard, step, false);
+                if (newRecordBoard != null) {
+                    RecordManager.saveRecord(buildDisplayBoard(newRecordBoard), step, saveProfile);
+                    saveAndUploadBucasLink(newRecordBoard, step);
+                    logger.info(">>> [CPU MODE] VICTORY! ETERNITY II SOLVED! <<<");
+                    logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
                 }
                 return true;
             }
@@ -2231,23 +2264,26 @@ public class EternitySolver implements Runnable {
                                 analyzeFullBoardPotential(bestBoard, deepestStep);
                             }
                         }
-                        if (!useGpu && deepestStep > absoluteHighScore) {
-                            absoluteHighScore = deepestStep;
-                            System.arraycopy(localBoard, 0, globalBestBoard, 0, 256);
-                            logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
+                        if (!useGpu) {
+                            // trackHash=false: see the matching comment on the
+                            // step==256 victory path above.
+                            int[] newRecordBoard = recordTracker.tryClaim(localBoard, deepestStep, false);
+                            if (newRecordBoard != null) {
+                                logger.info(">>> Total Trials to reach this milestone: " + String.format("%,d", cumulativeTrials));
 
-                            int[] displayBoard = extendRecordGreedily(globalBestBoard, absoluteHighScore);
-                            int displayScore = countPieces(displayBoard);
+                                int[] displayBoard = extendRecordGreedily(newRecordBoard, deepestStep);
+                                int displayScore = countPieces(displayBoard);
 
-                            RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
-                            analyzeFullBoardPotential(globalBestBoard, absoluteHighScore);
-                            try {
-                                saveAndUploadBucasLink(displayBoard, displayScore);
-                            } catch (Exception e) {
-                                logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
+                                RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
+                                analyzeFullBoardPotential(newRecordBoard, deepestStep);
+                                try {
+                                    saveAndUploadBucasLink(displayBoard, displayScore);
+                                } catch (Exception e) {
+                                    logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
+                                }
+                                consecutiveExtinctions = 0;
+                                saveAndUploadBucasLink(newRecordBoard, deepestStep);
                             }
-                            consecutiveExtinctions = 0;
-                            saveAndUploadBucasLink(globalBestBoard, absoluteHighScore);
                         }
                     }
                 }

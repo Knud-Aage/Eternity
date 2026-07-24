@@ -12,8 +12,10 @@ import org.mockito.MockedStatic;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -666,16 +668,17 @@ class EternitySolverTest {
         setSaveProfile(solver, tempDir.resolve("profile").toString());
 
         int[] board = buildCleanFullBoard();
-        assertEquals(0, solver.absoluteHighScore, "Freshly constructed solver should start with no record");
+        assertEquals(0, solver.recordTracker.highScore(), "Freshly constructed solver should start with no record");
 
         promoteToGlobalRecordIfHigher(solver, board, 194);
 
-        assertEquals(194, solver.absoluteHighScore, "A genuinely higher geometric prefix must become the new record");
+        assertEquals(194, solver.recordTracker.highScore(), "A genuinely higher geometric prefix must become the new record");
+        int[] recordedBoard = solver.recordTracker.boardSnapshot();
         for (int i = 0; i < 194; i++) {
-            assertEquals(board[i], solver.globalBestBoard[i], "First 194 cells of globalBestBoard must match the source board");
+            assertEquals(board[i], recordedBoard[i], "First 194 cells of the recorded board must match the source board");
         }
         for (int i = 194; i < 256; i++) {
-            assertEquals(-1, solver.globalBestBoard[i], "Cells beyond the valid geometric prefix must be cleared, not carried over with (possibly conflicting) content");
+            assertEquals(-1, recordedBoard[i], "Cells beyond the valid geometric prefix must be cleared, not carried over with (possibly conflicting) content");
         }
         recordMock.verify(() -> RecordManager.saveRecord(any(), eq(194), anyString()));
     }
@@ -685,15 +688,94 @@ class EternitySolverTest {
         EternitySolver solver = new EternitySolver(
                 mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
         setSaveProfile(solver, tempDir.resolve("profile").toString());
-        solver.absoluteHighScore = 205;
+        solver.recordTracker.setHighScore(205);
 
         int[] board = buildCleanFullBoard();
         promoteToGlobalRecordIfHigher(solver, board, 205);
 
-        assertEquals(205, solver.absoluteHighScore, "A tied (not strictly higher) score must not be treated as a new record");
+        assertEquals(205, solver.recordTracker.highScore(), "A tied (not strictly higher) score must not be treated as a new record");
         recordMock.verifyNoInteractions();
         assertFalse(Files.exists(tempDir.resolve("profile").resolve("bucas_link_205.txt")),
                 "No record file should be written when the score does not beat the existing record");
+    }
+
+    // ── RecordTracker ──
+
+    @Test
+    void testRecordTrackerTryClaimReturnsNullAndLeavesStateUntouchedWhenNotHigher() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        int[] board = buildCleanFullBoard();
+        assertNotNull(solver.recordTracker.tryClaim(board, 100, true));
+
+        assertNull(solver.recordTracker.tryClaim(board, 100, true), "A tied score must not reclaim");
+        assertNull(solver.recordTracker.tryClaim(board, 99, true), "A lower score must not reclaim");
+        assertEquals(100, solver.recordTracker.highScore());
+    }
+
+    @Test
+    void testRecordTrackerTryClaimReturnsDefensiveCopy() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        int[] board = buildCleanFullBoard();
+
+        int[] claimed = solver.recordTracker.tryClaim(board, 50, true);
+        claimed[0] = 999999;
+
+        assertNotEquals(999999, solver.recordTracker.boardSnapshot()[0],
+                "Mutating the returned board must not affect RecordTracker's internal state");
+
+        board[1] = 888888;
+        assertNotEquals(888888, solver.recordTracker.boardSnapshot()[1],
+                "Mutating the caller's board after claiming must not affect RecordTracker's internal state");
+    }
+
+    @Test
+    void testRecordTrackerTrackHashFalseLeavesSeenHashesUntouched() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        int[] board = buildCleanFullBoard();
+
+        solver.recordTracker.tryClaim(board, 100, false);
+
+        assertTrue(solver.recordTracker.hashSnapshot().isEmpty(),
+                "trackHash=false (the CPU-worker paths) must not populate the seen-hash set");
+    }
+
+    @Test
+    void testRecordTrackerTryClaimIsSafeUnderConcurrentContention() throws Exception {
+        EternitySolver solver = new EternitySolver(
+                mockInventory, 0, false, EternitySolver.BuildStrategy.TYPEWRITER, false);
+        int[] board = buildCleanFullBoard();
+        int threads = 16;
+
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+        java.util.concurrent.CountDownLatch ready = new java.util.concurrent.CountDownLatch(threads);
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        try {
+            List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
+            for (int i = 1; i <= threads; i++) {
+                int score = i;
+                futures.add(pool.submit(() -> {
+                    ready.countDown();
+                    try {
+                        go.await();
+                    } catch (InterruptedException ignored) {
+                    }
+                    solver.recordTracker.tryClaim(board, score, true);
+                }));
+            }
+            ready.await();
+            go.countDown();
+            for (java.util.concurrent.Future<?> f : futures) {
+                f.get();
+            }
+        } finally {
+            pool.shutdown();
+        }
+
+        assertEquals(threads, solver.recordTracker.highScore(),
+                "The final high score must equal the max of every score offered, regardless of arrival order");
     }
 
 }
