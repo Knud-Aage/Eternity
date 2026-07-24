@@ -2276,13 +2276,23 @@ public class EternitySolver implements Runnable {
 
                                 RecordManager.saveRecord(buildDisplayBoard(displayBoard), displayScore, saveProfile);
                                 analyzeFullBoardPotential(newRecordBoard, deepestStep);
+                                // Two deliberate saves in pure-CPU mode, unlike the GPU/hybrid
+                                // paths: the greedily-extended display record, and the raw
+                                // exact-backtracked depth actually reached. Both wrapped the
+                                // same way even though saveAndUploadBucasLink already catches
+                                // its own errors internally -- makes it visually clear neither
+                                // call was carelessly left unprotected.
                                 try {
                                     saveAndUploadBucasLink(displayBoard, displayScore);
                                 } catch (Exception e) {
                                     logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
                                 }
                                 consecutiveExtinctions = 0;
-                                saveAndUploadBucasLink(newRecordBoard, deepestStep);
+                                try {
+                                    saveAndUploadBucasLink(newRecordBoard, deepestStep);
+                                } catch (Exception e) {
+                                    logger.warn(">>> Skipping Google Drive upload: Not connected or unavailable.");
+                                }
                             }
                         }
                     }
