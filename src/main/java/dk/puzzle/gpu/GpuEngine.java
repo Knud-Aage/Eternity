@@ -48,14 +48,53 @@ public class GpuEngine {
     private CUdeviceptr d_threadDepths;
 
     public GpuEngine(PieceInventory inventory, boolean lockCenter, int[] buildOrder) {
+        this(inventory, lockCenter, buildOrder, new int[256]); // all-zero: reproduces exact-match-only search exactly, edge slipping stays off until opted into
+    }
+
+    /**
+     * Example opt-in slip-budget curve, NOT used unless a caller explicitly
+     * passes it to the 4-arg constructor: 0 before step 190 (this project's
+     * own conflict analysis found conflicts concentrate at index >= ~192, so
+     * search integrity is preserved through the region that's reliably clean
+     * today), then +1 permitted total slip every 8 steps after that, capped
+     * at 25.
+     *
+     * This is a first guess shaped like Verhaard's own schedule (roughly +1
+     * every 7-9 steps), not a tuned value -- he arrived at his numbers by
+     * measuring solutions-per-node yield and adjusting from there. Do the
+     * same before trusting this shape: instrument how often the search
+     * reaches a given score with this curve active vs. with slipping off,
+     * the same way this project already tracks skip-rate/conflict-
+     * distribution for other tuning questions.
+     */
+    public static int[] exampleEdgeSlipBudget() {
+        int[] budget = new int[256];
+        for (int step = 190; step < 256; step++) {
+            budget[step] = Math.min(25, 1 + (step - 190) / 8);
+        }
+        return budget;
+    }
+
+    /**
+     * @param slipBudget c_slipBudget[step] = max TOTAL edges the search may
+     *                   have slipped (mismatched on exactly one side) once
+     *                   this step is reached. Monotonically non-decreasing by
+     *                   convention, though the kernel doesn't enforce that.
+     *                   All-zero disables slipping entirely, identical to the
+     *                   solver's behaviour before this parameter existed. See
+     *                   the c_slipBudget/matchKind/solvePBP comments in
+     *                   SolveEternityKernel.cu for the full design and its
+     *                   known v1 scope limits.
+     */
+    public GpuEngine(PieceInventory inventory, boolean lockCenter, int[] buildOrder, int[] slipBudget) {
         JCuda.cudaSetDeviceFlags(JCuda.cudaDeviceScheduleBlockingSync);
         this.inventory  = inventory;
         this.lockCenter = lockCenter;
         this.stepBudget = lockCenter ? STEP_BUDGET_LOCKED : STEP_BUDGET_UNLOCKED;
-        initCUDA(buildOrder);
+        initCUDA(buildOrder, slipBudget);
     }
 
-    private void initCUDA(int[] buildOrder) {
+    private void initCUDA(int[] buildOrder, int[] slipBudget) {
         JCudaDriver.setExceptionsEnabled(true);
         cuInit(0);
         CUdevice device = new CUdevice();
@@ -76,6 +115,7 @@ public class GpuEngine {
         uploadConstant("c_allOrientations", inventory.allOrientations, 1024L * Sizeof.INT);
         uploadConstant("c_physicalMapping",  inventory.physicalMapping,  1024L * Sizeof.INT);
         uploadConstant("c_buildOrder",       buildOrder,                  256L * Sizeof.INT);
+        uploadConstant("c_slipBudget",       slipBudget,                  256L * Sizeof.INT);
 
         allocatePersistentBuffers();
     }

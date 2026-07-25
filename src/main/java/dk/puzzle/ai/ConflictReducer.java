@@ -35,10 +35,19 @@ public class ConflictReducer {
 
     private final PieceInventory inventory;
     private final boolean lockCenter;
+    private boolean enforceBreakDiscipline = false;
 
     public ConflictReducer(PieceInventory inventory, boolean lockCenter) {
         this.inventory = inventory;
         this.lockCenter = lockCenter;
+    }
+
+    public boolean isEnforceBreakDiscipline() {
+        return enforceBreakDiscipline;
+    }
+
+    public void setEnforceBreakDiscipline(boolean enforceBreakDiscipline) {
+        this.enforceBreakDiscipline = enforceBreakDiscipline;
     }
 
     // -----------------------------------------------------------------------
@@ -276,11 +285,23 @@ public class ConflictReducer {
                     if (westReq  != -1 && PieceUtils.getWest(candidate)  != westReq)  violations++;
                     if (eastReq  != -1 && PieceUtils.getEast(candidate)  != eastReq)  violations++;
 
-                    if (violations < bestViolations) {
-                        bestViolations = violations;
+                    int score = violations;
+                    if (enforceBreakDiscipline && violations > 0) {
+                        // Check if neighbour cells placed around pos already have a mismatch
+                        int touching = 0;
+                        if (violations > 1) touching += (violations - 1);
+                        if (row > 0  && isPlaced(trial[pos - 16]) && hasAnyBreak(trial, pos - 16)) touching++;
+                        if (row < 15 && isPlaced(trial[pos + 16]) && hasAnyBreak(trial, pos + 16)) touching++;
+                        if (col > 0  && isPlaced(trial[pos - 1])  && hasAnyBreak(trial, pos - 1))  touching++;
+                        if (col < 15 && isPlaced(trial[pos + 1])  && hasAnyBreak(trial, pos + 1))  touching++;
+                        score += 5 * touching;
+                    }
+
+                    if (score < bestViolations) {
+                        bestViolations = score;
                         bestCandidates.clear();
                         bestCandidates.add(new int[]{k, candidate});
-                    } else if (violations == bestViolations) {
+                    } else if (score == bestViolations) {
                         bestCandidates.add(new int[]{k, candidate});
                     }
                 }
@@ -321,6 +342,21 @@ public class ConflictReducer {
         return p != -1 && p != -2;
     }
 
+    private boolean hasAnyBreak(int[] board, int pos) {
+        int p = board[pos];
+        if (p == -1 || p == -2) return false;
+        int row = pos / 16, col = pos % 16;
+        if (row > 0  && isPlaced(board[pos - 16]) && PieceUtils.getNorth(p) != PieceUtils.getSouth(board[pos - 16])) return true;
+        if (row < 15 && isPlaced(board[pos + 16]) && PieceUtils.getSouth(p) != PieceUtils.getNorth(board[pos + 16])) return true;
+        if (col > 0  && isPlaced(board[pos - 1])  && PieceUtils.getWest(p)  != PieceUtils.getEast(board[pos - 1]))  return true;
+        if (col < 15 && isPlaced(board[pos + 1])  && PieceUtils.getEast(p)  != PieceUtils.getWest(board[pos + 1]))  return true;
+        if (row == 0  && PieceUtils.getNorth(p) != PieceUtils.BORDER_COLOR) return true;
+        if (row == 15 && PieceUtils.getSouth(p) != PieceUtils.BORDER_COLOR) return true;
+        if (col == 0  && PieceUtils.getWest(p)  != PieceUtils.BORDER_COLOR) return true;
+        if (col == 15 && PieceUtils.getEast(p)  != PieceUtils.BORDER_COLOR) return true;
+        return false;
+    }
+
     // -----------------------------------------------------------------------
     // Core logic
     // -----------------------------------------------------------------------
@@ -329,28 +365,16 @@ public class ConflictReducer {
         int before = countConflicts(board);
         if (before == 0) return 0;
 
-        int current = before;
+        int current = evaluateBoardScore(board);
         for (int pass = 0; pass < maxPasses; pass++) {
             int afterRotation = rotationPass(board);
             int afterSwap     = swapPass(board);
-
-//            if (verbose) {
-//                logger.info(String.format(
-//                        ">>> [CONFLICT REDUCER] Pass %d: %d → rot→%d → swap→%d",
-//                        pass + 1, current, afterRotation, afterSwap));
-//            }
 
             if (afterSwap >= current) break; // no improvement — stop early
             current = afterSwap;
         }
 
-        int after = countConflicts(board);
-//        if (after < before) {
-//            logger.info(String.format(
-//                    ">>> [CONFLICT REDUCER] %d → %d conflicts (-%d) on %d-piece board.",
-//                    before, after, before - after, countPieces(board)));
-//        }
-        return after;
+        return countConflicts(board);
     }
 
     // -----------------------------------------------------------------------
@@ -373,7 +397,7 @@ public class ConflictReducer {
             if (current == -1 || current == -2) continue;
 
             int bestPiece  = current;
-            int bestConflicts = countConflicts(board);
+            int bestScore = evaluateBoardScore(board);
 
             // Try all 4 orientations of the same physical piece
             int physId = getPhysId(current);
@@ -385,16 +409,16 @@ public class ConflictReducer {
                 if (candidate == current) continue;
 
                 board[pos] = candidate;
-                int c = countConflicts(board);
-                if (c < bestConflicts) {
-                    bestConflicts = c;
+                int score = evaluateBoardScore(board);
+                if (score < bestScore) {
+                    bestScore = score;
                     bestPiece = candidate;
                 }
             }
             board[pos] = bestPiece;
         }
 
-        return countConflicts(board);
+        return evaluateBoardScore(board);
     }
 
     // -----------------------------------------------------------------------
@@ -414,7 +438,7 @@ public class ConflictReducer {
             int pA = board[posA];
             if (pA == -1 || pA == -2) continue;
 
-            int baseline = countConflicts(board);
+            int baseline = evaluateBoardScore(board);
 
             for (int posB = 0; posB < 256; posB++) {
                 if (posB == posA) continue;
@@ -425,7 +449,7 @@ public class ConflictReducer {
                 // Try swap
                 board[posA] = pB;
                 board[posB] = pA;
-                int afterSwap = countConflicts(board);
+                int afterSwap = evaluateBoardScore(board);
 
                 if (afterSwap < baseline) {
                     // Keep the swap — also try all rotations of both pieces in
@@ -441,7 +465,46 @@ public class ConflictReducer {
             }
         }
 
-        return countConflicts(board);
+        return evaluateBoardScore(board);
+    }
+
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
+
+    public int evaluateBoardScore(int[] board) {
+        int raw = countConflicts(board);
+        if (!enforceBreakDiscipline) return raw;
+        return raw + 5 * countTouchingBreaks(board);
+    }
+
+    public int countTouchingBreaks(int[] board) {
+        int[] cellBreaks = new int[256];
+        for (int i = 0; i < 256; i++) {
+            int p = board[i];
+            if (p == -1 || p == -2) continue;
+            int row = i / 16, col = i % 16;
+            if (row > 0  && isPlaced(board[i-16]) && PieceUtils.getNorth(p) != PieceUtils.getSouth(board[i-16])) cellBreaks[i]++;
+            if (row < 15 && isPlaced(board[i+16]) && PieceUtils.getSouth(p) != PieceUtils.getNorth(board[i+16])) cellBreaks[i]++;
+            if (col > 0  && isPlaced(board[i-1])  && PieceUtils.getWest(p)  != PieceUtils.getEast(board[i-1]))  cellBreaks[i]++;
+            if (col < 15 && isPlaced(board[i+1])  && PieceUtils.getEast(p)  != PieceUtils.getWest(board[i+1]))  cellBreaks[i]++;
+            if (row == 0  && PieceUtils.getNorth(p) != PieceUtils.BORDER_COLOR) cellBreaks[i]++;
+            if (row == 15 && PieceUtils.getSouth(p) != PieceUtils.BORDER_COLOR) cellBreaks[i]++;
+            if (col == 0  && PieceUtils.getWest(p)  != PieceUtils.BORDER_COLOR) cellBreaks[i]++;
+            if (col == 15 && PieceUtils.getEast(p)  != PieceUtils.BORDER_COLOR) cellBreaks[i]++;
+        }
+        int penalty = 0;
+        for (int i = 0; i < 256; i++) {
+            if (cellBreaks[i] > 1) {
+                penalty += (cellBreaks[i] - 1);
+            }
+            if (cellBreaks[i] > 0) {
+                int row = i / 16, col = i % 16;
+                if (col < 15 && cellBreaks[i+1] > 0) penalty++;
+                if (row < 15 && cellBreaks[i+16] > 0) penalty++;
+            }
+        }
+        return penalty;
     }
 
     // -----------------------------------------------------------------------

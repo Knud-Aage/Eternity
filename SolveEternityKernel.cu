@@ -16,6 +16,11 @@
 __constant__ int c_allOrientations[1024];
 __constant__ int c_physicalMapping[1024];
 __constant__ int c_buildOrder[256];
+// c_slipBudget[step] = max TOTAL slipped edges permitted once this step is
+// reached (monotonically non-decreasing). All-zero reproduces today's exact
+// backtracking exactly -- edge slipping only activates once GpuEngine
+// uploads a non-trivial curve. See matchKind() for what "slipped" means.
+__constant__ int c_slipBudget[256];
 
 __device__ inline int getNorth(int p) { return (p >> 24) & 0xFF; }
 __device__ inline int getEast (int p) { return (p >> 16) & 0xFF; }
@@ -42,15 +47,65 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
 }
 
 // ---------------------------------------------------------------------------
+// matchKind: exact-match test PLUS a "would this fit with exactly one edge
+// slipped" test, in one pass. Used by solvePBP's main placement tiers AND by
+// hasCandidate/lookahead below (see the allowSlip parameter there) -- the
+// strict matches() above is still used as-is by solveRepairMode, which stays
+// slip-unaware (see the comment on solvePBP for why that's a deliberate v1
+// scope limit).
+//
+// Border discipline (outward-facing edges must show the grey border colour,
+// interior-facing edges must not) is NEVER slippable -- a border violation
+// is an outright reject regardless of slip budget, same as matches() today.
+// Only the four directional colour requirements (n_req/e_req/s_req/w_req)
+// can be slipped, and at most one of the four per piece.
+//
+// Returns:
+//   0 = no match, not even with a slip -- reject.
+//   1 = exact match (0 mismatched edges) -- always acceptable.
+//   2 = exactly one mismatched edge -- acceptable ONLY if the caller still
+//       has slip budget remaining (c_slipBudget[step] > slipsUsed).
+// ---------------------------------------------------------------------------
+__device__ inline int matchKind(int p, int n_req, int e_req, int s_req, int w_req, int row, int col)
+{
+    int n = getNorth(p), e = getEast(p), s = getSouth(p), w = getWest(p);
+
+    if (row != 0  && n == 0) return 0;
+    if (col != 15 && e == 0) return 0;
+    if (row != 15 && s == 0) return 0;
+    if (col != 0  && w == 0) return 0;
+
+    int mismatches = 0;
+    if (n_req != WILDCARD && n != n_req) mismatches++;
+    if (e_req != WILDCARD && e != e_req) mismatches++;
+    if (s_req != WILDCARD && s != s_req) mismatches++;
+    if (w_req != WILDCARD && w != w_req) mismatches++;
+
+    if (mismatches == 0) return 1;
+    if (mismatches == 1) return 2;
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
 // hasCandidate: uses NW index when both constraints known, byNorth otherwise.
+//
+// allowSlip: when true, a one-edge-slip candidate (matchKind==2) counts as
+// "a candidate exists" too, not just an exact match. The NW/byNorth buckets
+// are keyed by exact colour, so they structurally cannot contain a candidate
+// whose ONLY mismatch is north (byNorth) or north+west (NW) -- when the
+// indexed scan comes up empty and allowSlip is set, an extra full scan
+// checks for exactly that case, mirroring solvePBP's own slip-fallback tier.
 // ---------------------------------------------------------------------------
 __device__ bool hasCandidate(
     int n_req, int e_req, int s_req, int w_req,
     int row, int col,
     const unsigned long long* inventoryMask,
     const short* sm_byNorth,      const short* sm_byNorthCount,
-    const short* sm_byNW,         const short* sm_byNWCount)
+    const short* sm_byNW,         const short* sm_byNWCount,
+    bool allowSlip)
 {
+    bool checkedEverything = false; // true once a branch below has already scanned all 1024 orientations, so the allowSlip fallback afterward would be pure duplicate work
+
     if (n_req != WILDCARD && w_req != WILDCARD && n_req < NUM_COLORS && w_req < NUM_COLORS) {
         int key   = n_req * NUM_COLORS + w_req;
         int count = sm_byNWCount[key];
@@ -58,24 +113,34 @@ __device__ bool hasCandidate(
             int idx    = sm_byNW[key * NW_MAX + i];
             int physId = c_physicalMapping[idx];
             if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
-            if (matches(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col)) return true;
+            int kind = matchKind(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col);
+            if (kind == 1 || (allowSlip && kind == 2)) return true;
         }
-        return false;
-    }
-    if (n_req != WILDCARD && n_req < NUM_COLORS) {
+    } else if (n_req != WILDCARD && n_req < NUM_COLORS) {
         int count = sm_byNorthCount[n_req];
         for (int i = 0; i < count; i++) {
             int idx    = sm_byNorth[n_req * MAX_PER_COLOR + i];
             int physId = c_physicalMapping[idx];
             if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
-            if (matches(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col)) return true;
+            int kind = matchKind(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col);
+            if (kind == 1 || (allowSlip && kind == 2)) return true;
         }
-        return false;
+    } else {
+        for (int idx = 0; idx < 1024; idx++) {
+            int physId = c_physicalMapping[idx];
+            if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+            int kind = matchKind(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col);
+            if (kind == 1 || (allowSlip && kind == 2)) return true;
+        }
+        checkedEverything = true; // full scan already covered every orientation, exact and slip alike
     }
+
+    if (!allowSlip || checkedEverything) return false;
+
     for (int idx = 0; idx < 1024; idx++) {
         int physId = c_physicalMapping[idx];
         if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
-        if (matches(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col)) return true;
+        if (matchKind(c_allOrientations[idx], n_req, e_req, s_req, w_req, row, col) == 2) return true;
     }
     return false;
 }
@@ -116,7 +181,8 @@ __device__ inline bool lookahead(
     int p, int physId, int row, int col, int boardIdx,
     const int* board, unsigned long long* inventoryMask,
     const short* sm_byNorth, const short* sm_byNorthCount,
-    const short* sm_byNW,    const short* sm_byNWCount)
+    const short* sm_byNW,    const short* sm_byNWCount,
+    bool allowSlip)
 {
     if (row < 15 && board[boardIdx + 16] == -1) {
         int sn = getSouth(p);
@@ -125,7 +191,7 @@ __device__ inline bool lookahead(
         int ss = (row == 14) ? 0 : WILDCARD;
         inventoryMask[physId/64] &= ~(1ULL << (physId%64));
         bool ok = hasCandidate(sn, se, ss, sw, row + 1, col,
-                               inventoryMask, sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount);
+                               inventoryMask, sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, allowSlip);
         inventoryMask[physId/64] |= (1ULL << (physId%64));
         if (!ok) return false;
     }
@@ -136,7 +202,7 @@ __device__ inline bool lookahead(
         int ee = (col == 14) ? 0 : WILDCARD;
         inventoryMask[physId/64] &= ~(1ULL << (physId%64));
         bool ok = hasCandidate(en, ee, es, ew, row, col + 1,
-                               inventoryMask, sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount);
+                               inventoryMask, sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, allowSlip);
         inventoryMask[physId/64] |= (1ULL << (physId%64));
         if (!ok) return false;
     }
@@ -145,6 +211,35 @@ __device__ inline bool lookahead(
 
 // ---------------------------------------------------------------------------
 // solvePBP — main DFS kernel
+//
+// Edge slipping (v1 scope notes):
+//  - c_slipBudget is indexed by absolute step (buildOrder position), matching
+//    how Verhaard described his own slip array ("1 slipped edge from depth
+//    193, 2 from 202, ..."). But unlike his presumably-continuous search,
+//    this kernel is re-launched per GPU batch against a partial seed board
+//    (startingStep > 0), and slipsUsed always starts at 0 for a fresh launch
+//    -- there is no way to know from the incoming board alone whether any of
+//    its pre-placed cells (below startingStep) were themselves placed via a
+//    slip in an earlier launch. Practically: c_slipBudget is a per-launch
+//    allowance from startingStep to 255, not a strict lifetime cap on the
+//    final board. Persisting slip usage across launches would need slip
+//    metadata threaded through the seed pool (e.g. a parallel array uploaded
+//    alongside d_partialBoards) -- not done here.
+//  - hasCandidate()/lookahead() ARE slip-aware (allowSlip parameter, computed
+//    per-step below as c_slipBudget[step] > slipsUsed): the 1-step lookahead
+//    no longer rejects a placement solely because its successor would need a
+//    slip to fill, as long as budget remains right now. This is a coarse
+//    approximation, not a precise model -- it uses THIS step's budget as a
+//    proxy for whatever budget will actually remain once the search reaches
+//    the neighbour's own step (which, for the locked/constrained profile,
+//    may not even be step+1 -- buildOrder is reordered there). slipsUsed can
+//    only grow between now and then, so this can still be slightly
+//    optimistic, but it's a much closer approximation than treating
+//    lookahead as strictly slip-blind.
+//  - solveRepairMode (LNS hole-filling) is untouched -- it fills holes in an
+//    otherwise-complete board for a different purpose than reaching a new
+//    depth record, and mixing in slip logic there wasn't in scope for this
+//    change.
 // ---------------------------------------------------------------------------
 extern "C" __global__ void solvePBP(
     const int* d_partialBoards,
@@ -176,14 +271,28 @@ extern "C" __global__ void solvePBP(
     int board[256];
     int pieceStack[256];
     int placedOrientIdx[256];
+    int slipUsedAtStep[256]; // 1 if the piece placed at this step used its one allowed edge slip, else 0
+    // Independent resume position for the slip-fallback scan below (see its
+    // comment) -- deliberately separate from pieceStack so it can never alias
+    // tier 1/2/3's own per-step resume bookkeeping. Extra 1KB/thread of local
+    // state; only worth its keep once c_slipBudget is actually non-zero
+    // somewhere, which is opt-in (see the constant's own comment).
+    int slipPieceStack[256];
+    int hasBreak[256];             // 1 if cell touches an edge mismatch (break), 0 otherwise
+    int mismatchedCellAtStep[256]; // Board index of neighbouring cell mismatched at this step (-1 if none)
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
 
     int offset    = tid * 256;
     int piecesNow = 0;
+    int slipsUsed = 0; // total slips used so far in this launch, from startingStep onward -- see the slip-budget note above solvePBP
     for (int i = 0; i < 256; i++) {
-        board[i]           = d_partialBoards[offset + i];
-        pieceStack[i]      = 0;
-        placedOrientIdx[i] = -1;
+        board[i]                = d_partialBoards[offset + i];
+        pieceStack[i]           = 0;
+        placedOrientIdx[i]      = -1;
+        slipUsedAtStep[i]       = 0;
+        slipPieceStack[i]       = 0;
+        hasBreak[i]             = 0;
+        mismatchedCellAtStep[i] = -1;
         if (board[i] != -1) {
             piecesNow++;
             for (int o = 0; o < 1024; o++) {
@@ -193,6 +302,25 @@ extern "C" __global__ void solvePBP(
                     break;
                 }
             }
+        }
+    }
+
+    // Non-touching break discipline: compute initial breaks on pre-placed seed pieces (if any)
+    if (startingStep > 0) {
+        for (int s = 0; s < startingStep; s++) {
+            int bIdx = c_buildOrder[s];
+            if (board[bIdx] == -1) continue;
+            int r = bIdx / 16, c = bIdx % 16;
+            int p = board[bIdx];
+            int n_req = (r == 0)  ? 0 : (board[bIdx-16] != -1 ? getSouth(board[bIdx-16]) : WILDCARD);
+            int s_req = (r == 15) ? 0 : (board[bIdx+16] != -1 ? getNorth(board[bIdx+16]) : WILDCARD);
+            int w_req = (c == 0)  ? 0 : (board[bIdx-1]  != -1 ? getEast (board[bIdx-1])  : WILDCARD);
+            int e_req = (c == 15) ? 0 : (board[bIdx+1]  != -1 ? getWest (board[bIdx+1])  : WILDCARD);
+            int n = getNorth(p), e = getEast(p), s_c = getSouth(p), w = getWest(p);
+            if (n_req != WILDCARD && n != n_req)   { hasBreak[bIdx] = 1; hasBreak[bIdx-16] = 1; slipsUsed++; }
+            if (e_req != WILDCARD && e != e_req)   { hasBreak[bIdx] = 1; hasBreak[bIdx+1]  = 1; slipsUsed++; }
+            if (s_req != WILDCARD && s_c != s_req) { hasBreak[bIdx] = 1; hasBreak[bIdx+16] = 1; slipsUsed++; }
+            if (w_req != WILDCARD && w != w_req)   { hasBreak[bIdx] = 1; hasBreak[bIdx-1]  = 1; slipsUsed++; }
         }
     }
 
@@ -223,6 +351,11 @@ extern "C" __global__ void solvePBP(
         int w_req = (col == 0)  ? 0 : (board[boardIdx-1]  != -1 ? getEast (board[boardIdx-1])  : WILDCARD);
         int e_req = (col == 15) ? 0 : (board[boardIdx+1]  != -1 ? getWest (board[boardIdx+1])  : WILDCARD);
 
+        // Coarse per-step proxy for "will slip budget still be available by
+        // the time lookahead's predicted neighbour is actually reached" --
+        // see the allowSlip note in the comment above solvePBP.
+        bool allowSlip = c_slipBudget[step] > slipsUsed;
+
         bool foundPiece = false;
         int  startLi    = pieceStack[step];
 
@@ -237,11 +370,12 @@ extern "C" __global__ void solvePBP(
                 int p = c_allOrientations[idx];
                 if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
-                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, allowSlip)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
                 pieceStack[step] = li + 1;
+                slipUsedAtStep[step] = 0; // exact match -- overwrite any stale slip flag from an earlier visit to this step
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -263,11 +397,12 @@ extern "C" __global__ void solvePBP(
                 int p = c_allOrientations[idx];
                 if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
-                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, allowSlip)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
                 pieceStack[step] = li + 1;
+                slipUsedAtStep[step] = 0; // exact match -- overwrite any stale slip flag from an earlier visit to this step
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -287,11 +422,12 @@ extern "C" __global__ void solvePBP(
                 int p = c_allOrientations[li];
                 if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
-                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, allowSlip)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = li;
                 pieceStack[step] = li + 1;
+                slipUsedAtStep[step] = 0; // exact match -- overwrite any stale slip flag from an earlier visit to this step
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -302,6 +438,63 @@ extern "C" __global__ void solvePBP(
                 break;
             }
             if (!foundPiece) pieceStack[step] = 0;
+        }
+
+        // --- Slip fallback: non-touching break discipline ---
+        // Only reached once exact-match tiers 1/2/3 found nothing AND slip budget
+        // remains at this step. Blackwood non-touching break discipline: refuse
+        // to place a piece with a mismatch if ANY already-placed neighbouring cell
+        // already has a break.
+        bool neighboursBreakFree = true;
+        if (row > 0  && board[boardIdx-16] != -1 && hasBreak[boardIdx-16]) neighboursBreakFree = false;
+        if (col < 15 && board[boardIdx+1]  != -1 && hasBreak[boardIdx+1])  neighboursBreakFree = false;
+        if (row < 15 && board[boardIdx+16] != -1 && hasBreak[boardIdx+16]) neighboursBreakFree = false;
+        if (col > 0  && board[boardIdx-1]  != -1 && hasBreak[boardIdx-1])  neighboursBreakFree = false;
+
+        if (!foundPiece && c_slipBudget[step] > slipsUsed && neighboursBreakFree) {
+            int slipStartLi = slipPieceStack[step];
+            for (int li = slipStartLi; li < 1024; li++) {
+                int physId = c_physicalMapping[li];
+                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                int p = c_allOrientations[li];
+                // kind==1 (exact match) candidates were already tried by tiers
+                // 1/2/3 above -- only a genuine one-edge slip is new information here.
+                if (matchKind(p, n_req, e_req, s_req, w_req, row, col) != 2) continue;
+
+                // Under break discipline, placing a slip at boardIdx gives boardIdx a break,
+                // so lookahead cannot allow successor to slip.
+                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, false)) continue;
+
+                // Identify which neighbouring cell is mismatched
+                int n_p = getNorth(p), e_p = getEast(p), s_p = getSouth(p), w_p = getWest(p);
+                int mismatchedNeighbour = -1;
+                if (n_req != WILDCARD && n_p != n_req)      mismatchedNeighbour = boardIdx - 16;
+                else if (e_req != WILDCARD && e_p != e_req) mismatchedNeighbour = boardIdx + 1;
+                else if (s_req != WILDCARD && s_p != s_req) mismatchedNeighbour = boardIdx + 16;
+                else if (w_req != WILDCARD && w_p != w_req) mismatchedNeighbour = boardIdx - 1;
+
+                board[boardIdx] = p;
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                placedOrientIdx[step] = li;
+                slipPieceStack[step] = li + 1;
+                slipUsedAtStep[step] = 1;
+                hasBreak[boardIdx] = 1;
+                if (mismatchedNeighbour != -1) {
+                    hasBreak[mismatchedNeighbour] = 1;
+                }
+                mismatchedCellAtStep[step] = mismatchedNeighbour;
+                slipsUsed++;
+                foundPiece = true;
+                piecesNow++;
+                step++;
+                if (piecesNow > bestPiecesPlaced) {
+                    bestPiecesPlaced = piecesNow;
+                    for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+                }
+                break;
+            }
+            if (!foundPiece) slipPieceStack[step] = 0;
         }
 
         if (!foundPiece) {
@@ -319,6 +512,16 @@ extern "C" __global__ void solvePBP(
                 board[undoBoardIdx] = -1;
                 int physId = c_physicalMapping[placedOrientIdx[step]];
                 inventoryMask[physId/64] |= (1ULL << (physId%64));
+                if (slipUsedAtStep[step]) {
+                    slipsUsed--;
+                    hasBreak[undoBoardIdx] = 0;
+                    int mNeighbour = mismatchedCellAtStep[step];
+                    if (mNeighbour != -1) {
+                        hasBreak[mNeighbour] = 0;
+                    }
+                    mismatchedCellAtStep[step] = -1;
+                    slipUsedAtStep[step] = 0;
+                }
                 piecesNow--;
             }
         }
@@ -474,7 +677,7 @@ extern "C" __global__ void solveRepairMode(
                 int p = c_allOrientations[idx];
                 if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
-                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, false)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[holeStep] = idx;
@@ -495,7 +698,7 @@ extern "C" __global__ void solveRepairMode(
                 int p = c_allOrientations[idx];
                 if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
-                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, false)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[holeStep] = idx;
@@ -514,7 +717,7 @@ extern "C" __global__ void solveRepairMode(
                 int p = c_allOrientations[li];
                 if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
-                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount, false)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[holeStep] = li;

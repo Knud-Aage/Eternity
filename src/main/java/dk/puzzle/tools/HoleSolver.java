@@ -278,6 +278,7 @@ public class HoleSolver {
             // clear-and-refill can reach rearrangements a single swap can't.
             // Finish with a rotation+swap polish pass over the result.
             ConflictReducer reducer = new ConflictReducer(inventory, false);
+            reducer.setEnforceBreakDiscipline(true);
             int conflictsBefore = reducer.countConflicts(finalBoard);
 
             repaired = Arrays.copyOf(finalBoard, 256);
@@ -288,10 +289,11 @@ public class HoleSolver {
             int afterPolish = reducer.reducePostProcess(repaired, 100);
 
             if (verbose) {
+                int touchingBreaks = reducer.countTouchingBreaks(repaired);
                 System.out.println();
-                System.out.println("Falling back to conflict-reduction heuristics for the still-unsolved region(s)...");
+                System.out.println("Falling back to conflict-reduction heuristics for the still-unsolved region(s) (non-touching break discipline active)...");
                 System.out.println("Best result: " + conflictsBefore + " (start) -> " + afterFill +
-                        " (clear + MCV refill) -> " + afterPolish + " (rotation+swap polish) edge conflicts.");
+                        " (clear + MCV refill) -> " + afterPolish + " (rotation+swap polish) edge conflicts [" + touchingBreaks + " touching break violations].");
                 System.out.println(BucasExporter.exportBoard(repaired));
             }
         }

@@ -62,4 +62,41 @@ class GpuEngineTest {
         assertEquals(0, result.threadDepths().length, "Repair mode never populates per-thread depths");
     }
 
+    // ── exampleEdgeSlipBudget ──
+
+    @Test
+    void testExampleEdgeSlipBudgetIsZeroBeforeStep190() {
+        int[] budget = GpuEngine.exampleEdgeSlipBudget();
+        for (int step = 0; step < 190; step++) {
+            assertEquals(0, budget[step], "Step " + step + " must permit no slips -- conflicts concentrate at index >= ~192");
+        }
+    }
+
+    @Test
+    void testExampleEdgeSlipBudgetIsMonotonicallyNonDecreasing() {
+        int[] budget = GpuEngine.exampleEdgeSlipBudget();
+        for (int step = 1; step < 256; step++) {
+            assertTrue(budget[step] >= budget[step - 1],
+                    "Slip budget must never decrease with depth (step " + step + ": " + budget[step]
+                            + " < step " + (step - 1) + ": " + budget[step - 1] + ")");
+        }
+    }
+
+    @Test
+    void testExampleEdgeSlipBudgetNeverExceedsTheDocumentedCap() {
+        // The formula's natural growth (+1 every 8 steps from 190) only reaches
+        // 9 by step 255 -- the 25 cap is a safety ceiling, not a value the
+        // curve is expected to actually hit within 256 steps.
+        int[] budget = GpuEngine.exampleEdgeSlipBudget();
+        for (int step = 0; step < 256; step++) {
+            assertTrue(budget[step] <= 25, "Step " + step + " exceeds the documented cap of 25: " + budget[step]);
+        }
+    }
+
+    @Test
+    void testExampleEdgeSlipBudgetStartsAtOneImmediatelyAtStep190() {
+        int[] budget = GpuEngine.exampleEdgeSlipBudget();
+        assertEquals(1, budget[190], "The first slip-eligible step must permit exactly one slip");
+    }
+
 }
