@@ -55,6 +55,17 @@ public class EternitySolver implements Runnable {
             new java.util.concurrent.atomic.AtomicInteger(190);
     public static final int SEED_DEPTH = 110;
     public static final int LNS_THRESHOLD = 200;
+    // How long the seed pool can go without growing before the Endgame
+    // Starvation watchdog clears it and retreats. Was a 5000ms inline literal;
+    // measured on 2026-07-25 that this was capping most runs around depth
+    // 205-211 before giving up, while a checkpoint that reached depth 231
+    // (before ever needing to retreat) scored meaningfully fewer conflicts
+    // after CPU fill (23-24 vs the ~28 average at 205-211) -- depth of the
+    // DFS prefix before handoff, not the CPU-side polish afterward, is what's
+    // actually driving final conflict count. Quadrupling the patience here is
+    // a first experiment to see if it lets more runs reach that kind of depth
+    // before the watchdog gives up on them.
+    public static final long WATCHDOG_STARVATION_TIMEOUT_MS = 20_000;
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
     // HINT STRATEGY FIELDS
     private static final int[] HINT_POSITIONS = {221, 45, 210, 34};
@@ -228,6 +239,7 @@ public class EternitySolver implements Runnable {
         this.compatIndex = new CompatibilityIndex(inventory.allOrientations, inventory.physicalMapping);
         this.surgeon = new SurgeonHeuristics(lockCenter, 0.70);
         this.conflictReducer = new ConflictReducer(inventory, lockCenter);
+        this.conflictReducer.setEnforceBreakDiscipline(true);
 
         loadCheckpointAndHints();
     }
@@ -536,7 +548,7 @@ public class EternitySolver implements Runnable {
                         // The queue is actively growing. Reset the timer!
                         lastSeedGrowthTime = System.currentTimeMillis();
                         lastSeedCount = currentSeeds;
-                    } else if (System.currentTimeMillis() - lastSeedGrowthTime > 5000) {
+                    } else if (System.currentTimeMillis() - lastSeedGrowthTime > WATCHDOG_STARVATION_TIMEOUT_MS) {
 
                         logger.warn(">>> Watchdog: Endgame Starvation Triggered! Executing immediate retreat.");
 

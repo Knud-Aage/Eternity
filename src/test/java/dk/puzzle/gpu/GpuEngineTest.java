@@ -84,12 +84,12 @@ class GpuEngineTest {
 
     @Test
     void testExampleEdgeSlipBudgetNeverExceedsTheDocumentedCap() {
-        // The formula's natural growth (+1 every 8 steps from 190) only reaches
-        // 9 by step 255 -- the 25 cap is a safety ceiling, not a value the
-        // curve is expected to actually hit within 256 steps.
+        // The formula's natural growth (+1 every 40 steps from 190) only
+        // reaches 2 by step 255 -- the 5 cap is a safety ceiling, not a
+        // value the curve is expected to actually hit within 256 steps.
         int[] budget = GpuEngine.exampleEdgeSlipBudget();
         for (int step = 0; step < 256; step++) {
-            assertTrue(budget[step] <= 25, "Step " + step + " exceeds the documented cap of 25: " + budget[step]);
+            assertTrue(budget[step] <= 5, "Step " + step + " exceeds the documented cap of 5: " + budget[step]);
         }
     }
 

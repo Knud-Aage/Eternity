@@ -66,6 +66,23 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
 //   2 = exactly one mismatched edge -- acceptable ONLY if the caller still
 //       has slip budget remaining (c_slipBudget[step] > slipsUsed).
 // ---------------------------------------------------------------------------
+// Packed-bit helpers for 256-entry boolean state (hasBreak, slipUsedAtStep).
+// solvePBP is already register/local-memory bound (255 registers, spilling
+// even at the hardware cap) -- these two flags only ever need 1 bit each,
+// so storing them as int[256] (1024 bytes apiece) was pure waste. Packing
+// both into uint32[8] (32 bytes apiece) trims ~2KB off the per-thread stack
+// frame, which is what actually limits how many threads can be resident per
+// SM at once.
+__device__ inline bool bitGet(const unsigned int* bits, int idx) {
+    return (bits[idx >> 5] >> (idx & 31)) & 1u;
+}
+__device__ inline void bitSet(unsigned int* bits, int idx) {
+    bits[idx >> 5] |= (1u << (idx & 31));
+}
+__device__ inline void bitClear(unsigned int* bits, int idx) {
+    bits[idx >> 5] &= ~(1u << (idx & 31));
+}
+
 __device__ inline int matchKind(int p, int n_req, int e_req, int s_req, int w_req, int row, int col)
 {
     int n = getNorth(p), e = getEast(p), s = getSouth(p), w = getWest(p);
@@ -241,7 +258,18 @@ __device__ inline bool lookahead(
 //    depth record, and mixing in slip logic there wasn't in scope for this
 //    change.
 // ---------------------------------------------------------------------------
-extern "C" __global__ void solvePBP(
+// __launch_bounds__(256, 2): blockSize is fixed at 256 (see GpuEngine.java's
+// cuLaunchKernel call). Without this hint, ptxas was using 255 registers/
+// thread (the hardware max) with the compiler free to spend registers
+// however it liked, which caps occupancy at 1 resident block/SM regardless
+// of the 40KB shared-memory footprint (which would itself allow 2). The
+// (256, 2) hint tells ptxas to target <=128 registers/thread so 2 blocks
+// (512 threads) can be resident per SM instead of 1 -- doubling the warps
+// available to hide memory latency. This is a genuine trade-off: forcing
+// registers down can increase local-memory spilling, so whether it's a net
+// win can only be confirmed by comparing real [SPEED] log throughput
+// before/after, not by compiling alone.
+extern "C" __global__ void __launch_bounds__(256, 2) solvePBP(
     const int* d_partialBoards,
     int numPartialBoards,
     int startingStep,
@@ -271,27 +299,29 @@ extern "C" __global__ void solvePBP(
     int board[256];
     int pieceStack[256];
     int placedOrientIdx[256];
-    int slipUsedAtStep[256]; // 1 if the piece placed at this step used its one allowed edge slip, else 0
+    unsigned int slipUsedAtStep[8]; // packed bit per step -- 1 if that step's placement used its one allowed edge slip
     // Independent resume position for the slip-fallback scan below (see its
     // comment) -- deliberately separate from pieceStack so it can never alias
     // tier 1/2/3's own per-step resume bookkeeping. Extra 1KB/thread of local
     // state; only worth its keep once c_slipBudget is actually non-zero
     // somewhere, which is opt-in (see the constant's own comment).
     int slipPieceStack[256];
-    int hasBreak[256];             // 1 if cell touches an edge mismatch (break), 0 otherwise
+    unsigned int hasBreak[8];      // packed bit per cell -- 1 if cell touches an edge mismatch (break)
     int mismatchedCellAtStep[256]; // Board index of neighbouring cell mismatched at this step (-1 if none)
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
 
     int offset    = tid * 256;
     int piecesNow = 0;
     int slipsUsed = 0; // total slips used so far in this launch, from startingStep onward -- see the slip-budget note above solvePBP
+    for (int i = 0; i < 8; i++) {
+        slipUsedAtStep[i] = 0;
+        hasBreak[i]       = 0;
+    }
     for (int i = 0; i < 256; i++) {
         board[i]                = d_partialBoards[offset + i];
         pieceStack[i]           = 0;
         placedOrientIdx[i]      = -1;
-        slipUsedAtStep[i]       = 0;
         slipPieceStack[i]       = 0;
-        hasBreak[i]             = 0;
         mismatchedCellAtStep[i] = -1;
         if (board[i] != -1) {
             piecesNow++;
@@ -305,22 +335,27 @@ extern "C" __global__ void solvePBP(
         }
     }
 
-    // Non-touching break discipline: compute initial breaks on pre-placed seed pieces (if any)
+    // Non-touching break discipline: compute initial breaks on pre-placed seed pieces (if any).
+    // Only South/East are checked for interior pairs -- North/West are only
+    // checked for the border case (row==0 / col==0) -- so that each physical
+    // edge between two pre-placed cells is counted exactly once instead of
+    // once from each side. Mirrors the EAST+SOUTH convention already used in
+    // ConflictReducer.countTouchingBreaks for the same reason.
     if (startingStep > 0) {
         for (int s = 0; s < startingStep; s++) {
             int bIdx = c_buildOrder[s];
             if (board[bIdx] == -1) continue;
             int r = bIdx / 16, c = bIdx % 16;
             int p = board[bIdx];
-            int n_req = (r == 0)  ? 0 : (board[bIdx-16] != -1 ? getSouth(board[bIdx-16]) : WILDCARD);
-            int s_req = (r == 15) ? 0 : (board[bIdx+16] != -1 ? getNorth(board[bIdx+16]) : WILDCARD);
-            int w_req = (c == 0)  ? 0 : (board[bIdx-1]  != -1 ? getEast (board[bIdx-1])  : WILDCARD);
-            int e_req = (c == 15) ? 0 : (board[bIdx+1]  != -1 ? getWest (board[bIdx+1])  : WILDCARD);
             int n = getNorth(p), e = getEast(p), s_c = getSouth(p), w = getWest(p);
-            if (n_req != WILDCARD && n != n_req)   { hasBreak[bIdx] = 1; hasBreak[bIdx-16] = 1; slipsUsed++; }
-            if (e_req != WILDCARD && e != e_req)   { hasBreak[bIdx] = 1; hasBreak[bIdx+1]  = 1; slipsUsed++; }
-            if (s_req != WILDCARD && s_c != s_req) { hasBreak[bIdx] = 1; hasBreak[bIdx+16] = 1; slipsUsed++; }
-            if (w_req != WILDCARD && w != w_req)   { hasBreak[bIdx] = 1; hasBreak[bIdx-1]  = 1; slipsUsed++; }
+
+            if (r == 0 && n != 0) { bitSet(hasBreak, bIdx); slipsUsed++; }
+            if (c == 0 && w != 0) { bitSet(hasBreak, bIdx); slipsUsed++; }
+
+            int s_req = (r == 15) ? 0 : (board[bIdx+16] != -1 ? getNorth(board[bIdx+16]) : WILDCARD);
+            int e_req = (c == 15) ? 0 : (board[bIdx+1]  != -1 ? getWest (board[bIdx+1])  : WILDCARD);
+            if (s_req != WILDCARD && s_c != s_req) { bitSet(hasBreak, bIdx); bitSet(hasBreak, bIdx+16); slipsUsed++; }
+            if (e_req != WILDCARD && e != e_req)   { bitSet(hasBreak, bIdx); bitSet(hasBreak, bIdx+1);  slipsUsed++; }
         }
     }
 
@@ -375,7 +410,7 @@ extern "C" __global__ void solvePBP(
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
                 pieceStack[step] = li + 1;
-                slipUsedAtStep[step] = 0; // exact match -- overwrite any stale slip flag from an earlier visit to this step
+                bitClear(slipUsedAtStep, step); // exact match -- overwrite any stale slip flag from an earlier visit to this step
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -402,7 +437,7 @@ extern "C" __global__ void solvePBP(
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
                 pieceStack[step] = li + 1;
-                slipUsedAtStep[step] = 0; // exact match -- overwrite any stale slip flag from an earlier visit to this step
+                bitClear(slipUsedAtStep, step); // exact match -- overwrite any stale slip flag from an earlier visit to this step
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -427,7 +462,7 @@ extern "C" __global__ void solvePBP(
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = li;
                 pieceStack[step] = li + 1;
-                slipUsedAtStep[step] = 0; // exact match -- overwrite any stale slip flag from an earlier visit to this step
+                bitClear(slipUsedAtStep, step); // exact match -- overwrite any stale slip flag from an earlier visit to this step
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -446,10 +481,10 @@ extern "C" __global__ void solvePBP(
         // to place a piece with a mismatch if ANY already-placed neighbouring cell
         // already has a break.
         bool neighboursBreakFree = true;
-        if (row > 0  && board[boardIdx-16] != -1 && hasBreak[boardIdx-16]) neighboursBreakFree = false;
-        if (col < 15 && board[boardIdx+1]  != -1 && hasBreak[boardIdx+1])  neighboursBreakFree = false;
-        if (row < 15 && board[boardIdx+16] != -1 && hasBreak[boardIdx+16]) neighboursBreakFree = false;
-        if (col > 0  && board[boardIdx-1]  != -1 && hasBreak[boardIdx-1])  neighboursBreakFree = false;
+        if (row > 0  && board[boardIdx-16] != -1 && bitGet(hasBreak, boardIdx-16)) neighboursBreakFree = false;
+        if (col < 15 && board[boardIdx+1]  != -1 && bitGet(hasBreak, boardIdx+1))  neighboursBreakFree = false;
+        if (row < 15 && board[boardIdx+16] != -1 && bitGet(hasBreak, boardIdx+16)) neighboursBreakFree = false;
+        if (col > 0  && board[boardIdx-1]  != -1 && bitGet(hasBreak, boardIdx-1))  neighboursBreakFree = false;
 
         if (!foundPiece && c_slipBudget[step] > slipsUsed && neighboursBreakFree) {
             int slipStartLi = slipPieceStack[step];
@@ -478,10 +513,10 @@ extern "C" __global__ void solvePBP(
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = li;
                 slipPieceStack[step] = li + 1;
-                slipUsedAtStep[step] = 1;
-                hasBreak[boardIdx] = 1;
+                bitSet(slipUsedAtStep, step);
+                bitSet(hasBreak, boardIdx);
                 if (mismatchedNeighbour != -1) {
-                    hasBreak[mismatchedNeighbour] = 1;
+                    bitSet(hasBreak, mismatchedNeighbour);
                 }
                 mismatchedCellAtStep[step] = mismatchedNeighbour;
                 slipsUsed++;
@@ -512,15 +547,15 @@ extern "C" __global__ void solvePBP(
                 board[undoBoardIdx] = -1;
                 int physId = c_physicalMapping[placedOrientIdx[step]];
                 inventoryMask[physId/64] |= (1ULL << (physId%64));
-                if (slipUsedAtStep[step]) {
+                if (bitGet(slipUsedAtStep, step)) {
                     slipsUsed--;
-                    hasBreak[undoBoardIdx] = 0;
+                    bitClear(hasBreak, undoBoardIdx);
                     int mNeighbour = mismatchedCellAtStep[step];
                     if (mNeighbour != -1) {
-                        hasBreak[mNeighbour] = 0;
+                        bitClear(hasBreak, mNeighbour);
                     }
                     mismatchedCellAtStep[step] = -1;
-                    slipUsedAtStep[step] = 0;
+                    bitClear(slipUsedAtStep, step);
                 }
                 piecesNow--;
             }

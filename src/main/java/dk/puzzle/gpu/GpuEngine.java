@@ -56,21 +56,33 @@ public class GpuEngine {
      * passes it to the 4-arg constructor: 0 before step 190 (this project's
      * own conflict analysis found conflicts concentrate at index >= ~192, so
      * search integrity is preserved through the region that's reliably clean
-     * today), then +1 permitted total slip every 8 steps after that, capped
-     * at 25.
+     * today), then +1 permitted total slip every 40 steps after that, capped
+     * at 5 -- so at most 1 slip is permitted through most of the conflict
+     * zone, only reaching 2 very late (step 230+).
      *
-     * This is a first guess shaped like Verhaard's own schedule (roughly +1
-     * every 7-9 steps), not a tuned value -- he arrived at his numbers by
-     * measuring solutions-per-node yield and adjusting from there. Do the
-     * same before trusting this shape: instrument how often the search
-     * reaches a given score with this curve active vs. with slipping off,
-     * the same way this project already tracks skip-rate/conflict-
-     * distribution for other tuning questions.
+     * This ramp is deliberately far more conservative than a first attempt
+     * that grew +1 every 8 steps (reaching ~4 by step 217, ~9 by step 255).
+     * Once the kernel's slipsUsed accounting was fixed to no longer
+     * double-count (see solvePBP's seed-init break scan), allowSlip started
+     * reflecting the TRUE budget instead of a value silently halved by that
+     * bug -- and every step where allowSlip is true after tiers 1/2/3 fail
+     * costs an O(1024) full-scan fallback. Measured same-depth throughput on
+     * 2026-07-25 with the honestly-accounted budget: ~44M/s avg (was ~61M/s
+     * pre-fix at the same Pieces=144 checkpoint), and the peak dropped from
+     * ~203M/s to ~65M/s -- the fallback was firing roughly 2x more often
+     * than the buggy build ever actually let it. This curve trades away most
+     * of that reachable budget to bring the fallback rate back down, while
+     * still keeping break discipline minimally active rather than fully off.
+     *
+     * Still a first guess, now doubly so -- instrument how often the search
+     * reaches a given score with this curve active vs. with slipping off
+     * entirely before trusting it further, the same way this project already
+     * tracks skip-rate/conflict-distribution for other tuning questions.
      */
     public static int[] exampleEdgeSlipBudget() {
         int[] budget = new int[256];
         for (int step = 190; step < 256; step++) {
-            budget[step] = Math.min(25, 1 + (step - 190) / 8);
+            budget[step] = Math.min(5, 1 + (step - 190) / 40);
         }
         return budget;
     }
