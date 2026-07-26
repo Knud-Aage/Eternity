@@ -55,6 +55,15 @@ public class EternitySolver implements Runnable {
             new java.util.concurrent.atomic.AtomicInteger(190);
     public static final int SEED_DEPTH = 110;
     public static final int LNS_THRESHOLD = 200;
+    // How long the seed pool can go without growing before the Endgame
+    // Starvation watchdog clears it and retreats. Was a 5000ms literal --
+    // measured 2026-07-26 with the Blackwood order/break mechanisms active:
+    // real batch cadence is 30-65s now (his order + the sparse break-fallback
+    // scan cost more per batch than the old typewriter order), so the 5s
+    // threshold was firing on 252 of 294 batches (86%) -- retreating before
+    // almost every batch had any real chance to make progress. Comfortably
+    // above the observed max.
+    public static final long WATCHDOG_STARVATION_TIMEOUT_MS = 90_000L;
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
     // HINT STRATEGY FIELDS
     private static final int[] HINT_POSITIONS = {221, 45, 210, 34};
@@ -536,7 +545,7 @@ public class EternitySolver implements Runnable {
                         // The queue is actively growing. Reset the timer!
                         lastSeedGrowthTime = System.currentTimeMillis();
                         lastSeedCount = currentSeeds;
-                    } else if (System.currentTimeMillis() - lastSeedGrowthTime > 5000) {
+                    } else if (System.currentTimeMillis() - lastSeedGrowthTime > WATCHDOG_STARVATION_TIMEOUT_MS) {
 
                         logger.warn(">>> Watchdog: Endgame Starvation Triggered! Executing immediate retreat.");
 
@@ -550,49 +559,18 @@ public class EternitySolver implements Runnable {
                         boolean wasPoisoned = checkPoisonAndRetreat(currentDeadEndHash, deepestStep);
 
                         if (!wasPoisoned) {
-                            // Top flatResumeBoard back up from bestBoard first, so the
-                            // prefix we're about to "keep" below is real piece data and
-                            // not holes left over from an earlier drain (see
-                            // refreshAndCountBaseCamp for why this is needed).
-
-                            int deadEndDepth = deepestStep;
-
-                            // Calculate which row the engine died on (16 pieces per row)
-                            int failedRow = deadEndDepth / 16;
-
-                            // Roll back 2 full rows.
-                            int rollbackRow = Math.max(1, failedRow - 4);
-                            int newSeedDepth = rollbackRow * 16;
-
-                            logger.warn(String.format(">>> [SMART RETREAT] Starved at depth %d. Rolling Base Camp to Row %d (Depth %d)",
-                                    deadEndDepth, rollbackRow, newSeedDepth));
-
-                            // Sync the depth so the engine knows where it is
-                            deepestStep = newSeedDepth;
-
-                            // Erase the CPU start board down to the rollback row
-                            for (int i = newSeedDepth; i < 256; i++) {
-                                if (i < buildOrder.length) {
-                                    int pos = buildOrder[i];
-
-                                    // Properly calculate if this specific position is a static lock
-                                    boolean isStatic = (lockCenter && pos == 135);
-                                    if (lockCenter) {
-                                        for (int hPos : HINT_POSITIONS) {
-                                            if (pos == hPos) {
-                                                isStatic = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-
-                                    // Only erase the piece if it is NOT the center or a hint!
-                                    if (!isStatic) {
-                                        flatResumeBoard[pos] = -1;
-                                    }
-                                }
-                            }
-                            consecutiveExtinctions++;
+                            // Was: a fixed "roll back 4 rows" every single time, regardless
+                            // of how many consecutive times this same starvation cycle had
+                            // already failed to beat the all-time peak depth. triggerBranchScrap
+                            // already implements exactly the escalating "fast backtrack ->
+                            // medium retreat -> genetic reset (dig deeper every time)" logic
+                            // this needs, driven by trueStagnationCounter, and is already
+                            // exercised successfully via other trigger paths -- reuse it here
+                            // instead of the disconnected, never-escalating rollback that used
+                            // to live in this block (same fix applied on an earlier branch
+                            // today, ported here since this branch forked from master before
+                            // that fix existed).
+                            triggerBranchScrap();
                         }
 
                         lastSeedCount = 0;
