@@ -1,6 +1,7 @@
 package dk.puzzle.gpu;
 
 import dk.puzzle.model.PieceInventory;
+import dk.puzzle.util.PieceUtils;
 import jcuda.Pointer;
 import jcuda.Sizeof;
 import jcuda.driver.*;
@@ -76,8 +77,101 @@ public class GpuEngine {
         uploadConstant("c_allOrientations", inventory.allOrientations, 1024L * Sizeof.INT);
         uploadConstant("c_physicalMapping",  inventory.physicalMapping,  1024L * Sizeof.INT);
         uploadConstant("c_buildOrder",       buildOrder,                  256L * Sizeof.INT);
+        uploadConstant("c_isSideColor",       blackwoodSideColorMask(),     23L * Sizeof.INT);
+        uploadConstant("c_slipBudget",        blackwoodBreakBudget(),      256L * Sizeof.INT);
+        uploadConstant("c_heuristicSideCount", blackwoodHeuristicSideCount(inventory), 256L * Sizeof.INT);
+        // DISABLED (2026-07-26): blackwoodHeuristicRequired() is a faithful,
+        // verified transcription of his numbers, but they were tuned for HIS
+        // candidate selection specifically -- his dictionaries are pre-sorted
+        // by descending heuristic-side-count, so his search always prefers a
+        // high-heuristic piece when one is available at all. Our tiers 1/2/3
+        // return candidates in whatever order the shared-memory index built
+        // them, with no such sorting, so the same required-minimum numbers
+        // demand something our unsorted search usually can't deliver. Live
+        // result: Peak P2 Depth capped at ~16-30 and GPU throughput collapsed
+        // to ~1% of normal (near-total backtracking). Uploading an all-zero
+        // array disables the constraint entirely (kept as a real, verified
+        // implementation for later -- would need candidate lists sorted by
+        // heuristic count to actually work as intended, not a numbers problem).
+        uploadConstant("c_heuristicRequired", new int[256], 256L * Sizeof.INT);
 
         allocatePersistentBuffers();
+    }
+
+    // -----------------------------------------------------------------------
+    // Joshua Blackwood's actual solver constants (github.com/jblackwood345/
+    // EternityII_Solver, the source of the standing 470-piece record) -- this
+    // project's piece set (src/main/resources/JBlackwood_Pieces.txt) matches
+    // his Get_Pieces() verbatim, so these apply with no re-derivation.
+    // -----------------------------------------------------------------------
+
+    /** His side_edges: a break is never allowed on an edge showing one of these 5 colours, by colour identity. */
+    private static final int[] BLACKWOOD_SIDE_COLORS = {1, 5, 9, 13, 17};
+
+    /** His break_indexes_allowed: exactly 10 sequence positions where +1 total break is unlocked. Not a smooth ramp. */
+    private static final int[] BLACKWOOD_BREAK_INDEXES = {201, 206, 211, 216, 221, 225, 229, 233, 237, 239};
+
+    /** His heuristic_sides: 3 colours over-represented in the piece set, requiring early (not late) use. */
+    private static final int[] BLACKWOOD_HEURISTIC_COLORS = {13, 16, 10};
+
+    private static int[] blackwoodSideColorMask() {
+        int[] mask = new int[23];
+        for (int c : BLACKWOOD_SIDE_COLORS) mask[c] = 1;
+        return mask;
+    }
+
+    /** Cumulative allowed-break count by step, matching his Get_Break_Array() exactly. */
+    private static int[] blackwoodBreakBudget() {
+        int[] budget = new int[256];
+        int cumulative = 0;
+        for (int i = 0; i < 256; i++) {
+            for (int idx : BLACKWOOD_BREAK_INDEXES) {
+                if (idx == i) { cumulative++; break; }
+            }
+            budget[i] = cumulative;
+        }
+        return budget;
+    }
+
+    /** Per physical piece id (0-255): how many of its 4 edges show one of the 3 heuristic colours. */
+    private static int[] blackwoodHeuristicSideCount(PieceInventory inventory) {
+        int[] counts = new int[256];
+        for (int physId = 0; physId < 256; physId++) {
+            int p = inventory.allOrientations[physId * 4]; // rotation doesn't affect which colours are present
+            int n = PieceUtils.getNorth(p), e = PieceUtils.getEast(p), s = PieceUtils.getSouth(p), w = PieceUtils.getWest(p);
+            int count = 0;
+            for (int hc : BLACKWOOD_HEURISTIC_COLORS) {
+                if (n == hc) count++;
+                if (e == hc) count++;
+                if (s == hc) count++;
+                if (w == hc) count++;
+            }
+            counts[physId] = count;
+        }
+        return counts;
+    }
+
+    /**
+     * His heuristic_array: minimum cumulative heuristic-side-colour count
+     * required by each step up to index 160, a piecewise-linear schedule.
+     * Uses float arithmetic (not double) to match his C# (float) casts
+     * exactly, including truncation at every segment boundary. Steps beyond
+     * 160 are left at 0 (his own array leaves them at C#'s int default, and
+     * the kernel only ever consults this for step &lt;= HEURISTIC_MAX_INDEX).
+     */
+    private static int[] blackwoodHeuristicRequired() {
+        int[] arr = new int[256];
+        for (int i = 0; i <= 160; i++) {
+            float val;
+            if (i <= 16) val = 0f;
+            else if (i <= 26) val = ((float) i - 16) * 2.8f;
+            else if (i <= 56) val = (((float) i - 26) * 1.43333f) + 28f;
+            else if (i <= 76) val = (((float) i - 56) * 0.9f) + 71f;
+            else if (i <= 102) val = (((float) i - 76) * 0.6538f) + 89f;
+            else val = (((float) i - 102) / 4.4615f) + 106f;
+            arr[i] = (int) val;
+        }
+        return arr;
     }
 
     private void uploadConstant(String symbol, int[] data, long bytes) {

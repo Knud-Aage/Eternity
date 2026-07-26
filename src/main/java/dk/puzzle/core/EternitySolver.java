@@ -191,6 +191,8 @@ public class EternitySolver implements Runnable {
 
         if (strategy == BuildStrategy.SPIRAL) {
             generateSpiralOrder();
+        } else if (strategy == BuildStrategy.BLACKWOOD) {
+            generateBlackwoodOrder();
         } else {
             for (int i = 0; i < 256; i++) {
                 buildOrder[i] = i;
@@ -2050,7 +2052,53 @@ public class EternitySolver implements Runnable {
         }
     }
 
-    public enum BuildStrategy {TYPEWRITER, SPIRAL}
+    /**
+     * Joshua Blackwood's actual board-fill order, transcribed from his public
+     * solver (Get_Board_Order in Util.cs, github.com/jblackwood345/EternityII_Solver)
+     * -- the order that produced the standing 470-piece record. Rows 5-15 (11
+     * rows) fill in plain row-major order first; rows 0-4 (the last 5 to be
+     * filled) switch to a column-major sweep, interleaving those 5 rows one
+     * column at a time. This is the same piece set (src/main/resources/
+     * JBlackwood_Pieces.txt matches his Get_Pieces() verbatim), so his exact
+     * sequence numbers apply with no re-derivation.
+     *
+     * Blackwood's own matrix is written with row 0 = the LAST row filled and
+     * row 15 = the FIRST, in his own top-to-bottom coordinate convention.
+     * Cross-checked against this project's fixed center-lock position (135 =
+     * row 8, col 7): his own "start piece" (physical piece 139, the official
+     * competition starter) sits at his own (row 7, col 7), which the matrix
+     * places at sequence 119 -- transcribing the matrix directly (using its
+     * own row index as OUR row, no additional flip) also puts our position
+     * 135 at sequence 119, confirming the transcription lines up correctly
+     * with no coordinate mismatch.
+     */
+    private void generateBlackwoodOrder() {
+        int[][] seq = {
+                {196, 197, 198, 199, 200, 205, 210, 215, 220, 225, 230, 235, 243, 249, 254, 255},
+                {191, 192, 193, 194, 195, 204, 209, 214, 219, 224, 229, 234, 242, 248, 252, 253},
+                {186, 187, 188, 189, 190, 203, 208, 213, 218, 223, 228, 233, 241, 247, 250, 251},
+                {181, 182, 183, 184, 185, 202, 207, 212, 217, 222, 227, 232, 240, 244, 245, 246},
+                {176, 177, 178, 179, 180, 201, 206, 211, 216, 221, 226, 231, 236, 237, 238, 239},
+                {160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175},
+                {144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159},
+                {128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143},
+                {112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127},
+                {96,  97,  98,  99,  100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111},
+                {80,  81,  82,  83,  84,  85,  86,  87,  88,  89,  90,  91,  92,  93,  94,  95},
+                {64,  65,  66,  67,  68,  69,  70,  71,  72,  73,  74,  75,  76,  77,  78,  79},
+                {48,  49,  50,  51,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,  62,  63},
+                {32,  33,  34,  35,  36,  37,  38,  39,  40,  41,  42,  43,  44,  45,  46,  47},
+                {16,  17,  18,  19,  20,  21,  22,  23,  24,  25,  26,  27,  28,  29,  30,  31},
+                {0,   1,   2,   3,   4,   5,   6,   7,   8,   9,   10,  11,  12,  13,  14,  15}
+        };
+        for (int row = 0; row < 16; row++) {
+            for (int col = 0; col < 16; col++) {
+                buildOrder[seq[row][col]] = row * 16 + col;
+            }
+        }
+    }
+
+    public enum BuildStrategy {TYPEWRITER, SPIRAL, BLACKWOOD}
 
     class TopBoardRegistry {
         private static final int MAX_CAPACITY = 20;

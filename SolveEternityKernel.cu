@@ -16,6 +16,25 @@
 __constant__ int c_allOrientations[1024];
 __constant__ int c_physicalMapping[1024];
 __constant__ int c_buildOrder[256];
+// Blackwood's actual solver (github.com/jblackwood345/EternityII_Solver, the
+// source of the standing 470-piece record -- same piece set as this project's
+// JBlackwood_Pieces.txt, verified byte-identical) never allows a break on one
+// of 5 specific colours (his side_edges = {1,5,9,13,17}), regardless of board
+// position -- checked by colour identity, not by border adjacency.
+__constant__ int c_isSideColor[23]; // indexed by colour id 0-22 (NUM_COLORS, defined below)
+// Cumulative allowed-break count by step, built from his exact sparse list of
+// 10 unlock positions (201,206,211,216,221,225,229,233,237,239) -- NOT a
+// smooth ramp. See GpuEngine.blackwoodBreakBudget().
+__constant__ int c_slipBudget[256];
+// Per PHYSICAL piece id (0-255): how many of its 4 edges show one of
+// Blackwood's 3 "heuristic_sides" colours (10,13,16) -- colours that are
+// over-represented in the piece set. See GpuEngine.blackwoodHeuristicSideCount().
+__constant__ int c_heuristicSideCount[256];
+// Minimum cumulative heuristic-side-colour count required by each step up to
+// HEURISTIC_MAX_INDEX, his exact piecewise-linear schedule -- forces early use
+// of the over-represented colours so they don't pile up into a later
+// bottleneck. See GpuEngine.blackwoodHeuristicRequired().
+__constant__ int c_heuristicRequired[256];
 
 __device__ inline int getNorth(int p) { return (p >> 24) & 0xFF; }
 __device__ inline int getEast (int p) { return (p >> 16) & 0xFF; }
@@ -39,6 +58,54 @@ __device__ inline bool matches(int p, int n_req, int e_req, int s_req, int w_req
     if (row != 15 && s == 0) return false;
     if (col != 0  && w == 0) return false;
     return true;
+}
+
+// Packed-bit helpers for the 256-entry breakUsedAtStep flag (1 bit needed
+// per step, so a uint32[8] bitset is far cheaper than an int[256] array).
+__device__ inline bool bitGet(const unsigned int* bits, int idx) {
+    return (bits[idx >> 5] >> (idx & 31)) & 1u;
+}
+__device__ inline void bitSet(unsigned int* bits, int idx) {
+    bits[idx >> 5] |= (1u << (idx & 31));
+}
+__device__ inline void bitClear(unsigned int* bits, int idx) {
+    bits[idx >> 5] &= ~(1u << (idx & 31));
+}
+
+// First step at which a break is ever unlockable (his break_indexes_allowed.Min()),
+// and the last step his heuristic-colour-exhaustion requirement applies to
+// (his max_heuristic_index). These two ranges never overlap, so break-eligible
+// candidates and the heuristic minimum-count gate are never both relevant at
+// the same step.
+#define FIRST_BREAK_INDEX   201
+#define HEURISTIC_MAX_INDEX 160
+
+// ---------------------------------------------------------------------------
+// matchKind: like matches(), but distinguishes an exact match from a single-
+// edge mismatch that's still break-eligible (Blackwood's rule: a break is
+// never allowed on one of his 5 "side_edges" colours, checked by the
+// candidate's OWN colour on the mismatched edge, not the required colour).
+// Returns 0 = reject, 1 = exact match, 2 = single break-eligible mismatch.
+// ---------------------------------------------------------------------------
+__device__ inline int matchKind(int p, int n_req, int e_req, int s_req, int w_req, int row, int col)
+{
+    int n = getNorth(p), e = getEast(p), s = getSouth(p), w = getWest(p);
+
+    if (row != 0  && n == 0) return 0;
+    if (col != 15 && e == 0) return 0;
+    if (row != 15 && s == 0) return 0;
+    if (col != 0  && w == 0) return 0;
+
+    int mismatches = 0;
+    int mismatchColor = -1;
+    if (n_req != WILDCARD && n != n_req) { mismatches++; mismatchColor = n; }
+    if (e_req != WILDCARD && e != e_req) { mismatches++; mismatchColor = e; }
+    if (s_req != WILDCARD && s != s_req) { mismatches++; mismatchColor = s; }
+    if (w_req != WILDCARD && w != w_req) { mismatches++; mismatchColor = w; }
+
+    if (mismatches == 0) return 1;
+    if (mismatches == 1 && mismatchColor >= 0 && mismatchColor < NUM_COLORS && !c_isSideColor[mismatchColor]) return 2;
+    return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -177,22 +244,52 @@ extern "C" __global__ void solvePBP(
     int pieceStack[256];
     int placedOrientIdx[256];
     unsigned long long inventoryMask[4] = { ~0ULL, ~0ULL, ~0ULL, ~0ULL };
+    unsigned int breakUsedAtStep[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+    int breaksUsed   = 0;
+    int heuristicSum = 0;
+    // Independent resume position for the break-fallback scan below --
+    // deliberately separate from pieceStack so it can never alias tiers
+    // 1/2/3's own per-step resume bookkeeping. Only ever consulted from
+    // FIRST_BREAK_INDEX (201) onward.
+    int breakFallbackStack[256];
 
     int offset    = tid * 256;
     int piecesNow = 0;
     for (int i = 0; i < 256; i++) {
-        board[i]           = d_partialBoards[offset + i];
-        pieceStack[i]      = 0;
-        placedOrientIdx[i] = -1;
+        board[i]              = d_partialBoards[offset + i];
+        pieceStack[i]         = 0;
+        placedOrientIdx[i]    = -1;
+        breakFallbackStack[i] = 0;
         if (board[i] != -1) {
             piecesNow++;
             for (int o = 0; o < 1024; o++) {
                 if (c_allOrientations[o] == board[i]) {
                     int physId = c_physicalMapping[o];
                     inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                    heuristicSum += c_heuristicSideCount[physId];
                     break;
                 }
             }
+        }
+    }
+
+    // Re-derive breaksUsed for any pre-placed seed cells (startingStep > 0).
+    // Only South/East are checked so each internal edge between two
+    // pre-placed cells is counted once, not once from each side (same fix
+    // applied elsewhere in this project for the identical double-count risk).
+    // In practice this rarely fires: CPU-side handoff happens well before
+    // FIRST_BREAK_INDEX (201), so most launches simply have zero breaks yet.
+    if (startingStep > 0) {
+        for (int s = 0; s < startingStep; s++) {
+            int bIdx = c_buildOrder[s];
+            if (board[bIdx] == -1) continue;
+            int p = board[bIdx];
+            int r = bIdx / 16, c = bIdx % 16;
+            int e = getEast(p), s_c = getSouth(p);
+            int s_req = (r == 15) ? 0 : (board[bIdx+16] != -1 ? getNorth(board[bIdx+16]) : WILDCARD);
+            int e_req = (c == 15) ? 0 : (board[bIdx+1]  != -1 ? getWest (board[bIdx+1])  : WILDCARD);
+            if (s_req != WILDCARD && s_c != s_req && s_c < NUM_COLORS && !c_isSideColor[s_c]) breaksUsed++;
+            if (e_req != WILDCARD && e   != e_req && e   < NUM_COLORS && !c_isSideColor[e])   breaksUsed++;
         }
     }
 
@@ -235,13 +332,18 @@ extern "C" __global__ void solvePBP(
                 int physId = c_physicalMapping[idx];
                 if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
                 int p = c_allOrientations[idx];
-                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
+                if (kind == 0) continue;
+                if (kind == 2 && !(step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
+                if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
                 pieceStack[step] = li + 1;
+                if (kind == 2) { breaksUsed++; bitSet(breakUsedAtStep, step); } else { bitClear(breakUsedAtStep, step); }
+                heuristicSum += c_heuristicSideCount[physId];
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -261,13 +363,18 @@ extern "C" __global__ void solvePBP(
                 int physId = c_physicalMapping[idx];
                 if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
                 int p = c_allOrientations[idx];
-                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
+                if (kind == 0) continue;
+                if (kind == 2 && !(step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
+                if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
                 pieceStack[step] = li + 1;
+                if (kind == 2) { breaksUsed++; bitSet(breakUsedAtStep, step); } else { bitClear(breakUsedAtStep, step); }
+                heuristicSum += c_heuristicSideCount[physId];
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -285,13 +392,18 @@ extern "C" __global__ void solvePBP(
                 int physId = c_physicalMapping[li];
                 if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
                 int p = c_allOrientations[li];
-                if (!matches(p, n_req, e_req, s_req, w_req, row, col)) continue;
+                int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
+                if (kind == 0) continue;
+                if (kind == 2 && !(step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
+                if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = li;
                 pieceStack[step] = li + 1;
+                if (kind == 2) { breaksUsed++; bitSet(breakUsedAtStep, step); } else { bitClear(breakUsedAtStep, step); }
+                heuristicSum += c_heuristicSideCount[physId];
                 foundPiece = true;
                 piecesNow++;
                 step++;
@@ -302,6 +414,43 @@ extern "C" __global__ void solvePBP(
                 break;
             }
             if (!foundPiece) pieceStack[step] = 0;
+        }
+
+        // --- Break fallback: tiers 1/2 index by exact north/west colour, so a
+        // break-eligible candidate whose ONLY mismatch is on north or west is
+        // structurally invisible to them (tier 3's unconditional scan already
+        // catches every kind==2 candidate on its own, but tier 3 only runs
+        // when north isn't yet known at all). Bounded to the same
+        // FIRST_BREAK_INDEX/budget gate as above, so this only ever executes
+        // in the narrow, sparse range where breaks are permitted at all. ---
+        if (!foundPiece && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step]) {
+            int fbStartLi = breakFallbackStack[step];
+            for (int li = fbStartLi; li < 1024; li++) {
+                int physId = c_physicalMapping[li];
+                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                int p = c_allOrientations[li];
+                // kind==1 candidates were already tried by tiers 1/2/3 above --
+                // only a genuine break is new information here.
+                if (matchKind(p, n_req, e_req, s_req, w_req, row, col) != 2) continue;
+                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                board[boardIdx] = p;
+                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                placedOrientIdx[step] = li;
+                breakFallbackStack[step] = li + 1;
+                breaksUsed++;
+                bitSet(breakUsedAtStep, step);
+                heuristicSum += c_heuristicSideCount[physId];
+                foundPiece = true;
+                piecesNow++;
+                step++;
+                if (piecesNow > bestPiecesPlaced) {
+                    bestPiecesPlaced = piecesNow;
+                    for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+                }
+                break;
+            }
+            if (!foundPiece) breakFallbackStack[step] = 0;
         }
 
         if (!foundPiece) {
@@ -319,6 +468,11 @@ extern "C" __global__ void solvePBP(
                 board[undoBoardIdx] = -1;
                 int physId = c_physicalMapping[placedOrientIdx[step]];
                 inventoryMask[physId/64] |= (1ULL << (physId%64));
+                heuristicSum -= c_heuristicSideCount[physId];
+                if (bitGet(breakUsedAtStep, step)) {
+                    breaksUsed--;
+                    bitClear(breakUsedAtStep, step);
+                }
                 piecesNow--;
             }
         }

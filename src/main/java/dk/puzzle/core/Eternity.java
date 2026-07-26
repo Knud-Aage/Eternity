@@ -80,9 +80,15 @@ public class Eternity {
 //        boolean useOfficialConstraints = myCenterPieceCheckbox.isSelected();
 
         if (usePbp) {
+            // BLACKWOOD is the default now: Joshua Blackwood's own transcribed
+            // fill order (the one behind the standing 470-piece record), used
+            // together with his break/heuristic-colour kernel mechanisms --
+            // see EternitySolver.generateBlackwoodOrder() and
+            // GpuEngine.blackwood*() for the sourcing. The startup dialog's
+            // spiral checkbox still overrides it if explicitly selected.
             EternitySolver.BuildStrategy strategy = useSpiral ?
                     EternitySolver.BuildStrategy.SPIRAL :
-                    EternitySolver.BuildStrategy.TYPEWRITER;
+                    EternitySolver.BuildStrategy.BLACKWOOD;
 
             // Pass the checkbox variable in as the very last parameter!
             solverTask = new EternitySolver(inventory, targetPiece, useGpu, strategy, lockCenter);
