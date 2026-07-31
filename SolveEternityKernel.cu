@@ -35,6 +35,18 @@ __constant__ int c_heuristicSideCount[256];
 // of the over-represented colours so they don't pile up into a later
 // bottleneck. See GpuEngine.blackwoodHeuristicRequired().
 __constant__ int c_heuristicRequired[256];
+// A permutation of orientation indices 0-1023, sorted by descending
+// c_heuristicSideCount[physicalMapping[idx]]. Blackwood's own candidate
+// dictionaries are pre-sorted this way, so his greedy search always prefers a
+// heuristic-heavy piece when one is valid -- this project's shared-memory
+// buckets were built in raw index order instead, which is why
+// c_heuristicRequired had to be disabled (see GpuEngine.initCUDA): the
+// required minimums assumed his sorted preference and this kernel had no way
+// to honour it. buildSharedIndex() now inserts in this order instead of
+// 0..1023 (so within each sm_byNorth/sm_byNW bucket, higher-heuristic pieces
+// sort first), and tier 3's full scan iterates it directly. See
+// GpuEngine.blackwoodHeuristicSortedOrder().
+__constant__ int c_heuristicSortedOrder[1024];
 
 __device__ inline int getNorth(int p) { return (p >> 24) & 0xFF; }
 __device__ inline int getEast (int p) { return (p >> 16) & 0xFF; }
@@ -157,7 +169,11 @@ __device__ void buildSharedIndex(
     for (int c = 0; c < NUM_COLORS; c++)              sm_byNorthCount[c] = 0;
     for (int k = 0; k < NUM_COLORS * NUM_COLORS; k++) sm_byNWCount[k]    = 0;
 
-    for (int i = 0; i < 1024; i++) {
+    // Inserted in c_heuristicSortedOrder (descending heuristic-colour count)
+    // rather than raw index order, so each bucket comes out with its
+    // highest-heuristic candidates first -- see c_heuristicSortedOrder above.
+    for (int rank = 0; rank < 1024; rank++) {
+        int i  = c_heuristicSortedOrder[rank];
         int p  = c_allOrientations[i];
         int nc = getNorth(p);
         int wc = getWest(p);
@@ -388,10 +404,14 @@ extern "C" __global__ void solvePBP(
 
         // --- Tier 3: full scan — O(1024), rare ---
         } else {
+            // Walked via c_heuristicSortedOrder (descending heuristic-colour
+            // count), not raw index order, so this tier honours the same
+            // heuristic preference as the sm_byNorth/sm_byNW buckets above.
             for (int li = startLi; li < 1024; li++) {
-                int physId = c_physicalMapping[li];
+                int idx    = c_heuristicSortedOrder[li];
+                int physId = c_physicalMapping[idx];
                 if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
-                int p = c_allOrientations[li];
+                int p = c_allOrientations[idx];
                 int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
                 if (kind == 0) continue;
                 if (kind == 2 && !(step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
@@ -400,7 +420,7 @@ extern "C" __global__ void solvePBP(
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
-                placedOrientIdx[step] = li;
+                placedOrientIdx[step] = idx;
                 pieceStack[step] = li + 1;
                 if (kind == 2) { breaksUsed++; bitSet(breakUsedAtStep, step); } else { bitClear(breakUsedAtStep, step); }
                 heuristicSum += c_heuristicSideCount[physId];

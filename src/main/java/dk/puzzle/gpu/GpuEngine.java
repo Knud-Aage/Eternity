@@ -80,19 +80,26 @@ public class GpuEngine {
         uploadConstant("c_isSideColor",       blackwoodSideColorMask(),     23L * Sizeof.INT);
         uploadConstant("c_slipBudget",        blackwoodBreakBudget(),      256L * Sizeof.INT);
         uploadConstant("c_heuristicSideCount", blackwoodHeuristicSideCount(inventory), 256L * Sizeof.INT);
-        // DISABLED (2026-07-26): blackwoodHeuristicRequired() is a faithful,
-        // verified transcription of his numbers, but they were tuned for HIS
-        // candidate selection specifically -- his dictionaries are pre-sorted
-        // by descending heuristic-side-count, so his search always prefers a
-        // high-heuristic piece when one is available at all. Our tiers 1/2/3
-        // return candidates in whatever order the shared-memory index built
-        // them, with no such sorting, so the same required-minimum numbers
-        // demand something our unsorted search usually can't deliver. Live
-        // result: Peak P2 Depth capped at ~16-30 and GPU throughput collapsed
-        // to ~1% of normal (near-total backtracking). Uploading an all-zero
-        // array disables the constraint entirely (kept as a real, verified
-        // implementation for later -- would need candidate lists sorted by
-        // heuristic count to actually work as intended, not a numbers problem).
+        // ENABLED (2026-07-31): candidates are now walked via
+        // c_heuristicSortedOrder (see buildSharedIndex/tier 3 in the kernel),
+        // so a heuristic-heavy piece is preferred whenever one is valid --
+        // matching how Blackwood's own pre-sorted dictionaries behave. Live-
+        // tested in isolation: Peak P2 Depth held at 214-221 (baseline range),
+        // so the sort itself is safe on its own.
+        uploadConstant("c_heuristicSortedOrder", blackwoodHeuristicSortedOrder(inventory), 1024L * Sizeof.INT);
+        // STILL DISABLED (2026-07-26, re-confirmed 2026-07-31): the original
+        // theory was that c_heuristicRequired only needed sorted candidates
+        // to work (see blackwoodHeuristicSortedOrder above). That's now
+        // falsified by direct live evidence -- re-enabling both together
+        // reproduces the exact same Peak-P2-Depth collapse as the original
+        // attempt (~25-26 vs. the 211-235 baseline), while the sort alone
+        // (this array left all-zero) is fine. So the requirement's cumulative
+        // minimums are genuinely infeasible against this kernel's actual
+        // per-step candidate pool -- not an ordering problem. Re-enabling
+        // this for real would need the schedule re-derived against what's
+        // actually reachable here (this project's build order, lookahead
+        // pruning, and lockCenter/hint constraints all differ from his),
+        // not just re-applying his numbers.
         uploadConstant("c_heuristicRequired", new int[256], 256L * Sizeof.INT);
 
         allocatePersistentBuffers();
@@ -149,6 +156,29 @@ public class GpuEngine {
             counts[physId] = count;
         }
         return counts;
+    }
+
+    /**
+     * A permutation of orientation indices 0-1023, sorted by descending
+     * heuristic-side-count of the underlying physical piece -- mirrors
+     * Blackwood's own candidate dictionaries, which are pre-sorted the same
+     * way so his search always prefers a heuristic-heavy piece when one is
+     * valid. The kernel's buildSharedIndex() inserts into sm_byNorth/sm_byNW
+     * in this order (so each bucket comes out highest-heuristic-first) and
+     * tier 3's full scan walks it directly. Ties keep their original
+     * ascending-index order (Integer boxing makes Arrays.sort stable) --
+     * arbitrary but deterministic, and Blackwood's own tie-breaking isn't
+     * specified in his source, so there's no "correct" order to match.
+     */
+    private static int[] blackwoodHeuristicSortedOrder(PieceInventory inventory) {
+        int[] sideCount = blackwoodHeuristicSideCount(inventory);
+        Integer[] order = new Integer[1024];
+        for (int i = 0; i < 1024; i++) order[i] = i;
+        java.util.Arrays.sort(order, (a, b) ->
+                sideCount[inventory.physicalMapping[b]] - sideCount[inventory.physicalMapping[a]]);
+        int[] result = new int[1024];
+        for (int i = 0; i < 1024; i++) result[i] = order[i];
+        return result;
     }
 
     /**
