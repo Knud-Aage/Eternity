@@ -248,6 +248,22 @@ public class Eternity {
                 controlPanel.add(conflictSlider);
                 // ------------------------------------------------
 
+                // --- BREAK TOLERANCE TOGGLE ---
+                // Default on, matching every prior live run -- this is an
+                // A/B knob (does allowing breaks at all help or hurt), not a
+                // way to leave it off by accident.
+                JCheckBox breakToleranceCheckbox = new JCheckBox("Break Tolerance (A/B)", true);
+                breakToleranceCheckbox.setFont(labelFont);
+                breakToleranceCheckbox.setForeground(textColor);
+                breakToleranceCheckbox.setBackground(new Color(40, 42, 45));
+                breakToleranceCheckbox.setAlignmentX(Component.CENTER_ALIGNMENT);
+                breakToleranceCheckbox.addActionListener(e ->
+                        pbpSolver.setBreakToleranceEnabled(breakToleranceCheckbox.isSelected()));
+
+                controlPanel.add(Box.createVerticalStrut(20));
+                controlPanel.add(breakToleranceCheckbox);
+                // ------------------------------------------------
+
                 frame.add(controlPanel, BorderLayout.EAST);
             }
 

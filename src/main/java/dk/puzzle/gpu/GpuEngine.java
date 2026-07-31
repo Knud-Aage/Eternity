@@ -38,6 +38,14 @@ public class GpuEngine {
     private final PieceInventory inventory;
     private final boolean lockCenter;
     private final long stepBudget;
+    // Gates the kernel's kind==2 break-eligible paths (see solvePBP's
+    // breakToleranceFlag param). Default true reproduces every prior live
+    // run's behaviour exactly (break-tolerance has been unconditionally on
+    // since the Blackwood integration) -- false is for A/B comparison only,
+    // e.g. "does allowing breaks at all help or hurt" holding everything
+    // else constant. Ported from an unmerged exploration that toggled a
+    // cruder, non-colour-excluded break mechanism; this gates the real one.
+    private volatile boolean breakToleranceEnabled = true;
 
     // Persistent device buffers — allocated once, reused every launch
     private CUdeviceptr d_partialBoards;
@@ -227,6 +235,13 @@ public class GpuEngine {
         return p;
     }
 
+    /** GUI/config hook: enable or disable break-tolerant placement (the
+     *  kernel's kind==2 paths) for A/B comparison. Takes effect on the next
+     *  runDeepDfs call. Default true -- matches every prior live run. */
+    public void setBreakToleranceEnabled(boolean enabled) {
+        this.breakToleranceEnabled = enabled;
+    }
+
     // ==========================================================
     // PHASE 2: DEEP DFS
     // ==========================================================
@@ -256,7 +271,7 @@ public class GpuEngine {
                 Pointer.to(d_totalSteps),
                 Pointer.to(new int[]{lockCenter ? 1 : 0}),
                 Pointer.to(d_threadDepths),
-                Pointer.to(new int[]{0}),
+                Pointer.to(new int[]{breakToleranceEnabled ? 1 : 0}),
                 Pointer.to(new long[]{stepBudget})
         );
 

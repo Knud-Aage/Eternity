@@ -2074,6 +2074,19 @@ public class EternitySolver implements Runnable {
         logger.info(">>> [CONFIG] Conflict Save Threshold updated to: " + newThreshold);
     }
 
+    /**
+     * Enable/disable break-tolerant placement (the GPU kernel's kind==2
+     * paths -- see matchKind in SolveEternityKernel.cu) for A/B comparison.
+     * Default true, matching every prior live run. Only takes effect once
+     * the GPU engine has been initialised.
+     */
+    public void setBreakToleranceEnabled(boolean enabled) {
+        if (gpuEngine != null) {
+            gpuEngine.setBreakToleranceEnabled(enabled);
+            logger.info(">>> [CONFIG] Break tolerance set to: " + enabled);
+        }
+    }
+
     private void applyStaticLocks(int[] board) {
         if (this.lockCenter) {
             board[135] = targetPiece;

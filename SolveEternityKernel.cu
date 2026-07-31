@@ -240,7 +240,12 @@ extern "C" __global__ void solvePBP(
     unsigned long long* d_totalSteps,
     int lockCenterFlag,
     int* d_threadDepths,
-    int* p_radarLimit,
+    int breakToleranceFlag, // was the p_radarLimit landmine (a throwaway host
+                             // pointer never read) -- now a real toggle for
+                             // the kind==2 break-eligible paths below. 1 =
+                             // current always-on behaviour (default, matches
+                             // every prior live run), 0 = strict-only, for
+                             // A/B comparison. See GpuEngine.setBreakToleranceEnabled().
     unsigned long long stepBudget
 )
 {
@@ -350,7 +355,7 @@ extern "C" __global__ void solvePBP(
                 int p = c_allOrientations[idx];
                 int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
                 if (kind == 0) continue;
-                if (kind == 2 && !(step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
+                if (kind == 2 && !(breakToleranceFlag == 1 && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
                 if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
@@ -381,7 +386,7 @@ extern "C" __global__ void solvePBP(
                 int p = c_allOrientations[idx];
                 int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
                 if (kind == 0) continue;
-                if (kind == 2 && !(step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
+                if (kind == 2 && !(breakToleranceFlag == 1 && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
                 if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
@@ -414,7 +419,7 @@ extern "C" __global__ void solvePBP(
                 int p = c_allOrientations[idx];
                 int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
                 if (kind == 0) continue;
-                if (kind == 2 && !(step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
+                if (kind == 2 && !(breakToleranceFlag == 1 && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
                 if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
@@ -443,7 +448,7 @@ extern "C" __global__ void solvePBP(
         // when north isn't yet known at all). Bounded to the same
         // FIRST_BREAK_INDEX/budget gate as above, so this only ever executes
         // in the narrow, sparse range where breaks are permitted at all. ---
-        if (!foundPiece && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step]) {
+        if (!foundPiece && breakToleranceFlag == 1 && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step]) {
             int fbStartLi = breakFallbackStack[step];
             for (int li = fbStartLi; li < 1024; li++) {
                 int physId = c_physicalMapping[li];
