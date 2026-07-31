@@ -47,7 +47,7 @@ class CheckpointManagerTest {
         Set<Integer> hashes = new HashSet<>(Arrays.asList(1, 2, 3));
         List<int[]> registry = new ArrayList<>();
         registry.add(new int[]{10, 20, 30});
-        SolverState state = new SolverState(boardData, 120, hashes, registry, 4242L);
+        SolverState state = new SolverState(boardData, 120, hashes, registry, 4242L, 33);
 
         CheckpointManager.saveSmartState(state, profileFolder);
         SolverState loaded = CheckpointManager.loadSmartState(profileFolder);
@@ -59,6 +59,7 @@ class CheckpointManagerTest {
         assertEquals(1, loaded.topBoardsRegistry.size());
         assertArrayEquals(new int[]{10, 20, 30}, loaded.topBoardsRegistry.get(0));
         assertBoardEquals(boardData, loaded.bestBoard, "Deserialized board must match the saved board");
+        assertEquals(33, loaded.lowestConflicts);
     }
 
     @Test
@@ -70,9 +71,9 @@ class CheckpointManagerTest {
     @Test
     void testLoadSmartStatePicksHighestScoreFile(@TempDir Path tempDir) {
         String profileFolder = tempDir.resolve("profileB").toString();
-        SolverState low = new SolverState(board(-1), 50, new HashSet<>(), new ArrayList<>(), 1L);
-        SolverState high = new SolverState(board(-1), 200, new HashSet<>(), new ArrayList<>(), 2L);
-        SolverState mid = new SolverState(board(-1), 130, new HashSet<>(), new ArrayList<>(), 3L);
+        SolverState low = new SolverState(board(-1), 50, new HashSet<>(), new ArrayList<>(), 1L, null);
+        SolverState high = new SolverState(board(-1), 200, new HashSet<>(), new ArrayList<>(), 2L, null);
+        SolverState mid = new SolverState(board(-1), 130, new HashSet<>(), new ArrayList<>(), 3L, null);
 
         CheckpointManager.saveSmartState(low, profileFolder);
         CheckpointManager.saveSmartState(high, profileFolder);

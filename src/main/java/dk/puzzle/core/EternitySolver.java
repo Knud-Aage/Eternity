@@ -64,6 +64,15 @@ public class EternitySolver implements Runnable {
     // almost every batch had any real chance to make progress. Comfortably
     // above the observed max.
     public static final long WATCHDOG_STARVATION_TIMEOUT_MS = 90_000L;
+    // HoleSolver's own fallback repair (for conflict clusters its exact
+    // search can't fully resolve) has an unseeded random component, so a
+    // single attempt doesn't reliably find its own best result. Confirmed
+    // empirically 2026-07-31 against 58 saved boards: retrying 5x found an
+    // improvement on 2 boards that a single attempt missed entirely (one of
+    // them 21 -> 20, reproduced 2/5 and 3/5 attempts respectively). Runs
+    // off the hot GPU-batch path already, only on boards that already
+    // cleared the save bar, so the extra ~5x cost here is worth it.
+    private static final int HOLE_SOLVER_RETRY_ATTEMPTS = 5;
     private static final Logger logger = LogManager.getFormatterLogger(EternitySolver.class);
     // HINT STRATEGY FIELDS
     private static final int[] HINT_POSITIONS = {221, 45, 210, 34};
@@ -77,6 +86,14 @@ public class EternitySolver implements Runnable {
     final int[] bestBoard = new int[256];
     final TopBoardRegistry topBoards = new TopBoardRegistry();
     final RecordTracker recordTracker = new RecordTracker();
+    // All-time-low edge-conflict count seen by analyzeFullBoardPotential, the
+    // conflict-side counterpart to recordTracker's depth record. Nothing
+    // tracked this before -- saves were only ever gated on a fixed,
+    // manually-adjusted threshold (conflictSaveThreshold), never on "is this
+    // actually better than anything found so far". Claimed via CAS since
+    // backgroundAnalysisExecutor runs up to ANALYSIS_THREADS concurrently.
+    private final java.util.concurrent.atomic.AtomicInteger lowestConflictsEver =
+            new java.util.concurrent.atomic.AtomicInteger(Integer.MAX_VALUE);
     private final ConcurrentHashMap<Integer, Integer> hashStrikeCount = new ConcurrentHashMap<>();
     private final Set<Integer> poisonedHashes = ConcurrentHashMap.newKeySet();
     // Core Solver Components
@@ -252,6 +269,10 @@ public class EternitySolver implements Runnable {
             this.cumulativeTrials = loadedState.cumulativeTrials;
             for (int[] historicBoard : loadedState.topBoardsRegistry) {
                 this.topBoards.offer(historicBoard, loadedState.score);
+            }
+            if (loadedState.lowestConflicts != null) {
+                lowestConflictsEver.set(loadedState.lowestConflicts);
+                logger.info(">>> SUCCESS: Restored all-time-low conflict record: " + loadedState.lowestConflicts);
             }
             logger.info(">>> SUCCESS: Loaded checkpoint AND restored historic solver memory!");
         } else {
@@ -478,7 +499,8 @@ public class EternitySolver implements Runnable {
                         recordTracker.highScore(),
                         recordTracker.hashSnapshot(),
                         this.topBoards.getRawRegistry(),
-                        cumulativeTrials
+                        cumulativeTrials,
+                        lowestConflictsEver.get()
                 );
                 CheckpointManager.saveSmartState(memoryToSave, saveProfile);
             }
@@ -626,7 +648,8 @@ public class EternitySolver implements Runnable {
                                 recordTracker.highScore(),
                                 recordTracker.hashSnapshot(),
                                 this.topBoards.getRawRegistry(),
-                                cumulativeTrials
+                                cumulativeTrials,
+                                lowestConflictsEver.get()
                         );
                         CheckpointManager.saveSmartState(memoryToSave, saveProfile);
                     }
@@ -1281,22 +1304,47 @@ public class EternitySolver implements Runnable {
                 int totalConflicts = conflictReducer.countConflicts(bestBoard);
 
                 logger.info(">>> [FULL BOARD SCAN] Best result: %d / 480 edge conflicts after %,d iterations", totalConflicts, iterations);
-                if (totalConflicts < 25) {
+                if (totalConflicts < 17 ) {
                     logger.warn(">>> [!!!] WOW! You are mathematically incredibly close to a full solution!");
                 }
-                if ((baseScore >= recordTracker.highScore() - 1) || (totalConflicts < conflictSaveThreshold.get() && baseScore > variantSaveThreshold.get())) {
+                // Worth investing in HoleSolver retries if the existing save-threshold
+                // condition holds, OR this is already (before HoleSolver) at least a
+                // candidate for a new all-time-low conflict record. Peek only (.get())
+                // here — the actual atomic claim happens below once HoleSolver's
+                // possibly-better result is known, since HoleSolver itself can turn a
+                // near-miss into a genuine record.
+                boolean worthPolishing = (baseScore >= recordTracker.highScore() - 1)
+                        || (totalConflicts < conflictSaveThreshold.get() && baseScore > variantSaveThreshold.get())
+                        || totalConflicts < lowestConflictsEver.get();
+                if (worthPolishing) {
                     // Board already cleared the save bar — worth the exact per-region
                     // search's extra cost now (rare event, off the hot GPU-batch path)
                     // to see if HoleSolver can beat the MCV/polish result before we save it.
-                    int[] holeSolved = HoleSolver.solveConflicts(bestBoard, inventory, false).bestBoard();
-                    int holeSolvedConflicts = conflictReducer.countConflicts(holeSolved);
+                    // Several attempts, keep the best — see HOLE_SOLVER_RETRY_ATTEMPTS.
+                    int[] holeSolved = bestBoard;
+                    int holeSolvedConflicts = totalConflicts;
+                    for (int attempt = 0; attempt < HOLE_SOLVER_RETRY_ATTEMPTS; attempt++) {
+                        int[] candidate = HoleSolver.solveConflicts(bestBoard, inventory, false).bestBoard();
+                        int candidateConflicts = conflictReducer.countConflicts(candidate);
+                        if (candidateConflicts < holeSolvedConflicts) {
+                            holeSolved = candidate;
+                            holeSolvedConflicts = candidateConflicts;
+                        }
+                    }
                     if (holeSolvedConflicts < totalConflicts) {
                         logger.info(">>> [HOLE SOLVER] Improved %d -> %d conflicts before saving.",
                                 totalConflicts, holeSolvedConflicts);
                         bestBoard = holeSolved;
                         totalConflicts = holeSolvedConflicts;
                     }
-                    saveFullBoardVariant(bestBoard, totalConflicts);
+                    // New record in EITHER dimension — depth (matches or exceeds the
+                    // current all-time high) or conflicts (a genuine new all-time low,
+                    // atomically claimed so concurrent background-analysis threads can't
+                    // both think they set the same record) — gets the full-board save
+                    // AND a Google Drive upload, on top of the regular local-only save.
+                    boolean isNewConflictRecord = tryClaimConflictRecord(totalConflicts);
+                    boolean isNewDepthRecord = baseScore >= recordTracker.highScore();
+                    saveFullBoardVariant(bestBoard, totalConflicts, isNewConflictRecord || isNewDepthRecord);
                 } else {
                     logger.info(">>> [FULL BOARD SCAN] Not saved: %d conflicts >= threshold %d and base score %d <= variant threshold %d",
                             totalConflicts, conflictSaveThreshold.get(), baseScore, variantSaveThreshold.get());
@@ -1802,7 +1850,34 @@ public class EternitySolver implements Runnable {
         }
     }
 
-    private void saveFullBoardVariant(int[] simulatedBoard, int conflicts) {
+    /**
+     * Atomically claims a new all-time-low conflict record. Returns true only
+     * for the caller that actually improves on the best seen so far — under
+     * concurrent background-analysis threads, a thread whose result is beaten
+     * by another thread's concurrent claim correctly gets false back.
+     */
+    private boolean tryClaimConflictRecord(int conflicts) {
+        int current = lowestConflictsEver.get();
+        while (conflicts < current) {
+            if (lowestConflictsEver.compareAndSet(current, conflicts)) {
+                return true;
+            }
+            current = lowestConflictsEver.get();
+        }
+        return false;
+    }
+
+    /**
+     * @param isRecord Whether this save is being made because the board is a
+     *                 genuine new record (depth or conflicts), not just past
+     *                 the regular save threshold — when true, every file
+     *                 saved here is also uploaded to Google Drive under the
+     *                 same profile folder, mirroring how depth records
+     *                 already get uploaded via RecordManager.saveRecord, but
+     *                 for this method's more thorough MCV+HoleSolver-polished
+     *                 board rather than the quick greedy-extended one.
+     */
+    private void saveFullBoardVariant(int[] simulatedBoard, int conflicts, boolean isRecord) {
         String fullProfileFolder = saveProfile + "_FULL";
         java.io.File folder = new java.io.File(fullProfileFolder);
         if (!folder.exists()) {
@@ -1814,7 +1889,8 @@ public class EternitySolver implements Runnable {
         promoteToGlobalRecordIfHigher(simulatedBoard, displayScore);
         String baseFilename = "Errors" + conflicts + "_Base" + displayScore + "_" + timeId;
 
-        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, "Raw_Board_Output_" + displayScore + ".txt"))) {
+        java.io.File rawBoardFile = new java.io.File(folder, "Raw_Board_Output_" + displayScore + ".txt");
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(rawBoardFile)) {
             for (int row = 0; row < 16; row++) {
                 StringBuilder line = new StringBuilder();
                 for (int col = 0; col < 16; col++) {
@@ -1840,11 +1916,13 @@ public class EternitySolver implements Runnable {
                 writer.println(line);
             }
             logger.info(String.format(">>> [FULL BOARD SCAN] Saved raw board text for BoardImporter: Raw_Board_Output_%d.txt", displayScore));
+            if (isRecord) RecordManager.uploadToDrive(rawBoardFile, "text/plain", fullProfileFolder);
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving Raw Board Text: %s", e.getMessage()));
         }
 
-        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder, baseFilename + ".csv"))) {
+        java.io.File csvFile = new java.io.File(folder, baseFilename + ".csv");
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(csvFile)) {
             for (int row = 0; row < 16; row++) {
                 StringBuilder line = new StringBuilder();
                 for (int col = 0; col < 16; col++) {
@@ -1870,35 +1948,38 @@ public class EternitySolver implements Runnable {
                 writer.println(line);
             }
             logger.info(String.format(">>> Saved official verification file: %s.csv", baseFilename));
+            if (isRecord) RecordManager.uploadToDrive(csvFile, "text/csv", fullProfileFolder);
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving pieces.csv: %s", e.getMessage()));
         }
 
-        try (java.io.PrintWriter writer = new java.io.PrintWriter(new java.io.File(folder,
-                baseFilename + "_link.txt"))) {
+        java.io.File linkFile = new java.io.File(folder, baseFilename + "_link.txt");
+        try (java.io.PrintWriter writer = new java.io.PrintWriter(linkFile)) {
             long totalTrials = cumulativeTrials + globalCpuTrialCount.get() + globalGpuTrialCount.get();
             writer.println("Base Score: " + displayScore);
             writer.println("Edge Conflicts: " + conflicts);
             writer.println("Total Trials: " + String.format("%,d", totalTrials));
             writer.println(BucasExporter.exportBoard(simulatedBoard));
             logger.info(String.format(">>> Saved full board Bucas link: %s_link.txt", baseFilename));
+            if (isRecord) RecordManager.uploadToDrive(linkFile, "text/plain", fullProfileFolder);
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving Full Board Bucas Link: %s", e.getMessage()));
         }
 
+        java.io.File pngFile = new java.io.File(folder, baseFilename + ".png");
         try {
-            RecordManager.saveImage(buildDisplayBoard(simulatedBoard), new java.io.File(folder,
-                    baseFilename + ".png").getAbsolutePath());
+            RecordManager.saveImage(buildDisplayBoard(simulatedBoard), pngFile.getAbsolutePath());
             logger.info(String.format(">>> Saved full board PNG image: %s.png", baseFilename));
+            if (isRecord) RecordManager.uploadToDrive(pngFile, "image/png", fullProfileFolder);
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving PNG image: %s", e.getMessage()));
         }
 
+        java.io.File layoutFile = new java.io.File(folder, baseFilename + "_physical_layout.txt");
         try {
-            HoleSolver.writePhysicalLayoutFile(
-                    new java.io.File(folder, baseFilename + "_physical_layout.txt").getAbsolutePath(),
-                    inventory, simulatedBoard, null);
+            HoleSolver.writePhysicalLayoutFile(layoutFile.getAbsolutePath(), inventory, simulatedBoard, null);
             logger.info(String.format(">>> Saved physical piece layout: %s_physical_layout.txt", baseFilename));
+            if (isRecord) RecordManager.uploadToDrive(layoutFile, "text/plain", fullProfileFolder);
         } catch (Exception e) {
             logger.error(String.format(">>> Error saving physical layout: %s", e.getMessage()));
         }
@@ -2033,22 +2114,22 @@ public class EternitySolver implements Runnable {
     /**
      * Joshua Blackwood's actual board-fill order, transcribed from his public
      * solver (Get_Board_Order in Util.cs, github.com/jblackwood345/EternityII_Solver)
-     * -- the order that produced the standing 470-piece record. Rows 5-15 (11
-     * rows) fill in plain row-major order first; rows 0-4 (the last 5 to be
+     * -- the order that produced the standing 470-piece record. Rows 0-10 (11
+     * rows) fill in plain row-major order first; rows 11-15 (the last 5 to be
      * filled) switch to a column-major sweep, interleaving those 5 rows one
      * column at a time. This is the same piece set (src/main/resources/
      * JBlackwood_Pieces.txt matches his Get_Pieces() verbatim), so his exact
      * sequence numbers apply with no re-derivation.
      *
-     * Blackwood's own matrix is written with row 0 = the LAST row filled and
-     * row 15 = the FIRST, in his own top-to-bottom coordinate convention.
-     * Cross-checked against this project's fixed center-lock position (135 =
-     * row 8, col 7): his own "start piece" (physical piece 139, the official
-     * competition starter) sits at his own (row 7, col 7), which the matrix
-     * places at sequence 119 -- transcribing the matrix directly (using its
-     * own row index as OUR row, no additional flip) also puts our position
-     * 135 at sequence 119, confirming the transcription lines up correctly
-     * with no coordinate mismatch.
+     * Vertically flipped from his own matrix (his row 0 = OUR row 15 and vice
+     * versa) so the fill direction matches this project's existing
+     * TYPEWRITER/SPIRAL convention (row 0 first) instead of his own (row 0
+     * last) -- purely a row relabelling, which changes nothing about which
+     * candidates are found or how the search behaves: border-colour
+     * discipline treats row 0 and row 15 symmetrically already, and the
+     * fixed center-lock position (135) is skipped by the kernel outright
+     * whenever lockCenterFlag is set, so which sequence number it would have
+     * landed on never affects search behaviour either way.
      */
     private void generateBlackwoodOrder() {
         int[][] seq = {
@@ -2071,7 +2152,7 @@ public class EternitySolver implements Runnable {
         };
         for (int row = 0; row < 16; row++) {
             for (int col = 0; col < 16; col++) {
-                buildOrder[seq[row][col]] = row * 16 + col;
+                buildOrder[seq[row][col]] = (15 - row) * 16 + col;
             }
         }
     }
