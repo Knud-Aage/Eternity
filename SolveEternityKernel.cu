@@ -225,6 +225,31 @@ __device__ void buildSharedIndex(
 }
 
 // ---------------------------------------------------------------------------
+// buildWestIndex — solvePBP-only sibling of buildSharedIndex's sm_byNorth,
+// indexed by WEST colour instead of north. Exists only to give the
+// break-fallback tier a bounded, indexed way to find "west matches exactly,
+// north is the one allowed break" candidates -- see its call site for the
+// full correctness argument. Kept as a separate function/pass (not folded
+// into buildSharedIndex) so solveRepairMode, which has no break-fallback
+// tier and never calls this, pays zero extra shared-memory cost for it.
+// ---------------------------------------------------------------------------
+__device__ void buildWestIndex(short* sm_byWest, short* sm_byWestCount)
+{
+    for (int c = 0; c < NUM_COLORS; c++) sm_byWestCount[c] = 0;
+
+    for (int rank = 0; rank < 1024; rank++) {
+        int i  = c_heuristicSortedOrder[rank];
+        int p  = c_allOrientations[i];
+        int wc = getWest(p);
+        if (wc < NUM_COLORS) {
+            int cnt = sm_byWestCount[wc];
+            if (cnt < MAX_PER_COLOR) sm_byWest[wc * MAX_PER_COLOR + cnt] = (short)i;
+            sm_byWestCount[wc] = cnt + 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // south+east lookahead — inlined via a helper to avoid repetition.
 // Returns false if either neighbour has no candidate (prune).
 // ---------------------------------------------------------------------------
@@ -296,9 +321,13 @@ extern "C" __global__ void solvePBP(
     __shared__ short sm_byNorthCount[NUM_COLORS];
     __shared__ short sm_byNW        [NUM_COLORS * NUM_COLORS * NW_MAX];
     __shared__ short sm_byNWCount   [NUM_COLORS * NUM_COLORS];
+    __shared__ short sm_byWest      [NUM_COLORS * MAX_PER_COLOR];
+    __shared__ short sm_byWestCount [NUM_COLORS];
 
-    if (threadIdx.x == 0)
+    if (threadIdx.x == 0) {
         buildSharedIndex(sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount);
+        buildWestIndex(sm_byWest, sm_byWestCount);
+    }
     __syncthreads();
 
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -492,35 +521,94 @@ extern "C" __global__ void solvePBP(
         // catches every kind==2 candidate on its own, but tier 3 only runs
         // when north isn't yet known at all). Bounded to the same
         // FIRST_BREAK_INDEX/budget gate as above, so this only ever executes
-        // in the narrow, sparse range where breaks are permitted at all. ---
+        // in the narrow, sparse range where breaks are permitted at all.
+        //
+        // When tier 1 ran (both north/west known -- the common case deep in
+        // the endgame, exactly where this tier matters most), this used to
+        // be an unindexed O(1024) scan. It's now two bounded, indexed scans:
+        // matchKind() allows exactly one mismatch total, so a break-eligible
+        // candidate here has EITHER west exact (its one mismatch is on
+        // north -- findable in sm_byWest[w_req], an index no other tier
+        // touches) OR north exact (mismatch on west -- findable in
+        // sm_byNorth[n_req]). A candidate exact on BOTH is tier 1's own
+        // territory (sm_byNW) and was already tried there; skipped here
+        // (the getWest/getNorth checks below) to avoid a redundant
+        // re-attempt. A candidate wrong on both is >1 mismatch, i.e. not
+        // break-eligible at all -- so these two scans are provably complete
+        // for the tier-1 case. Tier 2/3 still fall through to the full
+        // unindexed scan below (west isn't indexed when unconstrained, and
+        // this path is rare enough not to be worth a second structure). ---
         if (!foundPiece && breakEligible) {
-            int fbStartLi = breakFallbackStack[step];
-            for (int li = fbStartLi; li < 1024; li++) {
-                int physId = c_physicalMapping[li];
-                if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
-                int p = c_allOrientations[li];
-                // kind==1 candidates were already tried by tiers 1/2/3 above --
-                // only a genuine break is new information here.
-                if (matchKind(p, n_req, e_req, s_req, w_req, row, col) != 2) continue;
-                if (lookaheadEnabledFlag == 1 && !lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
-                               sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
-                board[boardIdx] = p;
-                inventoryMask[physId/64] &= ~(1ULL << (physId%64));
-                placedOrientIdx[step] = li;
-                breakFallbackStack[step] = li + 1;
-                breaksUsed++;
-                bitSet(breakUsedAtStep, step);
-                heuristicSum += c_heuristicSideCount[physId];
-                foundPiece = true;
-                piecesNow++;
-                step++;
-                if (piecesNow > bestPiecesPlaced) {
-                    bestPiecesPlaced = piecesNow;
-                    for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+            bool tier1Ran = (n_req != WILDCARD && w_req != WILDCARD && n_req < NUM_COLORS && w_req < NUM_COLORS);
+            int scanFrom = breakFallbackStack[step];
+
+            if (tier1Ran) {
+                int northCount = sm_byNorthCount[n_req];
+                int westCount  = sm_byWestCount[w_req];
+                int totalLen   = northCount + westCount;
+
+                for (int li = scanFrom; li < totalLen; li++) {
+                    int idx, physId;
+                    if (li < northCount) {
+                        idx    = sm_byNorth[n_req * MAX_PER_COLOR + li];
+                        physId = c_physicalMapping[idx];
+                        if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                        if (getWest(c_allOrientations[idx]) == w_req) continue; // tier 1's own territory
+                    } else {
+                        idx    = sm_byWest[w_req * MAX_PER_COLOR + (li - northCount)];
+                        physId = c_physicalMapping[idx];
+                        if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                        if (getNorth(c_allOrientations[idx]) == n_req) continue; // tier 1's own territory
+                    }
+                    int p = c_allOrientations[idx];
+                    if (matchKind(p, n_req, e_req, s_req, w_req, row, col) != 2) continue;
+                    if (lookaheadEnabledFlag == 1 && !lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                                   sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                    board[boardIdx] = p;
+                    inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                    placedOrientIdx[step] = idx;
+                    breakFallbackStack[step] = li + 1;
+                    breaksUsed++;
+                    bitSet(breakUsedAtStep, step);
+                    heuristicSum += c_heuristicSideCount[physId];
+                    foundPiece = true;
+                    piecesNow++;
+                    step++;
+                    if (piecesNow > bestPiecesPlaced) {
+                        bestPiecesPlaced = piecesNow;
+                        for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+                    }
+                    break;
                 }
-                break;
+                if (!foundPiece) breakFallbackStack[step] = 0;
+            } else {
+                for (int li = scanFrom; li < 1024; li++) {
+                    int physId = c_physicalMapping[li];
+                    if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
+                    int p = c_allOrientations[li];
+                    // kind==1 candidates were already tried by tiers 1/2/3 above --
+                    // only a genuine break is new information here.
+                    if (matchKind(p, n_req, e_req, s_req, w_req, row, col) != 2) continue;
+                    if (lookaheadEnabledFlag == 1 && !lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                                   sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
+                    board[boardIdx] = p;
+                    inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                    placedOrientIdx[step] = li;
+                    breakFallbackStack[step] = li + 1;
+                    breaksUsed++;
+                    bitSet(breakUsedAtStep, step);
+                    heuristicSum += c_heuristicSideCount[physId];
+                    foundPiece = true;
+                    piecesNow++;
+                    step++;
+                    if (piecesNow > bestPiecesPlaced) {
+                        bestPiecesPlaced = piecesNow;
+                        for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+                    }
+                    break;
+                }
+                if (!foundPiece) breakFallbackStack[step] = 0;
             }
-            if (!foundPiece) breakFallbackStack[step] = 0;
         }
 
         if (!foundPiece) {
