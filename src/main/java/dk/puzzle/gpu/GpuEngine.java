@@ -46,6 +46,18 @@ public class GpuEngine {
     // else constant. Ported from an unmerged exploration that toggled a
     // cruder, non-colour-excluded break mechanism; this gates the real one.
     private volatile boolean breakToleranceEnabled = true;
+    // Gates the kernel's south+east hasCandidate() forward-check before every
+    // placement (see solvePBP's lookaheadEnabledFlag param). DEFAULT FALSE
+    // (2026-08-01): live A/B evidence beat the theory -- two isolated runs
+    // seeded from the identical 235-piece board, equal GPU time, only this
+    // flag differing. Lookahead-off found two new all-time records (238 then
+    // 240) in under 50 minutes; lookahead-on found nothing. Matches
+    // Blackwood's own 470-record solver (github.com/jblackwood345/
+    // EternityII_Solver, Program.cs SolvePuzzle()), which has no
+    // forward-checking at all -- pure backtrack, place and see. Kept
+    // toggleable (not removed) so this can be flipped back on for further
+    // comparison without a recompile.
+    private volatile boolean lookaheadEnabled = false;
 
     // Persistent device buffers — allocated once, reused every launch
     private CUdeviceptr d_partialBoards;
@@ -242,6 +254,13 @@ public class GpuEngine {
         this.breakToleranceEnabled = enabled;
     }
 
+    /** GUI/config hook: enable or disable the south+east forward-check before
+     *  every placement, for A/B comparison. Takes effect on the next
+     *  runDeepDfs call. Default true -- matches every prior live run. */
+    public void setLookaheadEnabled(boolean enabled) {
+        this.lookaheadEnabled = enabled;
+    }
+
     // ==========================================================
     // PHASE 2: DEEP DFS
     // ==========================================================
@@ -272,7 +291,8 @@ public class GpuEngine {
                 Pointer.to(new int[]{lockCenter ? 1 : 0}),
                 Pointer.to(d_threadDepths),
                 Pointer.to(new int[]{breakToleranceEnabled ? 1 : 0}),
-                Pointer.to(new long[]{stepBudget})
+                Pointer.to(new long[]{stepBudget}),
+                Pointer.to(new int[]{lookaheadEnabled ? 1 : 0})
         );
 
         int blockSize = 256;

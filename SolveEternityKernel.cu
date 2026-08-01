@@ -279,7 +279,17 @@ extern "C" __global__ void solvePBP(
                              // current always-on behaviour (default, matches
                              // every prior live run), 0 = strict-only, for
                              // A/B comparison. See GpuEngine.setBreakToleranceEnabled().
-    unsigned long long stepBudget
+    unsigned long long stepBudget,
+    int lookaheadEnabledFlag // A/B toggle for the south+east hasCandidate()
+                              // pre-check below every placement. Blackwood's
+                              // own 470-record solver (github.com/jblackwood345/
+                              // EternityII_Solver, Program.cs SolvePuzzle()) has
+                              // no forward-checking at all -- pure backtrack,
+                              // place and see -- so this tests whether the
+                              // pruning here is worth its cost or just overhead.
+                              // 1 = current always-on behaviour (default), 0 =
+                              // skip the check entirely. See
+                              // GpuEngine.setLookaheadEnabled().
 )
 {
     __shared__ short sm_byNorth     [NUM_COLORS * MAX_PER_COLOR];
@@ -394,7 +404,7 @@ extern "C" __global__ void solvePBP(
                 int kind = classifyCandidate(p, physId, n_req, e_req, s_req, w_req, row, col,
                                               breakEligible, heuristicGateActive, heuristicFloor, heuristicSum);
                 if (kind == 0) continue;
-                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                if (lookaheadEnabledFlag == 1 && !lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
@@ -424,7 +434,7 @@ extern "C" __global__ void solvePBP(
                 int kind = classifyCandidate(p, physId, n_req, e_req, s_req, w_req, row, col,
                                               breakEligible, heuristicGateActive, heuristicFloor, heuristicSum);
                 if (kind == 0) continue;
-                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                if (lookaheadEnabledFlag == 1 && !lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
@@ -456,7 +466,7 @@ extern "C" __global__ void solvePBP(
                 int kind = classifyCandidate(p, physId, n_req, e_req, s_req, w_req, row, col,
                                               breakEligible, heuristicGateActive, heuristicFloor, heuristicSum);
                 if (kind == 0) continue;
-                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                if (lookaheadEnabledFlag == 1 && !lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
@@ -492,7 +502,7 @@ extern "C" __global__ void solvePBP(
                 // kind==1 candidates were already tried by tiers 1/2/3 above --
                 // only a genuine break is new information here.
                 if (matchKind(p, n_req, e_req, s_req, w_req, row, col) != 2) continue;
-                if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
+                if (lookaheadEnabledFlag == 1 && !lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));

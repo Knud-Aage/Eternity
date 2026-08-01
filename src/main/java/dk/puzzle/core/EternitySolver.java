@@ -2087,6 +2087,19 @@ public class EternitySolver implements Runnable {
         }
     }
 
+    /**
+     * Enable/disable the GPU kernel's south+east forward-check before every
+     * placement (see lookahead() in SolveEternityKernel.cu) for A/B
+     * comparison. Default true, matching every prior live run. Only takes
+     * effect once the GPU engine has been initialised.
+     */
+    public void setLookaheadEnabled(boolean enabled) {
+        if (gpuEngine != null) {
+            gpuEngine.setLookaheadEnabled(enabled);
+            logger.info(">>> [CONFIG] Lookahead set to: " + enabled);
+        }
+    }
+
     private void applyStaticLocks(int[] board) {
         if (this.lockCenter) {
             board[135] = targetPiece;

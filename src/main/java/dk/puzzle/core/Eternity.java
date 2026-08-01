@@ -264,6 +264,26 @@ public class Eternity {
                 controlPanel.add(breakToleranceCheckbox);
                 // ------------------------------------------------
 
+                // --- LOOKAHEAD TOGGLE ---
+                // DEFAULT OFF (2026-08-01): live A/B evidence (two isolated
+                // runs from the identical 235-piece board, equal GPU time)
+                // showed lookahead-off found two new records (238, then 240)
+                // in under 50 minutes while lookahead-on found nothing.
+                // Matches Blackwood's own solver, which has no
+                // forward-checking at all. Kept toggleable for further
+                // comparison, not because the default is still in doubt.
+                JCheckBox lookaheadCheckbox = new JCheckBox("Lookahead (A/B)", false);
+                lookaheadCheckbox.setFont(labelFont);
+                lookaheadCheckbox.setForeground(textColor);
+                lookaheadCheckbox.setBackground(new Color(40, 42, 45));
+                lookaheadCheckbox.setAlignmentX(Component.CENTER_ALIGNMENT);
+                lookaheadCheckbox.addActionListener(e ->
+                        pbpSolver.setLookaheadEnabled(lookaheadCheckbox.isSelected()));
+
+                controlPanel.add(Box.createVerticalStrut(20));
+                controlPanel.add(lookaheadCheckbox);
+                // ------------------------------------------------
+
                 frame.add(controlPanel, BorderLayout.EAST);
             }
 
