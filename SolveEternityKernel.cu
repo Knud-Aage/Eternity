@@ -121,6 +121,39 @@ __device__ inline int matchKind(int p, int n_req, int e_req, int s_req, int w_re
 }
 
 // ---------------------------------------------------------------------------
+// classifyCandidate: the tier 1/2/3 accept decision, driven by breakEligible/
+// heuristicGateActive/heuristicFloor -- all loop-invariant for the whole
+// candidate scan at a given step (step and breaksUsed don't change while
+// scanning), so solvePBP computes them ONCE per step instead of re-deriving
+// them from step/breaksUsed on every single candidate as before. When
+// neither gate can apply (steps 161-200, the gap between HEURISTIC_MAX_INDEX
+// and FIRST_BREAK_INDEX -- exactly where a resumed 190-235-depth search
+// spends most of its backtracking), this collapses to a plain matches()
+// check with none of matchKind()'s mismatch-counting overhead, matching
+// pre-Blackwood cost for that range exactly. Also skips matchKind() outside
+// [FIRST_BREAK_INDEX, 256) entirely, since a kind==2 candidate can never be
+// accepted there regardless of breaksUsed (proved by breakEligible's own
+// step>=FIRST_BREAK_INDEX term) -- today's kernel called it unconditionally
+// and threw the mismatch-counting work away.
+// Returns 0 = reject, 1 = exact match, 2 = break-eligible match.
+// ---------------------------------------------------------------------------
+__device__ inline int classifyCandidate(
+    int p, int physId, int n_req, int e_req, int s_req, int w_req, int row, int col,
+    bool breakEligible, bool heuristicGateActive, int heuristicFloor, int heuristicSum)
+{
+    int kind;
+    if (breakEligible) {
+        kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
+        if (kind == 0) return 0;
+    } else {
+        if (!matches(p, n_req, e_req, s_req, w_req, row, col)) return 0;
+        kind = 1;
+    }
+    if (heuristicGateActive && heuristicSum + c_heuristicSideCount[physId] < heuristicFloor) return 0;
+    return kind;
+}
+
+// ---------------------------------------------------------------------------
 // hasCandidate: uses NW index when both constraints known, byNorth otherwise.
 // ---------------------------------------------------------------------------
 __device__ bool hasCandidate(
@@ -341,6 +374,11 @@ extern "C" __global__ void solvePBP(
         int w_req = (col == 0)  ? 0 : (board[boardIdx-1]  != -1 ? getEast (board[boardIdx-1])  : WILDCARD);
         int e_req = (col == 15) ? 0 : (board[boardIdx+1]  != -1 ? getWest (board[boardIdx+1])  : WILDCARD);
 
+        // Computed once per step, not per candidate -- see classifyCandidate.
+        bool breakEligible       = (breakToleranceFlag == 1) && (step >= FIRST_BREAK_INDEX) && (breaksUsed < c_slipBudget[step]);
+        bool heuristicGateActive = (step <= HEURISTIC_MAX_INDEX);
+        int  heuristicFloor      = heuristicGateActive ? c_heuristicRequired[step] : 0;
+
         bool foundPiece = false;
         int  startLi    = pieceStack[step];
 
@@ -353,10 +391,9 @@ extern "C" __global__ void solvePBP(
                 int physId = c_physicalMapping[idx];
                 if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
                 int p = c_allOrientations[idx];
-                int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
+                int kind = classifyCandidate(p, physId, n_req, e_req, s_req, w_req, row, col,
+                                              breakEligible, heuristicGateActive, heuristicFloor, heuristicSum);
                 if (kind == 0) continue;
-                if (kind == 2 && !(breakToleranceFlag == 1 && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
-                if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
@@ -384,10 +421,9 @@ extern "C" __global__ void solvePBP(
                 int physId = c_physicalMapping[idx];
                 if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
                 int p = c_allOrientations[idx];
-                int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
+                int kind = classifyCandidate(p, physId, n_req, e_req, s_req, w_req, row, col,
+                                              breakEligible, heuristicGateActive, heuristicFloor, heuristicSum);
                 if (kind == 0) continue;
-                if (kind == 2 && !(breakToleranceFlag == 1 && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
-                if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
@@ -417,10 +453,9 @@ extern "C" __global__ void solvePBP(
                 int physId = c_physicalMapping[idx];
                 if (!(inventoryMask[physId/64] & (1ULL << (physId%64)))) continue;
                 int p = c_allOrientations[idx];
-                int kind = matchKind(p, n_req, e_req, s_req, w_req, row, col);
+                int kind = classifyCandidate(p, physId, n_req, e_req, s_req, w_req, row, col,
+                                              breakEligible, heuristicGateActive, heuristicFloor, heuristicSum);
                 if (kind == 0) continue;
-                if (kind == 2 && !(breakToleranceFlag == 1 && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step])) continue;
-                if (step <= HEURISTIC_MAX_INDEX && heuristicSum + c_heuristicSideCount[physId] < c_heuristicRequired[step]) continue;
                 if (!lookahead(p, physId, row, col, boardIdx, board, inventoryMask,
                                sm_byNorth, sm_byNorthCount, sm_byNW, sm_byNWCount)) continue;
                 board[boardIdx] = p;
@@ -448,7 +483,7 @@ extern "C" __global__ void solvePBP(
         // when north isn't yet known at all). Bounded to the same
         // FIRST_BREAK_INDEX/budget gate as above, so this only ever executes
         // in the narrow, sparse range where breaks are permitted at all. ---
-        if (!foundPiece && breakToleranceFlag == 1 && step >= FIRST_BREAK_INDEX && breaksUsed < c_slipBudget[step]) {
+        if (!foundPiece && breakEligible) {
             int fbStartLi = breakFallbackStack[step];
             for (int li = fbStartLi; li < 1024; li++) {
                 int physId = c_physicalMapping[li];
