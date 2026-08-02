@@ -41,22 +41,28 @@ public class BlackwoodSolver {
     // fully returns (ExecutorService.submit()'s happens-before guarantee) -- no
     // volatile/synchronized needed, matching how EternitySolver.CpuSearchWorker
     // already relies on the same pattern in this codebase.
-    private BwRotatedPiece[][] corners;
-    private BwRotatedPiece[][] leftSides;
-    private BwRotatedPiece[][] topSides;
-    private BwRotatedPiece[][] rightSidesWithBreaks;
-    private BwRotatedPiece[][] rightSidesWithoutBreaks;
-    private BwRotatedPiece[][] middlesWithBreak;
-    private BwRotatedPiece[][] middlesNoBreak;
-    private BwRotatedPiece[][] southStart;
-    private BwRotatedPiece[][] westStart;
-    private BwRotatedPiece[][] start;
-    private Map<Integer, List<BwUtil.RotatedCandidate>> bottomSidePiecesRotated; // raw, re-sorted every attempt
-    private BwRotatedPiece[][][] masterPieceLookup;
-    private int[] boardOrderRow;
-    private int[] boardOrderCol;
-    private int[] breakArray;
-    private int[] heuristicArray;
+    //
+    // Package-private (not private): dk.puzzle.blackwood.BwGpuTables (2026-08-02)
+    // reuses these directly to flatten into GPU CSR form rather than re-deriving
+    // table construction a second time -- the single biggest fidelity-risk
+    // reducer for the GPU port, since the kernel then sees exactly the same
+    // tables this already-verified CPU port trusts.
+    BwRotatedPiece[][] corners;
+    BwRotatedPiece[][] leftSides;
+    BwRotatedPiece[][] topSides;
+    BwRotatedPiece[][] rightSidesWithBreaks;
+    BwRotatedPiece[][] rightSidesWithoutBreaks;
+    BwRotatedPiece[][] middlesWithBreak;
+    BwRotatedPiece[][] middlesNoBreak;
+    BwRotatedPiece[][] southStart;
+    BwRotatedPiece[][] westStart;
+    BwRotatedPiece[][] start;
+    Map<Integer, List<BwUtil.RotatedCandidate>> bottomSidePiecesRotated; // raw, re-sorted every attempt
+    BwRotatedPiece[][][] masterPieceLookup;
+    int[] boardOrderRow;
+    int[] boardOrderCol;
+    int[] breakArray;
+    int[] heuristicArray;
 
     // Verification instrumentation -- see plan's "solve_index==0 edge case" note.
     private final AtomicLong exhaustedAtSeedCount = new AtomicLong();
