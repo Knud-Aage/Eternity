@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-set /p CPFILE=<cp.txt
+for /f "usebackq delims=" %%A in ("cp.txt") do set CPFILE=%%A
 set LINKFILE=
 set TRIALS=
 set BASELABEL=
