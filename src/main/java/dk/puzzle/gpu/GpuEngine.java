@@ -107,27 +107,26 @@ public class GpuEngine {
         // tested in isolation: Peak P2 Depth held at 214-221 (baseline range),
         // so the sort itself is safe on its own.
         uploadConstant("c_heuristicSortedOrder", blackwoodHeuristicSortedOrder(inventory), 1024L * Sizeof.INT);
-        // RE-ENABLED (2026-08-02): the earlier "collapse" A/B test (below,
-        // preserved for context) predates two confirmed bugs, both fixed just
-        // now: (1) BLACKWOOD_SIDE_COLORS/BLACKWOOD_HEURISTIC_COLORS were
-        // Blackwood's raw colour IDs applied directly against this project's
-        // differently-numbered PieceInventory, unmapped -- wrong colours were
-        // being excluded from breaks and wrong colours were being weighted as
-        // heuristic-heavy; (2) blackwoodHeuristicRequired()'s last branch used
-        // uniform float precision instead of the float/double split his own
-        // C# source actually has. Both bugs mean the earlier test's "genuinely
-        // infeasible" conclusion was drawn against the wrong numbers, not his
-        // real schedule -- worth re-measuring live now that both are fixed
-        // (see original note below for what was observed before this fix).
-        //
-        // ORIGINAL NOTE (2026-07-26, re-confirmed 2026-07-31, now superseded):
-        // "the original theory was that c_heuristicRequired only needed sorted
-        // candidates to work (see blackwoodHeuristicSortedOrder above). That's
-        // now falsified by direct live evidence -- re-enabling both together
-        // reproduces the exact same Peak-P2-Depth collapse as the original
-        // attempt (~25-26 vs. the 211-235 baseline), while the sort alone
-        // (this array left all-zero) is fine."
-        uploadConstant("c_heuristicRequired", blackwoodHeuristicRequired(), 256L * Sizeof.INT);
+        // STILL DISABLED (2026-08-02, re-confirmed after fixing two real bugs):
+        // briefly re-enabled today after fixing (1) BLACKWOOD_SIDE_COLORS/
+        // BLACKWOOD_HEURISTIC_COLORS being Blackwood's raw colour IDs applied
+        // unmapped against this project's differently-numbered PieceInventory,
+        // and (2) blackwoodHeuristicRequired()'s last branch using uniform
+        // float precision instead of his actual float/double split. Live-
+        // tested with both fixes in place: Peak depth still didn't clear
+        // ~100 -- much better than the original collapse (~25-26) with the
+        // color bug still present, but still far below the 211-235 baseline.
+        // So the color bug wasn't the whole story: even with the right
+        // colours, Blackwood's exact cumulative-minimum schedule is calibrated
+        // against HIS OWN candidate pool (9 pre-sorted, pre-filtered,
+        // per-cell-role tables), not this kernel's generic uniform tiered
+        // index (see buildSharedIndex/sm_byNorth/sm_byNW) -- the two don't
+        // necessarily have the same heuristic-colour candidate availability at
+        // a given step, so his numbers may simply not transfer here without
+        // being re-derived against what this kernel can actually reach.
+        // c_heuristicSortedOrder (the PREFERENCE, not a hard requirement)
+        // stays enabled -- only the hard cumulative-minimum gate is off again.
+        uploadConstant("c_heuristicRequired", new int[256], 256L * Sizeof.INT);
 
         allocatePersistentBuffers();
     }
