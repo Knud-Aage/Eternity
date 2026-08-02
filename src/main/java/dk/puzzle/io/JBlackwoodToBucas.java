@@ -35,7 +35,7 @@ public class JBlackwoodToBucas {
      * Parses the C# Piece objects directly into a 2D Java int array.
      * Looks for: PieceNumber = X, TopSide = N, RightSide = E, BottomSide = S, LeftSide = W
      */
-    private static int[][] loadHisPieces(String filepath) throws IOException {
+    public static int[][] loadHisPieces(String filepath) throws IOException {
         int[][] pieces = new int[256][4];
         List<String> lines = Files.readAllLines(Paths.get(filepath));
 

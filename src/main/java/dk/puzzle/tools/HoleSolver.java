@@ -10,6 +10,8 @@ import dk.puzzle.util.PieceUtils;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayDeque;
@@ -87,6 +89,11 @@ public class HoleSolver {
     public static void main(String[] args) {
         if (args.length < 1) {
             System.out.println("Usage: HoleSolver <bucas link or raw board_edges string> [trials] [baseLabel]");
+            System.out.println("   or: HoleSolver @<path to a text file containing the link> [trials] [baseLabel]");
+            System.out.println("  The @file form reads the link from a file instead of argv[0] -- use it when");
+            System.out.println("  invoking from cmd.exe/a .cmd script, where a raw link's '&' characters get");
+            System.out.println("  misparsed as command separators no matter how it's quoted, and cmd.exe's");
+            System.out.println("  own `set /p` has an internal read-length limit well under this link's length.");
             System.out.println("  baseLabel: optional, e.g. the source board's piece count (\"214\") -- woven");
             System.out.println("  into the saved filenames as \"Base214\" alongside the conflict count. HoleSolver");
             System.out.println("  only ever sees a bucas link, so it can't derive this on its own.");
@@ -96,7 +103,15 @@ public class HoleSolver {
             return;
         }
 
-        String boardEdges = extractBoardEdges(args[0]);
+        String rawInput;
+        try {
+            rawInput = resolveLinkInput(args[0]);
+        } catch (IOException e) {
+            System.out.println("Couldn't read link file '" + args[0].substring(1) + "': " + e.getMessage());
+            return;
+        }
+
+        String boardEdges = extractBoardEdges(rawInput);
         if (boardEdges.length() != 1024) {
             System.out.println("Expected a 1024-character board_edges value, got " + boardEdges.length() + " chars.");
             return;
@@ -113,7 +128,7 @@ public class HoleSolver {
         String baseLabel = args.length >= 3 ? args[2] : null;
 
         PieceInventory inventory = new PieceInventory(Eternity.loadPieces());
-        int[] board = decodeBoardAuto(args[0], inventory, true);
+        int[] board = decodeBoardAuto(rawInput, inventory, true);
 
         ConflictSolveResult result = solveConflicts(board, inventory, true, trials);
 
@@ -432,6 +447,20 @@ public class HoleSolver {
     // ------------------------------------------------------------------
     // Decoding / encoding
     // ------------------------------------------------------------------
+
+    /**
+     * If {@code arg} starts with '@', treats the rest as a file path and returns that file's
+     * (trimmed) contents instead -- otherwise returns {@code arg} unchanged. Use the @file form
+     * when invoking from cmd.exe/a .cmd script: a raw bucas link's '&' characters get misparsed
+     * as command separators regardless of quoting, and cmd.exe's own `set /p` has an internal
+     * read-length limit well under a 1024-character board_edges value's length.
+     */
+    static String resolveLinkInput(String arg) throws IOException {
+        if (!arg.startsWith("@")) {
+            return arg;
+        }
+        return Files.readString(Path.of(arg.substring(1))).trim();
+    }
 
     public static String extractBoardEdges(String input) {
         int idx = input.indexOf("board_edges=");

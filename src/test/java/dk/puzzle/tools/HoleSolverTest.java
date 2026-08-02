@@ -506,4 +506,26 @@ class HoleSolverTest {
             assertTrue(p != -1 && p != -2, "Every cell must be filled after an exact region solve");
         }
     }
+
+    @Test
+    void testResolveLinkInputPassesThroughPlainArgUnchanged() throws Exception {
+        assertEquals("https://e2.bucas.name/#board_edges=abcd", HoleSolver.resolveLinkInput("https://e2.bucas.name/#board_edges=abcd"));
+    }
+
+    @Test
+    void testResolveLinkInputReadsAtFile(@org.junit.jupiter.api.io.TempDir java.nio.file.Path tempDir) throws Exception {
+        java.nio.file.Path linkFile = tempDir.resolve("link.txt");
+        // Trailing newline (as a real text editor/echo would leave) must be trimmed, and the '&'
+        // characters -- the whole reason this @file form exists -- must survive untouched.
+        java.nio.file.Files.writeString(linkFile, "https://e2.bucas.name/#puzzle=Joshua_Blackwood&board_edges=abcd&motifs_order=jblackwood\n");
+
+        String resolved = HoleSolver.resolveLinkInput("@" + linkFile);
+
+        assertEquals("https://e2.bucas.name/#puzzle=Joshua_Blackwood&board_edges=abcd&motifs_order=jblackwood", resolved);
+    }
+
+    @Test
+    void testResolveLinkInputThrowsOnMissingFile() {
+        assertThrows(java.io.IOException.class, () -> HoleSolver.resolveLinkInput("@does/not/exist.txt"));
+    }
 }
