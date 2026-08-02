@@ -70,17 +70,10 @@ public class HoleSolver {
     // database (confirmed 2026-08-02: every one of 251 placed cells failed
     // findPhysicalId when decoded that way) -- which then lets the hole-fill
     // "solve" using pieces already used elsewhere on the board, an invalid
-    // Eternity II completion.
-    //
-    // Derived (not guessed) by DeriveBlackwoodColorMap.java: pieces.csv and
-    // JBlackwood_Pieces.txt list the same 256 physical pieces at the same
-    // index, so trying all 4 rotations of each Blackwood entry against the
-    // fixed TheSil entry and requiring a single globally-consistent colour
-    // bijection across all 256 pieces (zero contradictions) both confirms
-    // that assumption and yields this table.
-    private static final int[] BLACKWOOD_TO_THESIL = {
-            0, 1, 6, 22, 17, 3, 8, 10, 12, 4, 7, 9, 18, 5, 15, 11, 20, 2, 14, 16, 19, 13, 21
-    };
+    // Eternity II completion. See dk.puzzle.blackwood.BwUtil.BLACKWOOD_TO_THESIL
+    // (moved there 2026-08-02 as the single source of truth once GpuEngine
+    // needed the same mapping) for how this table was derived.
+    private static final int[] BLACKWOOD_TO_THESIL = dk.puzzle.blackwood.BwUtil.BLACKWOOD_TO_THESIL;
 
     // Generous but bounded, so a genuinely unsatisfiable hole shape fails fast
     // instead of hanging forever.

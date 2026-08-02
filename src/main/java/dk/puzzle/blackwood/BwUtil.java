@@ -27,6 +27,27 @@ public final class BwUtil {
     public static final int[] BREAK_INDEXES_ALLOWED = {201, 206, 211, 216, 221, 225, 229, 233, 237, 239};
     public static final int MAX_HEURISTIC_INDEX = 160;
 
+    /**
+     * Maps Blackwood's raw colour IDs (index) to this project's TheSil colour numbering (value) --
+     * NOT used anywhere in this port's own search (which deliberately stays entirely in Blackwood's
+     * own numbering, see class javadoc). Only for consumers outside the port that need to relate his
+     * colours to TheSil-numbered data: {@code HoleSolver} decoding his published bucas links, and
+     * {@code GpuEngine} translating his side-edge/heuristic colour constants before applying them
+     * against a TheSil-numbered {@code PieceInventory}.
+     *
+     * <p>Derived (not guessed): {@code pieces.csv} and {@code JBlackwood_Pieces.txt} list the same
+     * 256 physical pieces at the same index, so trying all 4 rotations of each Blackwood entry
+     * against the fixed TheSil entry and requiring a single globally-consistent colour bijection
+     * across all 256 pieces (zero contradictions) both confirms that assumption and yields this
+     * table. Originally derived and verified in {@code HoleSolver} (2026-08-02, confirmed there that
+     * decoding one of Blackwood's links with bucas-standard numbering instead scrambles every placed
+     * piece into colours matching no real piece in this project's database); moved here as the
+     * single source of truth once a second consumer ({@code GpuEngine}) needed it too.
+     */
+    public static final int[] BLACKWOOD_TO_THESIL = {
+            0, 1, 6, 22, 17, 3, 8, 10, 12, 4, 7, 9, 18, 5, 15, 11, 20, 2, 14, 16, 19, 13, 21
+    };
+
     private static final boolean[] SIDE_EDGE_LOOKUP = new boolean[23];
     static {
         for (int s : SIDE_EDGES) {

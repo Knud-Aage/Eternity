@@ -107,20 +107,27 @@ public class GpuEngine {
         // tested in isolation: Peak P2 Depth held at 214-221 (baseline range),
         // so the sort itself is safe on its own.
         uploadConstant("c_heuristicSortedOrder", blackwoodHeuristicSortedOrder(inventory), 1024L * Sizeof.INT);
-        // STILL DISABLED (2026-07-26, re-confirmed 2026-07-31): the original
-        // theory was that c_heuristicRequired only needed sorted candidates
-        // to work (see blackwoodHeuristicSortedOrder above). That's now
-        // falsified by direct live evidence -- re-enabling both together
+        // RE-ENABLED (2026-08-02): the earlier "collapse" A/B test (below,
+        // preserved for context) predates two confirmed bugs, both fixed just
+        // now: (1) BLACKWOOD_SIDE_COLORS/BLACKWOOD_HEURISTIC_COLORS were
+        // Blackwood's raw colour IDs applied directly against this project's
+        // differently-numbered PieceInventory, unmapped -- wrong colours were
+        // being excluded from breaks and wrong colours were being weighted as
+        // heuristic-heavy; (2) blackwoodHeuristicRequired()'s last branch used
+        // uniform float precision instead of the float/double split his own
+        // C# source actually has. Both bugs mean the earlier test's "genuinely
+        // infeasible" conclusion was drawn against the wrong numbers, not his
+        // real schedule -- worth re-measuring live now that both are fixed
+        // (see original note below for what was observed before this fix).
+        //
+        // ORIGINAL NOTE (2026-07-26, re-confirmed 2026-07-31, now superseded):
+        // "the original theory was that c_heuristicRequired only needed sorted
+        // candidates to work (see blackwoodHeuristicSortedOrder above). That's
+        // now falsified by direct live evidence -- re-enabling both together
         // reproduces the exact same Peak-P2-Depth collapse as the original
         // attempt (~25-26 vs. the 211-235 baseline), while the sort alone
-        // (this array left all-zero) is fine. So the requirement's cumulative
-        // minimums are genuinely infeasible against this kernel's actual
-        // per-step candidate pool -- not an ordering problem. Re-enabling
-        // this for real would need the schedule re-derived against what's
-        // actually reachable here (this project's build order, lookahead
-        // pruning, and lockCenter/hint constraints all differ from his),
-        // not just re-applying his numbers.
-        uploadConstant("c_heuristicRequired", new int[256], 256L * Sizeof.INT);
+        // (this array left all-zero) is fine."
+        uploadConstant("c_heuristicRequired", blackwoodHeuristicRequired(), 256L * Sizeof.INT);
 
         allocatePersistentBuffers();
     }
@@ -129,17 +136,41 @@ public class GpuEngine {
     // Joshua Blackwood's actual solver constants (github.com/jblackwood345/
     // EternityII_Solver, the source of the standing 470-piece record) -- this
     // project's piece set (src/main/resources/JBlackwood_Pieces.txt) matches
-    // his Get_Pieces() verbatim, so these apply with no re-derivation.
+    // his Get_Pieces() verbatim (the same 256 physical pieces, same order),
+    // so the SEQUENCE-POSITION constants (BLACKWOOD_BREAK_INDEXES) apply with
+    // no re-derivation. The COLOUR constants (BLACKWOOD_SIDE_COLORS,
+    // BLACKWOOD_HEURISTIC_COLORS) are a different story: his colour IDs are
+    // NOT the same numbering as this project's (TheSil) -- see
+    // translateToTheSil() and dk.puzzle.blackwood.BwUtil.BLACKWOOD_TO_THESIL.
     // -----------------------------------------------------------------------
 
-    /** His side_edges: a break is never allowed on an edge showing one of these 5 colours, by colour identity. */
-    private static final int[] BLACKWOOD_SIDE_COLORS = {1, 5, 9, 13, 17};
+    /**
+     * His side_edges: a break is never allowed on an edge showing one of these 5 colours, by colour
+     * identity -- but by HIS colour identity. These are Blackwood's raw colour IDs, and this
+     * project's PieceInventory (and everything the GPU kernel actually operates on) uses TheSil's
+     * numbering, which is a DIFFERENT, non-identity bijection (see dk.puzzle.blackwood.BwUtil.
+     * BLACKWOOD_TO_THESIL, verified 2026-08-02). Applying these raw IDs directly against
+     * TheSil-numbered piece data -- which is what every consumer of blackwoodSideColorMask() and
+     * blackwoodHeuristicSideCount() did before this fix -- silently excludes/weights the WRONG
+     * colours. Must always be translated through BLACKWOOD_TO_THESIL before use.
+     */
+    private static final int[] BLACKWOOD_SIDE_COLORS = translateToTheSil(new int[]{1, 5, 9, 13, 17});
 
-    /** His break_indexes_allowed: exactly 10 sequence positions where +1 total break is unlocked. Not a smooth ramp. */
+    /** His break_indexes_allowed: exactly 10 sequence positions where +1 total break is unlocked. Not a smooth ramp.
+     *  Sequence positions, not colours -- no translation needed. */
     private static final int[] BLACKWOOD_BREAK_INDEXES = {201, 206, 211, 216, 221, 225, 229, 233, 237, 239};
 
-    /** His heuristic_sides: 3 colours over-represented in the piece set, requiring early (not late) use. */
-    private static final int[] BLACKWOOD_HEURISTIC_COLORS = {13, 16, 10};
+    /** His heuristic_sides: 3 colours over-represented in the piece set, requiring early (not late) use.
+     *  Same colour-numbering caveat as BLACKWOOD_SIDE_COLORS above -- translated through BLACKWOOD_TO_THESIL. */
+    private static final int[] BLACKWOOD_HEURISTIC_COLORS = translateToTheSil(new int[]{13, 16, 10});
+
+    private static int[] translateToTheSil(int[] blackwoodRawColors) {
+        int[] translated = new int[blackwoodRawColors.length];
+        for (int i = 0; i < blackwoodRawColors.length; i++) {
+            translated[i] = dk.puzzle.blackwood.BwUtil.BLACKWOOD_TO_THESIL[blackwoodRawColors[i]];
+        }
+        return translated;
+    }
 
     private static int[] blackwoodSideColorMask() {
         int[] mask = new int[23];
@@ -204,22 +235,27 @@ public class GpuEngine {
     /**
      * His heuristic_array: minimum cumulative heuristic-side-colour count
      * required by each step up to index 160, a piecewise-linear schedule.
-     * Uses float arithmetic (not double) to match his C# (float) casts
-     * exactly, including truncation at every segment boundary. Steps beyond
-     * 160 are left at 0 (his own array leaves them at C#'s int default, and
-     * the kernel only ever consults this for step &lt;= HEURISTIC_MAX_INDEX).
+     * Uses float arithmetic to match his C# (float) casts exactly, including
+     * truncation at every segment boundary -- EXCEPT the last branch's
+     * divisor, which his C# source leaves as an unsuffixed double literal
+     * (confirmed by direct read of Program.cs), promoting just that division
+     * to double precision while the other four branches stay float. Fixed
+     * 2026-08-02 (was `4.4615f` here, a uniform-float approximation that can
+     * shift a boundary index by ±1 versus his actual behaviour) to match
+     * the independently-verified dk.puzzle.blackwood.BwUtil.getHeuristicArray(),
+     * which has the same asymmetry and the same test proving it matters.
+     * Steps beyond 160 are left at 0 (his own array leaves them at C#'s int
+     * default, and the kernel only ever consults this for step &lt;= HEURISTIC_MAX_INDEX).
      */
     private static int[] blackwoodHeuristicRequired() {
         int[] arr = new int[256];
         for (int i = 0; i <= 160; i++) {
-            float val;
-            if (i <= 16) val = 0f;
-            else if (i <= 26) val = ((float) i - 16) * 2.8f;
-            else if (i <= 56) val = (((float) i - 26) * 1.43333f) + 28f;
-            else if (i <= 76) val = (((float) i - 56) * 0.9f) + 71f;
-            else if (i <= 102) val = (((float) i - 76) * 0.6538f) + 89f;
-            else val = (((float) i - 102) / 4.4615f) + 106f;
-            arr[i] = (int) val;
+            if (i <= 16) arr[i] = 0;
+            else if (i <= 26) arr[i] = (int) (((float) i - 16) * 2.8f);
+            else if (i <= 56) arr[i] = (int) ((((float) i - 26) * 1.43333f) + 28);
+            else if (i <= 76) arr[i] = (int) ((((float) i - 56) * 0.9f) + 71);
+            else if (i <= 102) arr[i] = (int) ((((float) i - 76) * 0.6538f) + 89);
+            else arr[i] = (int) ((((float) i - 102) / 4.4615) + 106); // 4.4615 deliberately double, not float
         }
         return arr;
     }
