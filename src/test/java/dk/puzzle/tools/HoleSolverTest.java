@@ -154,6 +154,97 @@ class HoleSolverTest {
     }
 
     // ------------------------------------------------------------------
+    // decodeBoardBlackwood / decodeBoardAuto
+    //
+    // Blackwood's own solver writes bucas links using his raw internal
+    // colour IDs directly, not bucas-standard numbering -- decoding one with
+    // the bucas table silently identifies every placed piece as "unknown"
+    // (see the 2026-08-02 investigation: all 251 placed cells of a real
+    // board failed findPhysicalId this way), letting hole-filling "solve"
+    // using pieces already used elsewhere on the board. decodeBoardAuto
+    // exists to catch that before it happens.
+    // ------------------------------------------------------------------
+
+    @Test
+    void testDecodeBoardBlackwoodUsesDifferentColorMapThanBucasStandard() {
+        // Letter index 2 ('c'): BUCAS_TO_THESIL maps it to TheSil colour 4,
+        // BLACKWOOD_TO_THESIL maps it to TheSil colour 6 -- a genuinely
+        // distinguishing case, not a coincidental match between the tables.
+        StringBuilder sb = new StringBuilder("caaa");
+        for (int i = 1; i < 256; i++) sb.append("aaaa");
+
+        int[] bucasDecoded = HoleSolver.decodeBoard(sb.toString());
+        int[] blackwoodDecoded = HoleSolver.decodeBoardBlackwood(sb.toString());
+
+        assertEquals(PieceUtils.pack(4, 0, 0, 0), bucasDecoded[0]);
+        assertEquals(PieceUtils.pack(6, 0, 0, 0), blackwoodDecoded[0]);
+        assertNotEquals(bucasDecoded[0], blackwoodDecoded[0],
+                "The two colour maps must genuinely disagree for this test to prove anything");
+    }
+
+    /** An inventory containing exactly one real piece/orientation, at physical id 0. */
+    private static PieceInventory singlePieceInventory(int packedPiece) {
+        PieceInventory inv = mock(PieceInventory.class);
+        inv.allOrientations = new int[1024];
+        inv.physicalMapping = new int[1024];
+        inv.allOrientations[0] = packedPiece;
+        inv.physicalMapping[0] = 0;
+        for (int i = 1; i < 1024; i++) inv.physicalMapping[i] = i / 4;
+        return inv;
+    }
+
+    private static String singleCellBoardEdges(char n, char e, char s, char w) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(n).append(e).append(s).append(w);
+        for (int i = 1; i < 256; i++) sb.append("aaaa");
+        return sb.toString();
+    }
+
+    @Test
+    void testDecodeBoardAutoUsesBlackwoodMapWhenPuzzleNameSaysSo() {
+        // 'c' at cell 0 only identifies as a real piece under the Blackwood
+        // interpretation (colour 6) -- the bucas-standard interpretation
+        // (colour 4) isn't in this inventory at all.
+        String edges = singleCellBoardEdges('c', 'a', 'a', 'a');
+        PieceInventory inventory = singlePieceInventory(PieceUtils.pack(6, 0, 0, 0));
+        String link = "https://e2.bucas.name/#puzzle=Joshua_Blackwood&board_w=16&board_h=16&board_edges=" + edges;
+
+        int[] decoded = HoleSolver.decodeBoardAuto(link, inventory, false);
+
+        assertEquals(PieceUtils.pack(6, 0, 0, 0), decoded[0],
+                "puzzle=Joshua_Blackwood must select the Blackwood colour map on the first guess");
+    }
+
+    @Test
+    void testDecodeBoardAutoDefaultsToBucasStandardWithoutPuzzleMarker() {
+        // No puzzle= at all -- must default to (and stay with) bucas-standard
+        // when that guess already resolves fine, matching every link this
+        // project's own BucasExporter has ever produced.
+        String edges = singleCellBoardEdges('c', 'a', 'a', 'a');
+        PieceInventory inventory = singlePieceInventory(PieceUtils.pack(4, 0, 0, 0));
+
+        int[] decoded = HoleSolver.decodeBoardAuto(edges, inventory, false);
+
+        assertEquals(PieceUtils.pack(4, 0, 0, 0), decoded[0]);
+    }
+
+    @Test
+    void testDecodeBoardAutoSwitchesToBlackwoodWhenBucasGuessResolvesPoorly() {
+        // No puzzle= marker (so the initial guess is bucas-standard), but
+        // the inventory only contains the Blackwood-interpreted piece --
+        // this is the actual failure mode from the 2026-08-02 investigation,
+        // and must self-correct rather than silently returning an
+        // unidentifiable board.
+        String edges = singleCellBoardEdges('c', 'a', 'a', 'a');
+        PieceInventory inventory = singlePieceInventory(PieceUtils.pack(6, 0, 0, 0));
+
+        int[] decoded = HoleSolver.decodeBoardAuto(edges, inventory, false);
+
+        assertEquals(PieceUtils.pack(6, 0, 0, 0), decoded[0],
+                "Must detect the bucas-standard guess doesn't resolve and fall back to the Blackwood map");
+    }
+
+    // ------------------------------------------------------------------
     // ConflictSolveResult.bestBoard()
     // ------------------------------------------------------------------
 

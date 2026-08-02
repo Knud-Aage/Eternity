@@ -59,6 +59,27 @@ public class HoleSolver {
         }
     }
 
+    // Blackwood's own solver (github.com/jblackwood345/EternityII_Solver,
+    // Program.cs Save_Board) writes bucas links using his RAW internal colour
+    // IDs directly -- no remap at all, unlike BucasExporter's THESIL_TO_BUCAS
+    // step. Decoding one of his links with BUCAS_TO_THESIL (i.e. assuming
+    // bucas-standard numbering) silently scrambles every already-placed piece
+    // into colours that don't match any real piece in this project's
+    // database (confirmed 2026-08-02: every one of 251 placed cells failed
+    // findPhysicalId when decoded that way) -- which then lets the hole-fill
+    // "solve" using pieces already used elsewhere on the board, an invalid
+    // Eternity II completion.
+    //
+    // Derived (not guessed) by DeriveBlackwoodColorMap.java: pieces.csv and
+    // JBlackwood_Pieces.txt list the same 256 physical pieces at the same
+    // index, so trying all 4 rotations of each Blackwood entry against the
+    // fixed TheSil entry and requiring a single globally-consistent colour
+    // bijection across all 256 pieces (zero contradictions) both confirms
+    // that assumption and yields this table.
+    private static final int[] BLACKWOOD_TO_THESIL = {
+            0, 1, 6, 22, 17, 3, 8, 10, 12, 4, 7, 9, 18, 5, 15, 11, 20, 2, 14, 16, 19, 13, 21
+    };
+
     // Generous but bounded, so a genuinely unsatisfiable hole shape fails fast
     // instead of hanging forever.
     private static final long STEP_BUDGET_PER_REGION = 200_000_000L;
@@ -69,6 +90,9 @@ public class HoleSolver {
             System.out.println("  baseLabel: optional, e.g. the source board's piece count (\"214\") -- woven");
             System.out.println("  into the saved filenames as \"Base214\" alongside the conflict count. HoleSolver");
             System.out.println("  only ever sees a bucas link, so it can't derive this on its own.");
+            System.out.println("  Colour numbering (bucas-standard vs. Blackwood's raw internal IDs) is");
+            System.out.println("  auto-detected from the link's puzzle= name and validated against the piece");
+            System.out.println("  database -- pass either kind of link directly.");
             return;
         }
 
@@ -88,8 +112,8 @@ public class HoleSolver {
         }
         String baseLabel = args.length >= 3 ? args[2] : null;
 
-        int[] board = decodeBoard(boardEdges);
         PieceInventory inventory = new PieceInventory(Eternity.loadPieces());
+        int[] board = decodeBoardAuto(args[0], inventory, true);
 
         ConflictSolveResult result = solveConflicts(board, inventory, true, trials);
 
@@ -419,7 +443,17 @@ public class HoleSolver {
         return (amp == -1 ? rest : rest.substring(0, amp)).trim();
     }
 
+    /** Decodes a board_edges string using bucas-standard numbering (the default for any link BucasExporter produced). */
     public static int[] decodeBoard(String boardEdges) {
+        return decodeBoard(boardEdges, BUCAS_TO_THESIL);
+    }
+
+    /** Decodes a board_edges string written with Blackwood's raw, un-remapped internal colour IDs. */
+    public static int[] decodeBoardBlackwood(String boardEdges) {
+        return decodeBoard(boardEdges, BLACKWOOD_TO_THESIL);
+    }
+
+    private static int[] decodeBoard(String boardEdges, int[] colorMap) {
         int[] board = new int[256];
         for (int i = 0; i < 256; i++) {
             // BucasExporter's own encoding uses the literal string "aaaa" as a
@@ -427,16 +461,84 @@ public class HoleSolver {
             // -2) bucasString.append("aaaa")`), not as a real piece — no actual
             // Eternity II piece has grey on all four sides (corners have 2,
             // edges have 1), so this is unambiguous and must be decoded back
-            // to empty (-1), not to a fake all-grey "piece".
+            // to empty (-1), not to a fake all-grey "piece". True regardless
+            // of which colour map is in use, since colour 0 (grey/border)
+            // maps to itself in both.
             if (boardEdges.regionMatches(i * 4, "aaaa", 0, 4)) {
                 board[i] = -1;
                 continue;
             }
-            int n = BUCAS_TO_THESIL[boardEdges.charAt(i * 4)     - 'a'];
-            int e = BUCAS_TO_THESIL[boardEdges.charAt(i * 4 + 1) - 'a'];
-            int s = BUCAS_TO_THESIL[boardEdges.charAt(i * 4 + 2) - 'a'];
-            int w = BUCAS_TO_THESIL[boardEdges.charAt(i * 4 + 3) - 'a'];
+            int n = colorMap[boardEdges.charAt(i * 4)     - 'a'];
+            int e = colorMap[boardEdges.charAt(i * 4 + 1) - 'a'];
+            int s = colorMap[boardEdges.charAt(i * 4 + 2) - 'a'];
+            int w = colorMap[boardEdges.charAt(i * 4 + 3) - 'a'];
             board[i] = PieceUtils.pack(n, e, s, w);
+        }
+        return board;
+    }
+
+    /** True if the link's puzzle= name suggests Blackwood's raw-colour encoding rather than bucas-standard. */
+    private static boolean looksLikeBlackwoodSource(String input) {
+        int idx = input.indexOf("puzzle=");
+        if (idx == -1) return false;
+        String rest = input.substring(idx + "puzzle=".length());
+        int amp = rest.indexOf('&');
+        String puzzleName = amp == -1 ? rest : rest.substring(0, amp);
+        return puzzleName.toLowerCase().contains("blackwood");
+    }
+
+    /** Fraction of non-empty cells that resolve to a real physical piece under this inventory -- 1.0 means every placed piece was identified. */
+    private static double resolvedFraction(int[] board, PieceInventory inventory) {
+        int placed = 0, resolved = 0;
+        for (int p : board) {
+            if (p == -1) continue;
+            placed++;
+            if (findPhysicalId(inventory, p) != -1) resolved++;
+        }
+        return placed == 0 ? 1.0 : (double) resolved / placed;
+    }
+
+    /**
+     * Decodes {@code input} (a full bucas link or a raw board_edges value),
+     * auto-detecting whether it uses bucas-standard numbering or Blackwood's
+     * raw internal colours. Starts from the puzzle= name as a hint (defaults
+     * to bucas-standard when absent or ambiguous), then validates the guess
+     * against {@code inventory}: if fewer than {@code MIN_RESOLVED_FRACTION}
+     * of placed cells identify as real pieces, tries the other interpretation
+     * and switches to it if that resolves meaningfully more of the board.
+     * This is a genuine detect-and-correct step, not just a warning — a
+     * wrong guess here previously let hole-filling "solve" using pieces
+     * already placed elsewhere on the board, an invalid completion (see the
+     * 2026-08-02 investigation that motivated this method).
+     */
+    public static int[] decodeBoardAuto(String input, PieceInventory inventory, boolean verbose) {
+        final double MIN_RESOLVED_FRACTION = 0.9;
+
+        String boardEdges = extractBoardEdges(input);
+        boolean guessBlackwood = looksLikeBlackwoodSource(input);
+
+        int[] board = guessBlackwood ? decodeBoardBlackwood(boardEdges) : decodeBoard(boardEdges);
+        double fraction = resolvedFraction(board, inventory);
+
+        if (fraction < MIN_RESOLVED_FRACTION) {
+            int[] altBoard = guessBlackwood ? decodeBoard(boardEdges) : decodeBoardBlackwood(boardEdges);
+            double altFraction = resolvedFraction(altBoard, inventory);
+
+            if (altFraction > fraction) {
+                if (verbose) {
+                    System.out.printf("Only %.0f%% of placed cells matched a real piece assuming %s numbering; " +
+                                    "switching to %s numbering (%.0f%% matched) instead.%n",
+                            fraction * 100, guessBlackwood ? "Blackwood" : "bucas-standard",
+                            guessBlackwood ? "bucas-standard" : "Blackwood", altFraction * 100);
+                }
+                board = altBoard;
+                fraction = altFraction;
+            }
+            if (fraction < MIN_RESOLVED_FRACTION && verbose) {
+                System.out.printf("WARNING: only %.0f%% of placed cells matched a real piece under either colour " +
+                        "numbering. This link may use a third numbering scheme, or the wrong piece dataset " +
+                        "entirely -- results below are unreliable.%n", fraction * 100);
+            }
         }
         return board;
     }
