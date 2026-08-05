@@ -305,7 +305,7 @@ extern "C" __global__ void solvePBP(
                              // every prior live run), 0 = strict-only, for
                              // A/B comparison. See GpuEngine.setBreakToleranceEnabled().
     unsigned long long stepBudget,
-    int lookaheadEnabledFlag // A/B toggle for the south+east hasCandidate()
+    int lookaheadEnabledFlag, // A/B toggle for the south+east hasCandidate()
                               // pre-check below every placement. Blackwood's
                               // own 470-record solver (github.com/jblackwood345/
                               // EternityII_Solver, Program.cs SolvePuzzle()) has
@@ -315,6 +315,46 @@ extern "C" __global__ void solvePBP(
                               // 1 = current always-on behaviour (default), 0 =
                               // skip the check entirely. See
                               // GpuEngine.setLookaheadEnabled().
+
+    // --- Marathon-thread persistence -------------------------------------
+    // Every launch previously discarded ALL in-progress backtracking state,
+    // capping any single thread's sustained search at stepBudget (75,000
+    // unlocked / 30,000 locked) no matter how long the process ran -- the same
+    // defect already fixed in the sibling Blackwood kernel, where removing it
+    // broke a day-long depth plateau immediately.
+    //
+    // It matters more here because this kernel has NO randomization anywhere
+    // (no rand/curand/xorshift; sm_byNorth/sm_byNW/sm_byWest and
+    // c_heuristicSortedOrder all derive from __constant__ data uploaded once at
+    // GpuEngine construction). The search is therefore fully deterministic given
+    // (seed board, startingStep, stepBudget) -- so a seed re-submitted unchanged
+    // is PROVABLY guaranteed to retrace the identical path to the identical
+    // depth. Re-queued "elite" seeds aren't merely suboptimal today, they're
+    // dead compute.
+    //
+    // Scope is deliberately minimal: ONE slot, used by thread 0 only (the
+    // "marathon thread"). It ignores its seed board and resumes the persisted
+    // search; every other thread behaves exactly as before. That keeps this a
+    // clean A/B test of the hypothesis while touching the least surface area.
+    int persistResumeFlag,    // 1 = thread 0 resumes from the slot below; 0 =
+                              // every thread fresh-inits (previous behaviour).
+                              // Host-computed -- see GpuEngine.persistSlotValid.
+    int* d_persistBoard,
+    int* d_persistPieceStack,
+    int* d_persistPlacedOrientIdx,
+    int* d_persistBreakFallbackStack,
+    int* d_persistBestLocalBoard,
+    unsigned long long* d_persistInventoryMask,
+    unsigned int* d_persistBreakUsedAtStep,
+    int* d_persistBreaksUsed,
+    int* d_persistHeuristicSum,
+    int* d_persistStep,
+    int* d_persistPiecesNow,
+    int* d_persistBestPiecesPlaced,
+    int* d_persistFloor,      // the startingStep this slot was checkpointed
+                              // under; see the resume block for why the launch
+                              // parameter must not be trusted on resume.
+    int* d_marathonDepth
 )
 {
     __shared__ short sm_byNorth     [NUM_COLORS * MAX_PER_COLOR];
@@ -340,59 +380,79 @@ extern "C" __global__ void solvePBP(
     unsigned int breakUsedAtStep[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
     int breaksUsed   = 0;
     int heuristicSum = 0;
-    // Independent resume position for the break-fallback scan below --
-    // deliberately separate from pieceStack so it can never alias tiers
-    // 1/2/3's own per-step resume bookkeeping. Only ever consulted from
-    // FIRST_BREAK_INDEX (201) onward.
     int breakFallbackStack[256];
+    int bestLocalBoard[256];
 
-    int offset    = tid * 256;
     int piecesNow = 0;
-    for (int i = 0; i < 256; i++) {
-        board[i]              = d_partialBoards[offset + i];
-        pieceStack[i]         = 0;
-        placedOrientIdx[i]    = -1;
-        breakFallbackStack[i] = 0;
-        if (board[i] != -1) {
-            piecesNow++;
-            for (int o = 0; o < 1024; o++) {
-                if (c_allOrientations[o] == board[i]) {
-                    int physId = c_physicalMapping[o];
-                    inventoryMask[physId/64] &= ~(1ULL << (physId%64));
-                    heuristicSum += c_heuristicSideCount[physId];
-                    break;
+    int step = startingStep;
+    int bestPiecesPlaced = 0;
+    int floor = startingStep;
+
+    if (tid == 0 && persistResumeFlag == 1) {
+        for (int i = 0; i < 256; i++) {
+            board[i]              = d_persistBoard[i];
+            pieceStack[i]         = d_persistPieceStack[i];
+            placedOrientIdx[i]    = d_persistPlacedOrientIdx[i];
+            breakFallbackStack[i] = d_persistBreakFallbackStack[i];
+            bestLocalBoard[i]     = d_persistBestLocalBoard[i];
+        }
+        for (int i = 0; i < 4; i++) {
+            inventoryMask[i] = d_persistInventoryMask[i];
+        }
+        for (int i = 0; i < 8; i++) {
+            breakUsedAtStep[i] = d_persistBreakUsedAtStep[i];
+        }
+        breaksUsed       = *d_persistBreaksUsed;
+        heuristicSum     = *d_persistHeuristicSum;
+        step             = *d_persistStep;
+        piecesNow        = *d_persistPiecesNow;
+        bestPiecesPlaced = *d_persistBestPiecesPlaced;
+        floor            = *d_persistFloor;
+    } else {
+        int offset = tid * 256;
+        for (int i = 0; i < 256; i++) {
+            board[i]              = d_partialBoards[offset + i];
+            pieceStack[i]         = 0;
+            placedOrientIdx[i]    = -1;
+            breakFallbackStack[i] = 0;
+            if (board[i] != -1) {
+                piecesNow++;
+                for (int o = 0; o < 1024; o++) {
+                    if (c_allOrientations[o] == board[i]) {
+                        int physId = c_physicalMapping[o];
+                        inventoryMask[physId/64] &= ~(1ULL << (physId%64));
+                        heuristicSum += c_heuristicSideCount[physId];
+                        break;
+                    }
                 }
             }
         }
-    }
 
-    // Re-derive breaksUsed for any pre-placed seed cells (startingStep > 0).
-    // Only South/East are checked so each internal edge between two
-    // pre-placed cells is counted once, not once from each side (same fix
-    // applied elsewhere in this project for the identical double-count risk).
-    // In practice this rarely fires: CPU-side handoff happens well before
-    // FIRST_BREAK_INDEX (201), so most launches simply have zero breaks yet.
-    if (startingStep > 0) {
-        for (int s = 0; s < startingStep; s++) {
-            int bIdx = c_buildOrder[s];
-            if (board[bIdx] == -1) continue;
-            int p = board[bIdx];
-            int r = bIdx / 16, c = bIdx % 16;
-            int e = getEast(p), s_c = getSouth(p);
-            int s_req = (r == 15) ? 0 : (board[bIdx+16] != -1 ? getNorth(board[bIdx+16]) : WILDCARD);
-            int e_req = (c == 15) ? 0 : (board[bIdx+1]  != -1 ? getWest (board[bIdx+1])  : WILDCARD);
-            if (s_req != WILDCARD && s_c != s_req && s_c < NUM_COLORS && !c_isSideColor[s_c]) breaksUsed++;
-            if (e_req != WILDCARD && e   != e_req && e   < NUM_COLORS && !c_isSideColor[e])   breaksUsed++;
+        if (startingStep > 0) {
+            for (int s = 0; s < startingStep; s++) {
+                int bIdx = c_buildOrder[s];
+                if (board[bIdx] == -1) continue;
+                int p = board[bIdx];
+                int r = bIdx / 16, c = bIdx % 16;
+                int e = getEast(p), s_c = getSouth(p);
+                int s_req = (r == 15) ? 0 : (board[bIdx+16] != -1 ? getNorth(board[bIdx+16]) : WILDCARD);
+                int e_req = (c == 15) ? 0 : (board[bIdx+1]  != -1 ? getWest (board[bIdx+1])  : WILDCARD);
+                if (s_req != WILDCARD && s_c != s_req && s_c < NUM_COLORS && !c_isSideColor[s_c]) breaksUsed++;
+                if (e_req != WILDCARD && e   != e_req && e   < NUM_COLORS && !c_isSideColor[e])   breaksUsed++;
+            }
         }
+
+        bestPiecesPlaced = piecesNow;
+        for (int i = 0; i < 256; i++) {
+            bestLocalBoard[i] = board[i];
+        }
+        floor = startingStep;
     }
 
-    int step             = startingStep;
-    int bestPiecesPlaced = piecesNow;
-    int bestLocalBoard[256];
     unsigned long long stepCounter = 0;
     const unsigned long long STEP_BUDGET = stepBudget;
 
-    while (step >= startingStep && step < 256) {
+    while (step >= floor && step < 256) {
         if (stepCounter >= STEP_BUDGET) break;
         if (*d_solvedFlag == 1)         break;
         stepCounter++;
@@ -413,7 +473,6 @@ extern "C" __global__ void solvePBP(
         int w_req = (col == 0)  ? 0 : (board[boardIdx-1]  != -1 ? getEast (board[boardIdx-1])  : WILDCARD);
         int e_req = (col == 15) ? 0 : (board[boardIdx+1]  != -1 ? getWest (board[boardIdx+1])  : WILDCARD);
 
-        // Computed once per step, not per candidate -- see classifyCandidate.
         bool breakEligible       = (breakToleranceFlag == 1) && (step >= FIRST_BREAK_INDEX) && (breaksUsed < c_slipBudget[step]);
         bool heuristicGateActive = (step <= HEURISTIC_MAX_INDEX);
         int  heuristicFloor      = heuristicGateActive ? c_heuristicRequired[step] : 0;
@@ -421,7 +480,6 @@ extern "C" __global__ void solvePBP(
         bool foundPiece = false;
         int  startLi    = pieceStack[step];
 
-        // --- Tier 1: NW index — O(~2) candidates ---
         if (n_req != WILDCARD && w_req != WILDCARD && n_req < NUM_COLORS && w_req < NUM_COLORS) {
             int key   = n_req * NUM_COLORS + w_req;
             int count = sm_byNWCount[key];
@@ -438,8 +496,11 @@ extern "C" __global__ void solvePBP(
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
-                pieceStack[step] = li + 1;
-                if (kind == 2) { breaksUsed++; bitSet(breakUsedAtStep, step); } else { bitClear(breakUsedAtStep, step); }
+                pieceStack[step]      = li + 1;
+                if (kind == 2) {
+                    breaksUsed++;
+                    bitSet(breakUsedAtStep, step);
+                }
                 heuristicSum += c_heuristicSideCount[physId];
                 foundPiece = true;
                 piecesNow++;
@@ -451,8 +512,6 @@ extern "C" __global__ void solvePBP(
                 break;
             }
             if (!foundPiece) pieceStack[step] = 0;
-
-        // --- Tier 2: north-only index — O(~128) candidates ---
         } else if (n_req != WILDCARD && n_req < NUM_COLORS) {
             int count = sm_byNorthCount[n_req];
             for (int li = startLi; li < count; li++) {
@@ -468,8 +527,11 @@ extern "C" __global__ void solvePBP(
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
-                pieceStack[step] = li + 1;
-                if (kind == 2) { breaksUsed++; bitSet(breakUsedAtStep, step); } else { bitClear(breakUsedAtStep, step); }
+                pieceStack[step]      = li + 1;
+                if (kind == 2) {
+                    breaksUsed++;
+                    bitSet(breakUsedAtStep, step);
+                }
                 heuristicSum += c_heuristicSideCount[physId];
                 foundPiece = true;
                 piecesNow++;
@@ -481,12 +543,7 @@ extern "C" __global__ void solvePBP(
                 break;
             }
             if (!foundPiece) pieceStack[step] = 0;
-
-        // --- Tier 3: full scan — O(1024), rare ---
         } else {
-            // Walked via c_heuristicSortedOrder (descending heuristic-colour
-            // count), not raw index order, so this tier honours the same
-            // heuristic preference as the sm_byNorth/sm_byNW buckets above.
             for (int li = startLi; li < 1024; li++) {
                 int idx    = c_heuristicSortedOrder[li];
                 int physId = c_physicalMapping[idx];
@@ -500,8 +557,11 @@ extern "C" __global__ void solvePBP(
                 board[boardIdx] = p;
                 inventoryMask[physId/64] &= ~(1ULL << (physId%64));
                 placedOrientIdx[step] = idx;
-                pieceStack[step] = li + 1;
-                if (kind == 2) { breaksUsed++; bitSet(breakUsedAtStep, step); } else { bitClear(breakUsedAtStep, step); }
+                pieceStack[step]      = li + 1;
+                if (kind == 2) {
+                    breaksUsed++;
+                    bitSet(breakUsedAtStep, step);
+                }
                 heuristicSum += c_heuristicSideCount[physId];
                 foundPiece = true;
                 piecesNow++;
@@ -613,7 +673,7 @@ extern "C" __global__ void solvePBP(
 
         if (!foundPiece) {
             step--;
-            while (step >= startingStep) {
+            while (step >= floor) {
                 int undoIdx = c_buildOrder[step];
                 if (lockCenterFlag == 1 && (undoIdx == 135 ||
                     undoIdx == 221 || undoIdx == 45 || undoIdx == 210 || undoIdx == 34))
@@ -621,7 +681,7 @@ extern "C" __global__ void solvePBP(
                 else
                     break;
             }
-            if (step >= startingStep) {
+            if (step >= floor) {
                 int undoBoardIdx = c_buildOrder[step];
                 board[undoBoardIdx] = -1;
                 int physId = c_physicalMapping[placedOrientIdx[step]];
@@ -657,9 +717,48 @@ extern "C" __global__ void solvePBP(
         globalMax    = globalMaxRaw & 0x0FFFFFFF;
     }
     atomicAdd(d_totalSteps, stepCounter);
-    d_threadDepths[tid] = bestPiecesPlaced;
-}
 
+    if (tid == 0 && persistResumeFlag == 1) {
+        // Report the marathon thread's accumulated depth SEPARATELY, and zero its
+        // d_threadDepths entry: that depth spans many launches, while
+        // SeedSelector.selectBest scores each seed by threadDepths[i] -- leaving it
+        // in would let seeds.get(0)'s original (shallow, unsearched) board win the
+        // elite tier repeatedly on progress it never made.
+        d_threadDepths[0] = 0;
+        *d_marathonDepth = bestPiecesPlaced;
+    } else {
+        d_threadDepths[tid] = bestPiecesPlaced;
+        // NOTE: deliberately NOT writing *d_marathonDepth here. Every non-marathon
+        // thread would be racing the same single address (up to 15,000 of them --
+        // see getDynamicBatchSize), so thread 0's real value would be clobbered by
+        // whichever zero-write landed last, making the A/B signal this whole change
+        // exists to measure read as garbage. The host already zeroes d_marathonDepth
+        // before every launch (GpuEngine.runDeepDfs), so the non-resuming case
+        // correctly reports 0 with no device write at all.
+    }
+
+    if (tid == 0 && step != 256) {
+        for (int i = 0; i < 256; i++) {
+            d_persistBoard[i]              = board[i];
+            d_persistPieceStack[i]         = pieceStack[i];
+            d_persistPlacedOrientIdx[i]    = placedOrientIdx[i];
+            d_persistBreakFallbackStack[i] = breakFallbackStack[i];
+            d_persistBestLocalBoard[i]     = bestLocalBoard[i];
+        }
+        for (int i = 0; i < 4; i++) {
+            d_persistInventoryMask[i] = inventoryMask[i];
+        }
+        for (int i = 0; i < 8; i++) {
+            d_persistBreakUsedAtStep[i] = breakUsedAtStep[i];
+        }
+        *d_persistBreaksUsed       = breaksUsed;
+        *d_persistHeuristicSum     = heuristicSum;
+        *d_persistStep             = step;
+        *d_persistPiecesNow        = piecesNow;
+        *d_persistBestPiecesPlaced = bestPiecesPlaced;
+        *d_persistFloor            = floor;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // solveRepairMode — LNS hole-filling kernel

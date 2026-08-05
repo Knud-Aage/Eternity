@@ -55,6 +55,77 @@ class GpuEngineTest {
         assertEquals(0, result.threadDepths().length, "No threads ran, so there are no per-thread depths");
     }
 
+    // ------------------------------------------------------------------
+    // Marathon-thread persistence state machine
+    //
+    // The kernel-side resume/checkpoint logic needs a real GPU and is covered
+    // by GpuMarathonEquivalenceHarness (a standalone main(), deliberately named
+    // *Harness so Surefire won't collect it). What IS unit-testable is the host-side
+    // gate deciding whether a resume happens at all: persistResumeFlag is
+    // (seedPersistenceEnabled && persistSlotValid), so if either half of that
+    // state machine breaks, a launch either silently stops resuming (losing the
+    // whole feature) or resumes into a slot that a teardown was supposed to have
+    // invalidated (resuming a search whose startingStep floor no longer applies).
+    // ------------------------------------------------------------------
+
+    private static boolean persistSlotValid(GpuEngine engine) throws Exception {
+        Field f = GpuEngine.class.getDeclaredField("persistSlotValid");
+        f.setAccessible(true);
+        return f.getBoolean(engine);
+    }
+
+    private static void setPersistSlotValid(GpuEngine engine, boolean value) throws Exception {
+        Field f = GpuEngine.class.getDeclaredField("persistSlotValid");
+        f.setAccessible(true);
+        f.setBoolean(engine, value);
+    }
+
+    @Test
+    void testSeedPersistenceIsDisabledByDefault() throws Exception {
+        GpuEngine engine = newUninitializedEngine();
+
+        assertFalse(engine.isSeedPersistenceEnabled(),
+                "Persistence must default OFF so the live pipeline behaves exactly as before until deliberately enabled");
+    }
+
+    @Test
+    void testDisablingPersistenceAlsoInvalidatesTheSlot() throws Exception {
+        GpuEngine engine = newUninitializedEngine();
+        engine.setSeedPersistenceEnabled(true);
+        setPersistSlotValid(engine, true);
+
+        engine.setSeedPersistenceEnabled(false);
+
+        assertFalse(persistSlotValid(engine),
+                "Turning persistence off must drop the checkpoint too -- otherwise re-enabling it later would "
+                        + "resume a stale search captured under a possibly-different startingStep floor");
+    }
+
+    @Test
+    void testInvalidatePersistedStateClearsTheSlotButLeavesTheToggleAlone() throws Exception {
+        GpuEngine engine = newUninitializedEngine();
+        engine.setSeedPersistenceEnabled(true);
+        setPersistSlotValid(engine, true);
+
+        engine.invalidatePersistedState();
+
+        assertFalse(persistSlotValid(engine),
+                "triggerBranchScrap's teardown must force the next launch to fresh-init");
+        assertTrue(engine.isSeedPersistenceEnabled(),
+                "A teardown invalidates the checkpoint, it does not switch the feature off");
+    }
+
+    @Test
+    void testEnablingPersistenceDoesNotImmediatelyMarkASlotValid() throws Exception {
+        GpuEngine engine = newUninitializedEngine();
+
+        engine.setSeedPersistenceEnabled(true);
+
+        assertFalse(persistSlotValid(engine),
+                "Nothing has been checkpointed yet, so the first launch after enabling must fresh-init "
+                        + "rather than resume whatever bytes happen to be in the slot buffers");
+    }
+
     @Test
     void testRunRepairModeWithNoBoardsSkipsGpuAndReturnsCurrentHighScore() throws Exception {
         GpuEngine engine = newUninitializedEngine();
@@ -181,6 +252,42 @@ class GpuEngineTest {
         int[] actual = (int[]) method.invoke(null);
 
         assertArrayEquals(expected, actual);
+    }
+
+    /**
+     * The kernel-side resume/checkpoint logic needs a real GPU and is covered by
+     * GpuMarathonEquivalenceHarness. What is unit-testable here is the host-side
+     * gate that decides whether a resume happens at all: persistResumeFlag is
+     * (seedPersistenceEnabled AND persistSlotValid). If either half breaks, a
+     * launch either silently stops resuming (losing the feature outright) or
+     * resumes into a slot a teardown was supposed to have invalidated -- i.e.
+     * continues a search whose startingStep floor no longer applies.
+     */
+    @Test
+    void testSeedPersistenceAndInvalidationStateMachine() throws Exception {
+        GpuEngine engine = newUninitializedEngine();
+        assertFalse(engine.isSeedPersistenceEnabled(), "Seed persistence must default to OFF");
+
+        Field persistSlotValidField = GpuEngine.class.getDeclaredField("persistSlotValid");
+        persistSlotValidField.setAccessible(true);
+        assertFalse((boolean) persistSlotValidField.get(engine), "persistSlotValid must default to false");
+
+        engine.setSeedPersistenceEnabled(true);
+        assertTrue(engine.isSeedPersistenceEnabled(), "Seed persistence should be enabled");
+
+        // Manually simulate slot valid = true
+        persistSlotValidField.set(engine, true);
+        assertTrue((boolean) persistSlotValidField.get(engine), "persistSlotValid should be set to true");
+
+        // Invalidate state
+        engine.invalidatePersistedState();
+        assertFalse((boolean) persistSlotValidField.get(engine), "invalidatePersistedState must clear persistSlotValid");
+
+        // Set persistence = false clears valid slot
+        persistSlotValidField.set(engine, true);
+        engine.setSeedPersistenceEnabled(false);
+        assertFalse(engine.isSeedPersistenceEnabled());
+        assertFalse((boolean) persistSlotValidField.get(engine), "setSeedPersistenceEnabled(false) must clear persistSlotValid");
     }
 
 }

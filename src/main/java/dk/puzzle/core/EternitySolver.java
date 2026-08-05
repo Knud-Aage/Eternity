@@ -879,6 +879,10 @@ public class EternitySolver implements Runnable {
         globalGpuTrialCount.addAndGet(result.stepsTaken());
         isGpuBusy = false;
 
+        if (gpuEngine != null && gpuEngine.isSeedPersistenceEnabled()) {
+            logger.info(">>> GPU Phase 2 Batch: Marathon Depth: %d | Batch Max Depth: %d", result.marathonDepth(), maxDepthInBatch);
+        }
+
         long elapsed = System.currentTimeMillis() - methodStartTime;
 //        logger.info(">>> GPU Phase 2 complete. Steps taken per second: %,d",
 //                Math.round((double) result.stepsTaken() * 1000) / Math.max(1, elapsed));
@@ -1358,6 +1362,9 @@ public class EternitySolver implements Runnable {
     }
 
     private void triggerBranchScrap() {
+        if (useGpu && gpuEngine != null) {
+            gpuExecutor.submit(() -> gpuEngine.invalidatePersistedState());
+        }
         // countPieces(bestBoard), not deepestStep: this method fires on every
         // stagnation/teardown cycle (hundreds of thousands of times over a
         // long run), and teardown below resets deepestStep without touching

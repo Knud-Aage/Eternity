@@ -58,6 +58,17 @@ public class GpuEngine {
     // toggleable (not removed) so this can be flipped back on for further
     // comparison without a recompile.
     private volatile boolean lookaheadEnabled = false;
+    // Gates marathon-thread persistence (see solvePBP's persistResumeFlag). When
+    // on, thread 0 resumes its checkpointed search across launches instead of
+    // restarting from its seed; every other thread is unaffected. DEFAULT FALSE
+    // so the live pipeline behaves exactly as it did until this is deliberately
+    // switched on for an A/B run -- same convention as the two flags above.
+    private volatile boolean seedPersistenceEnabled = false;
+    // Whether the persistence slot currently holds a resumable checkpoint. Host-
+    // side only: the kernel is told the answer via persistResumeFlag rather than
+    // reading a device flag, which keeps invalidation a pure Java-side operation
+    // (see invalidatePersistedState) with no device write to forget.
+    private boolean persistSlotValid = false;
 
     // Persistent device buffers — allocated once, reused every launch
     private CUdeviceptr d_partialBoards;
@@ -67,6 +78,22 @@ public class GpuEngine {
     private CUdeviceptr d_bestBoardOut;
     private CUdeviceptr d_totalSteps;
     private CUdeviceptr d_threadDepths;
+
+    // Persistent search state for marathon thread (slot 0)
+    private CUdeviceptr d_persistBoard;
+    private CUdeviceptr d_persistPieceStack;
+    private CUdeviceptr d_persistPlacedOrientIdx;
+    private CUdeviceptr d_persistBreakFallbackStack;
+    private CUdeviceptr d_persistBestLocalBoard;
+    private CUdeviceptr d_persistInventoryMask;
+    private CUdeviceptr d_persistBreakUsedAtStep;
+    private CUdeviceptr d_persistBreaksUsed;
+    private CUdeviceptr d_persistHeuristicSum;
+    private CUdeviceptr d_persistStep;
+    private CUdeviceptr d_persistPiecesNow;
+    private CUdeviceptr d_persistBestPiecesPlaced;
+    private CUdeviceptr d_persistFloor;
+    private CUdeviceptr d_marathonDepth;
 
     public GpuEngine(PieceInventory inventory, boolean lockCenter, int[] buildOrder) {
         JCuda.cudaSetDeviceFlags(JCuda.cudaDeviceScheduleBlockingSync);
@@ -274,6 +301,22 @@ public class GpuEngine {
         d_bestBoardOut  = alloc(256L * Sizeof.INT);
         d_totalSteps    = alloc(Sizeof.LONG);
         d_threadDepths  = alloc((long) MAX_BOARDS * Sizeof.INT);
+
+        // Persistent search state for marathon thread 0
+        d_persistBoard              = alloc(256L * Sizeof.INT);
+        d_persistPieceStack         = alloc(256L * Sizeof.INT);
+        d_persistPlacedOrientIdx    = alloc(256L * Sizeof.INT);
+        d_persistBreakFallbackStack = alloc(256L * Sizeof.INT);
+        d_persistBestLocalBoard     = alloc(256L * Sizeof.INT);
+        d_persistInventoryMask      = alloc(4L * Sizeof.LONG);
+        d_persistBreakUsedAtStep    = alloc(8L * Sizeof.INT);
+        d_persistBreaksUsed         = alloc(Sizeof.INT);
+        d_persistHeuristicSum       = alloc(Sizeof.INT);
+        d_persistStep               = alloc(Sizeof.INT);
+        d_persistPiecesNow          = alloc(Sizeof.INT);
+        d_persistBestPiecesPlaced   = alloc(Sizeof.INT);
+        d_persistFloor              = alloc(Sizeof.INT);
+        d_marathonDepth             = alloc(Sizeof.INT);
     }
 
     private static CUdeviceptr alloc(long bytes) {
@@ -296,13 +339,51 @@ public class GpuEngine {
         this.lookaheadEnabled = enabled;
     }
 
+    /** GUI/config hook: enable or disable marathon-thread persistence, for A/B
+     *  comparison. Takes effect on the next runDeepDfs call. Default FALSE --
+     *  unlike the two toggles above, this one starts off, so enabling it is an
+     *  explicit opt-in to changed search behaviour. Turning it off also drops
+     *  any existing checkpoint: re-enabling later must not resume a search
+     *  captured under a startingStep floor that may since have moved. */
+    public void setSeedPersistenceEnabled(boolean enabled) {
+        this.seedPersistenceEnabled = enabled;
+        if (!enabled) {
+            this.persistSlotValid = false;
+        }
+    }
+
+    public boolean isSeedPersistenceEnabled() {
+        return seedPersistenceEnabled;
+    }
+
+    /** Forces the next launch to fresh-init instead of resuming. Called from
+     *  EternitySolver.triggerBranchScrap: a teardown changes the locked prefix
+     *  (and therefore startingStep), so any checkpoint taken under the old floor
+     *  is no longer valid to continue from. */
+    public void invalidatePersistedState() {
+        this.persistSlotValid = false;
+    }
+
     // ==========================================================
     // PHASE 2: DEEP DFS
     // ==========================================================
     public GpuResult runDeepDfs(List<int[]> seeds, int startingStep, int currentHighScore,
                                  int[] bestBoardOut) {
+        return runDeepDfs(seeds, startingStep, currentHighScore, bestBoardOut, this.stepBudget);
+    }
+
+    /**
+     * Same as {@link #runDeepDfs(List, int, int, int[])} but with an explicit per-thread
+     * step budget instead of the constructor-derived {@link #stepBudget}. Exists for
+     * {@code MarathonPersistenceCheck}, whose central assertion is that N chained resumed
+     * launches equal one uninterrupted launch of N times the budget -- which is only
+     * expressible if the budget can be varied per call. Production callers use the
+     * 4-arg form and are unaffected.
+     */
+    GpuResult runDeepDfs(List<int[]> seeds, int startingStep, int currentHighScore,
+                         int[] bestBoardOut, long stepBudgetOverride) {
         int numBoards = seeds.size();
-        if (numBoards == 0) return new GpuResult(currentHighScore, false, 0, new int[0]);
+        if (numBoards == 0) return new GpuResult(currentHighScore, false, 0, new int[0], 0);
 
         int[] flatBoards = new int[numBoards * 256];
         for (int i = 0; i < numBoards; i++)
@@ -313,6 +394,9 @@ public class GpuEngine {
         cuMemcpyHtoD(d_gpuHighScore,  Pointer.to(new int[]{currentHighScore}), Sizeof.INT);
         cuMemcpyHtoD(d_totalSteps,    Pointer.to(new long[]{0L}),       Sizeof.LONG);
         cuMemcpyHtoD(d_threadDepths,  Pointer.to(new int[numBoards]),   (long) numBoards * Sizeof.INT);
+        cuMemcpyHtoD(d_marathonDepth, Pointer.to(new int[]{0}),         Sizeof.INT);
+
+        int persistResumeFlag = (seedPersistenceEnabled && persistSlotValid) ? 1 : 0;
 
         Pointer kernelParameters = Pointer.to(
                 Pointer.to(d_partialBoards),
@@ -326,8 +410,23 @@ public class GpuEngine {
                 Pointer.to(new int[]{lockCenter ? 1 : 0}),
                 Pointer.to(d_threadDepths),
                 Pointer.to(new int[]{breakToleranceEnabled ? 1 : 0}),
-                Pointer.to(new long[]{stepBudget}),
-                Pointer.to(new int[]{lookaheadEnabled ? 1 : 0})
+                Pointer.to(new long[]{stepBudgetOverride}),
+                Pointer.to(new int[]{lookaheadEnabled ? 1 : 0}),
+                Pointer.to(new int[]{persistResumeFlag}),
+                Pointer.to(d_persistBoard),
+                Pointer.to(d_persistPieceStack),
+                Pointer.to(d_persistPlacedOrientIdx),
+                Pointer.to(d_persistBreakFallbackStack),
+                Pointer.to(d_persistBestLocalBoard),
+                Pointer.to(d_persistInventoryMask),
+                Pointer.to(d_persistBreakUsedAtStep),
+                Pointer.to(d_persistBreaksUsed),
+                Pointer.to(d_persistHeuristicSum),
+                Pointer.to(d_persistStep),
+                Pointer.to(d_persistPiecesNow),
+                Pointer.to(d_persistBestPiecesPlaced),
+                Pointer.to(d_persistFloor),
+                Pointer.to(d_marathonDepth)
         );
 
         int blockSize = 256;
@@ -339,18 +438,26 @@ public class GpuEngine {
         long[] totalSteps      = new long[1];
         int[]  solved          = new int[1];
         int[]  threadDepths    = new int[numBoards];
+        int[]  marathonDepth   = new int[1];
 
-        cuMemcpyDtoH(Pointer.to(resultHighScore), d_gpuHighScore, Sizeof.INT);
-        cuMemcpyDtoH(Pointer.to(totalSteps),      d_totalSteps,   Sizeof.LONG);
-        cuMemcpyDtoH(Pointer.to(solved),          d_solvedFlag,   Sizeof.INT);
-        cuMemcpyDtoH(Pointer.to(threadDepths),    d_threadDepths, (long) numBoards * Sizeof.INT);
+        cuMemcpyDtoH(Pointer.to(resultHighScore), d_gpuHighScore,  Sizeof.INT);
+        cuMemcpyDtoH(Pointer.to(totalSteps),      d_totalSteps,    Sizeof.LONG);
+        cuMemcpyDtoH(Pointer.to(solved),          d_solvedFlag,    Sizeof.INT);
+        cuMemcpyDtoH(Pointer.to(threadDepths),    d_threadDepths,  (long) numBoards * Sizeof.INT);
+        cuMemcpyDtoH(Pointer.to(marathonDepth),   d_marathonDepth, Sizeof.INT);
+
+        if (seedPersistenceEnabled && solved[0] == 0) {
+            persistSlotValid = true;
+        } else if (solved[0] == 1) {
+            persistSlotValid = false;
+        }
 
         if (resultHighScore[0] > currentHighScore)
             cuMemcpyDtoH(Pointer.to(bestBoardOut), d_bestBoardOut, 256L * Sizeof.INT);
         if (solved[0] == 1)
             cuMemcpyDtoH(Pointer.to(bestBoardOut), d_solution,     256L * Sizeof.INT);
 
-        return new GpuResult(resultHighScore[0], solved[0] == 1, totalSteps[0], threadDepths);
+        return new GpuResult(resultHighScore[0], solved[0] == 1, totalSteps[0], threadDepths, marathonDepth[0]);
     }
 
     // ==========================================================
@@ -359,7 +466,7 @@ public class GpuEngine {
     public GpuResult runRepairMode(List<int[]> swissCheeseBoards, int currentHighScore,
                                     int[] bestBoardOut) {
         int numBoards = swissCheeseBoards.size();
-        if (numBoards == 0) return new GpuResult(currentHighScore, false, 0, new int[0]);
+        if (numBoards == 0) return new GpuResult(currentHighScore, false, 0, new int[0], 0);
 
         int[] flatBoards = new int[numBoards * 256];
         for (int i = 0; i < numBoards; i++)
@@ -403,8 +510,12 @@ public class GpuEngine {
         if (solved[0] == 1)
             cuMemcpyDtoH(Pointer.to(bestBoardOut), d_solution,     256L * Sizeof.INT);
 
-        return new GpuResult(resultHighScore[0], solved[0] == 1, steps, new int[0]);
+        return new GpuResult(resultHighScore[0], solved[0] == 1, steps, new int[0], 0);
     }
 
-    public record GpuResult(int newHighScore, boolean solved, long stepsTaken, int[] threadDepths) {}
+    public record GpuResult(int newHighScore, boolean solved, long stepsTaken, int[] threadDepths, int marathonDepth) {
+        public GpuResult(int newHighScore, boolean solved, long stepsTaken, int[] threadDepths) {
+            this(newHighScore, solved, stepsTaken, threadDepths, 0);
+        }
+    }
 }
