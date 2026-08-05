@@ -35,6 +35,35 @@
  * (bits0-1) | breakCount (bit2, 0 or 1 -- never 2, addCandidateIfValid
  * already filters those out) | heuristicSideCount (bits3-5, 0-4). Empty-cell
  * sentinel is -1, matching SolveEternityKernel.cu's own convention.
+ *
+ * 2026-08-04: PERSISTENT PER-THREAD STATE ACROSS LAUNCHES. Originally every
+ * launch (~900ms, capped by Windows' WDDM TDR watchdog) started every thread
+ * completely fresh at step 0 with a brand-new random corner, and discarded
+ * all in-progress search state at the end regardless of how deep it had
+ * gotten -- confirmed via nodesTaken == numThreads * stepBudget in the logs,
+ * meaning essentially every thread was hitting the per-launch node budget
+ * mid-search, never genuine exhaustion (BlackwoodSolver.attemptExhausted()).
+ * That capped the deepest possible chronological-backtracking search any
+ * single thread could ever accumulate at ~100,000 nodes, no matter how long
+ * the process ran in wall-clock time -- and this algorithm's real depth
+ * comes from sustained, patient backtracking (confirmed by the CPU port,
+ * whose few threads have no such cap and reliably out-depth the GPU's much
+ * higher raw node throughput).
+ *
+ * Now each thread's full search state (board, resume cursors, cumulative
+ * break/heuristic bookkeeping, piece-used bits, its own re-randomized
+ * bottomSides table, RNG state, current depth, and its personal best-ever
+ * board this epoch) is checkpointed to global memory at the end of every
+ * launch and reloaded at the start of the next one (see d_needsInit and the
+ * d_persist* buffers) -- so a thread's search now genuinely continues across
+ * launches instead of restarting, bounded only by how many launches occur
+ * within one "epoch" (see BlackwoodGpuRunner.EPOCH_LAUNCHES), not by a single
+ * launch's node budget. A thread that reaches genuine exhaustion mid-launch
+ * now immediately reseeds a fresh attempt and keeps using its remaining node
+ * budget (via seedFreshAttempt()) rather than idling for the rest of the
+ * launch -- closing a second gap flagged in the original design as a
+ * deliberate de-risking simplification, revisited now that the kernel's
+ * correctness is already established.
  */
 
 #define NUM_TABLES 10
@@ -110,48 +139,24 @@ __device__ inline int randInt(unsigned long long *state, unsigned int bound) {
     return (int)(xorshift64star(state) % (unsigned long long)bound);
 }
 
-extern "C" __global__ void solveBlackwoodDfs(
-    const int* d_payload,             // global memory: flat candidate payload, all 10 tables concatenated
-    unsigned long long seedBase,      // host-varied every launch (nanoTime ^ launchCounter)
-    unsigned long long stepBudget,    // per-thread node cap THIS launch -- a TDR safety valve, not a checkpoint
-    int  numThreads,
-    int* d_gpuHighScore,              // atomic high-water maxSolveIndex across all threads, all launches this run
-    int* d_bestBoardOut,              // [256] packed records of the current best board
-    int* d_solution,                  // [256] set once if any thread reaches step 256 (a genuine full solve)
-    int* d_solvedFlag,
-    unsigned long long* d_totalNodes, // atomicAdd, for throughput reporting
-    int* d_threadDepths               // [numThreads] this thread's maxSolveIndex this attempt
-)
+// Seeds a brand-new attempt in place: rebuilds this thread's own bottomSides
+// (per-attempt re-randomization, matching Blackwood's own cadence for that
+// one table), then picks a uniform-random corner for step 0. Used both for a
+// thread's very first attempt (d_needsInit) and for re-seeding immediately
+// after genuine exhaustion mid-launch (solveIndex < 1) -- factored out so
+// both call sites can never drift apart.
+__device__ inline void seedFreshAttempt(
+    const int* d_payload,
+    int* board, int* pieceIndexToTryNext, int* cumulativeBreaks, int* cumulativeHeuristicSideCount,
+    unsigned int* pieceUsedBits, int* bsOffset, int* bsCount, int* bsPayload,
+    unsigned long long* rngState)
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= numThreads) return;
+    for (int i = 0; i < 256; i++) { board[i] = -1; pieceIndexToTryNext[i] = 0; }
+    for (int i = 0; i < 8; i++) pieceUsedBits[i] = 0;
 
-    int board[256];
-    int pieceIndexToTryNext[256];
-    int cumulativeBreaks[256];
-    int cumulativeHeuristicSideCount[256];
-    unsigned int pieceUsedBits[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-    int bsOffset[23];
-    int bsCount[23];
-    int bsPayload[MAX_BOTTOM_PAYLOAD];
-    int bestLocalBoard[256];
-
-    for (int i = 0; i < 256; i++) {
-        board[i] = -1;
-        pieceIndexToTryNext[i] = 0;
-    }
-
-    unsigned long long rngState = seedBase ^ ((unsigned long long)tid * 0x9E3779B97F4A7C15ULL);
-    if (rngState == 0) rngState = 0x9E3779B97F4A7C15ULL; // xorshift64* requires a non-zero state
-
-    // Per-thread, per-attempt bottomSides rebuild: mirrors
-    // BwUtil.sortAndFreezeBottomSides's formula exactly, applied to the same
-    // raw pool BwGpuTables.build() already extracted -- (heuristicCount>0
-    // ? 100 : 0) + jitter, descending, insertion sort. This table is tiny
-    // (~56 entries total across 23 buckets, real count measured in
-    // BwGpuTablesTest), so an O(n^2) insertion sort per attempt is cheap --
-    // faithful re-randomization every attempt, matching Blackwood's own
-    // per-attempt (not per-batch) rebuild of this one table.
+    // Mirrors BwUtil.sortAndFreezeBottomSides's formula exactly, applied to
+    // the same raw pool BwGpuTables.build() already extracted --
+    // (heuristicCount>0 ? 100 : 0) + jitter, descending, insertion sort.
     {
         int keys[MAX_BOTTOM_PAYLOAD]; // scratch, reused per bucket
         int fillPos = 0;
@@ -163,7 +168,7 @@ extern "C" __global__ void solveBlackwoodDfs(
             for (int i = 0; i < rawCnt; i++) {
                 int rec = c_bottomRawPayload[rawOff + i];
                 int hc = bwHeuristicCount(rec);
-                keys[i] = (hc > 0 ? 100 : 0) + randInt(&rngState, 99);
+                keys[i] = (hc > 0 ? 100 : 0) + randInt(rngState, 99);
                 bsPayload[fillPos + i] = rec;
             }
             for (int i = 1; i < rawCnt; i++) {
@@ -187,19 +192,97 @@ extern "C" __global__ void solveBlackwoodDfs(
     // exactly. corners[0] non-empty is a verified invariant (BlackwoodSolver.
     // prepare() throws if not; BwGpuTablesTest asserts the same survives CSR
     // flattening), so cnt>0 here is not runtime-checked.
-    {
-        int off = c_csrOffset[TABLE_CORNERS * KEY_SPACE + 0];
-        int cnt = c_csrCount [TABLE_CORNERS * KEY_SPACE + 0];
-        int pick = off + randInt(&rngState, (unsigned int)cnt);
-        board[0] = d_payload[pick];
-        bitSet(pieceUsedBits, bwPieceNum(board[0]) - 1);
-        cumulativeBreaks[0] = 0;
-        cumulativeHeuristicSideCount[0] = bwHeuristicCount(board[0]);
+    int off = c_csrOffset[TABLE_CORNERS * KEY_SPACE + 0];
+    int cnt = c_csrCount [TABLE_CORNERS * KEY_SPACE + 0];
+    int pick = off + randInt(rngState, (unsigned int)cnt);
+    board[0] = d_payload[pick];
+    bitSet(pieceUsedBits, bwPieceNum(board[0]) - 1);
+    cumulativeBreaks[0] = 0;
+    cumulativeHeuristicSideCount[0] = bwHeuristicCount(board[0]);
+}
+
+extern "C" __global__ void solveBlackwoodDfs(
+    const int* d_payload,             // global memory: flat candidate payload, all 10 tables concatenated
+    unsigned long long seedBase,      // host-varied every launch (nanoTime ^ launchCounter)
+    unsigned long long stepBudget,    // per-thread node cap THIS launch -- a TDR safety valve, not a search-depth cap
+    int  numThreads,
+    int* d_gpuHighScore,              // atomic high-water maxSolveIndex across all threads, all launches this run
+    int* d_bestBoardOut,              // [256] packed records of the current best board
+    int* d_solution,                  // [256] set once if any thread reaches step 256 (a genuine full solve)
+    int* d_solvedFlag,
+    unsigned long long* d_totalNodes, // atomicAdd, for throughput reporting
+    int* d_threadDepths,              // [numThreads] this thread's maxSolveIndex this attempt
+    // Persistent per-thread search state (global memory, survives across launches within one
+    // epoch -- see BlackwoodGpuRunner.EPOCH_LAUNCHES). Each buffer is indexed [tid * perThreadSize + i].
+    int* d_persistBoard,
+    int* d_persistPieceIndexToTryNext,
+    int* d_persistCumulativeBreaks,
+    int* d_persistCumulativeHeuristicSideCount,
+    unsigned int* d_persistPieceUsedBits,
+    int* d_persistBsOffset,
+    int* d_persistBsCount,
+    int* d_persistBsPayload,
+    unsigned long long* d_persistRngState,
+    int* d_persistSolveIndex,
+    int* d_persistBestBoard,
+    int* d_persistBestPiecesPlaced,
+    int* d_needsInit                  // [numThreads] 1 = start a fresh attempt this launch, 0 = resume persisted state
+)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= numThreads) return;
+
+    int board[256];
+    int pieceIndexToTryNext[256];
+    int cumulativeBreaks[256];
+    int cumulativeHeuristicSideCount[256];
+    unsigned int pieceUsedBits[8];
+    int bsOffset[23];
+    int bsCount[23];
+    int bsPayload[MAX_BOTTOM_PAYLOAD];
+    int bestLocalBoard[256];
+
+    unsigned long long rngState;
+    int solveIndex;
+    int maxSolveIndex;
+    int bestPiecesPlaced;
+
+    const int P256 = tid * 256;
+    const int P23  = tid * 23;
+    const int P96  = tid * MAX_BOTTOM_PAYLOAD;
+    const int P8   = tid * 8;
+
+    if (d_needsInit[tid]) {
+        rngState = seedBase ^ ((unsigned long long)tid * 0x9E3779B97F4A7C15ULL);
+        if (rngState == 0) rngState = 0x9E3779B97F4A7C15ULL; // xorshift64* requires a non-zero state
+
+        seedFreshAttempt(d_payload, board, pieceIndexToTryNext, cumulativeBreaks,
+                          cumulativeHeuristicSideCount, pieceUsedBits, bsOffset, bsCount, bsPayload, &rngState);
+        solveIndex = 1;
+        maxSolveIndex = 1;
+        bestPiecesPlaced = 1;
+        for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
+        d_needsInit[tid] = 0;
+    } else {
+        for (int i = 0; i < 256; i++) {
+            board[i] = d_persistBoard[P256 + i];
+            pieceIndexToTryNext[i] = d_persistPieceIndexToTryNext[P256 + i];
+            cumulativeBreaks[i] = d_persistCumulativeBreaks[P256 + i];
+            cumulativeHeuristicSideCount[i] = d_persistCumulativeHeuristicSideCount[P256 + i];
+            bestLocalBoard[i] = d_persistBestBoard[P256 + i];
+        }
+        for (int i = 0; i < 8; i++) pieceUsedBits[i] = d_persistPieceUsedBits[P8 + i];
+        for (int i = 0; i < 23; i++) {
+            bsOffset[i] = d_persistBsOffset[P23 + i];
+            bsCount[i] = d_persistBsCount[P23 + i];
+        }
+        for (int i = 0; i < MAX_BOTTOM_PAYLOAD; i++) bsPayload[i] = d_persistBsPayload[P96 + i];
+        rngState = d_persistRngState[tid];
+        solveIndex = d_persistSolveIndex[tid];
+        bestPiecesPlaced = d_persistBestPiecesPlaced[tid];
+        maxSolveIndex = bestPiecesPlaced; // these two are always kept equal -- see the update block below
     }
 
-    int solveIndex = 1;
-    int maxSolveIndex = 1;
-    int bestPiecesPlaced = 1;
     unsigned long long nodeCount = 0;
     bool completed = false;
 
@@ -215,9 +298,18 @@ extern "C" __global__ void solveBlackwoodDfs(
             if (maxSolveIndex >= 256) { completed = true; break; }
         }
 
-        if (nodeCount > stepBudget) break;          // this launch's budget hit, NOT genuine exhaustion
-        if (solveIndex < 1) break;                  // genuine exhaustion -- BlackwoodSolver.attemptExhausted() guard
-        if (*d_solvedFlag == 1) break;               // another thread already found a full solution this launch
+        if (nodeCount > stepBudget) break;           // this launch's budget hit -- checkpoint and resume next launch
+        if (*d_solvedFlag == 1) break;                // another thread already found a full solution this launch
+
+        if (solveIndex < 1) {
+            // Genuine exhaustion of this attempt (BlackwoodSolver.attemptExhausted()'s guard).
+            // Rather than idling for the rest of this launch's node budget, start a fresh
+            // attempt immediately from a new random corner and keep going.
+            seedFreshAttempt(d_payload, board, pieceIndexToTryNext, cumulativeBreaks,
+                              cumulativeHeuristicSideCount, pieceUsedBits, bsOffset, bsCount, bsPayload, &rngState);
+            solveIndex = 1;
+            continue;
+        }
 
         int boardIdx = c_stepBoardIdx[solveIndex];
         int row = boardIdx >> 4;
@@ -293,6 +385,28 @@ extern "C" __global__ void solveBlackwoodDfs(
         if (atomicExch(d_solvedFlag, 1) == 0) {
             for (int i = 0; i < 256; i++) d_solution[i] = board[i];
         }
+        // A solved board has nowhere further to search from -- start fresh next launch.
+        d_needsInit[tid] = 1;
+    } else {
+        // Checkpoint this thread's in-progress state so the next launch resumes it instead of
+        // discarding it -- the core fix this file exists for (see the 2026-08-04 header note).
+        for (int i = 0; i < 256; i++) {
+            d_persistBoard[P256 + i] = board[i];
+            d_persistPieceIndexToTryNext[P256 + i] = pieceIndexToTryNext[i];
+            d_persistCumulativeBreaks[P256 + i] = cumulativeBreaks[i];
+            d_persistCumulativeHeuristicSideCount[P256 + i] = cumulativeHeuristicSideCount[i];
+            d_persistBestBoard[P256 + i] = bestLocalBoard[i];
+        }
+        for (int i = 0; i < 8; i++) d_persistPieceUsedBits[P8 + i] = pieceUsedBits[i];
+        for (int i = 0; i < 23; i++) {
+            d_persistBsOffset[P23 + i] = bsOffset[i];
+            d_persistBsCount[P23 + i] = bsCount[i];
+        }
+        for (int i = 0; i < MAX_BOTTOM_PAYLOAD; i++) d_persistBsPayload[P96 + i] = bsPayload[i];
+        d_persistRngState[tid] = rngState;
+        d_persistSolveIndex[tid] = solveIndex;
+        d_persistBestPiecesPlaced[tid] = bestPiecesPlaced;
+        // d_needsInit[tid] is already 0 (cleared above on init, or was already 0 on a prior resume).
     }
 
     // Same lock-bit atomic best-board update pattern as solvePBP (SolveEternityKernel.cu).

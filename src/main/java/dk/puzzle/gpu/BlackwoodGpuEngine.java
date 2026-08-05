@@ -20,9 +20,15 @@ import static jcuda.driver.JCudaDriver.*;
  *
  * <p>Unlike {@link GpuEngine} (which uploads its constant tables once, in the constructor, since
  * they never change for the life of the engine), this engine's candidate tables are re-uploaded
- * via {@link #uploadTables} once per BATCH (= once per {@link #runBlackwoodDfs} call from the
- * caller's perspective) -- Blackwood's own algorithm re-randomizes the 10 batch-level tables'
- * score+jitter sort every outer {@code prepare()} pass, and this mirrors that cadence.</p>
+ * via {@link #uploadTables} once per EPOCH (many {@link #runBlackwoodDfs} calls share one table
+ * generation -- see {@code BlackwoodGpuRunner.EPOCH_LAUNCHES}), not once per launch.</p>
+ *
+ * <p>2026-08-04: each thread's in-progress search state now persists across launches in global
+ * memory (the {@code d_persist*} buffers below) instead of being discarded every launch -- a
+ * thread's search genuinely continues where it left off. {@link #resetEpoch()} forces every
+ * thread back to a fresh attempt, which must happen whenever {@link #uploadTables} rebuilds the
+ * candidate tables (a persisted resume cursor into a now-replaced table would be pointing at the
+ * wrong candidates otherwise).</p>
  */
 public class BlackwoodGpuEngine {
 
@@ -45,6 +51,22 @@ public class BlackwoodGpuEngine {
     private CUdeviceptr d_totalNodes;
     private CUdeviceptr d_threadDepths;
 
+    // Persistent per-thread search state -- survives across launches within one epoch. See the
+    // 2026-08-04 class-level note and SolveBlackwoodKernel.cu's own header comment.
+    private CUdeviceptr d_persistBoard;
+    private CUdeviceptr d_persistPieceIndexToTryNext;
+    private CUdeviceptr d_persistCumulativeBreaks;
+    private CUdeviceptr d_persistCumulativeHeuristicSideCount;
+    private CUdeviceptr d_persistPieceUsedBits;
+    private CUdeviceptr d_persistBsOffset;
+    private CUdeviceptr d_persistBsCount;
+    private CUdeviceptr d_persistBsPayload;
+    private CUdeviceptr d_persistRngState;
+    private CUdeviceptr d_persistSolveIndex;
+    private CUdeviceptr d_persistBestBoard;
+    private CUdeviceptr d_persistBestPiecesPlaced;
+    private CUdeviceptr d_needsInit;
+
     public BlackwoodGpuEngine() {
         JCuda.cudaSetDeviceFlags(JCuda.cudaDeviceScheduleBlockingSync);
         initCUDA();
@@ -65,6 +87,7 @@ public class BlackwoodGpuEngine {
         cuModuleGetFunction(blackwoodDfsFunction, cuModule, "solveBlackwoodDfs");
 
         allocatePersistentBuffers();
+        resetEpoch(); // every thread starts needing a fresh attempt on the very first launch
     }
 
     private void allocatePersistentBuffers() {
@@ -75,6 +98,35 @@ public class BlackwoodGpuEngine {
         d_solvedFlag   = alloc(Sizeof.INT);
         d_totalNodes   = alloc(Sizeof.LONG);
         d_threadDepths = alloc((long) MAX_THREADS * Sizeof.INT);
+
+        // Per-thread persistent search state, sized at MAX_THREADS regardless of the actual
+        // numThreads a given run uses -- the kernel's own tid >= numThreads guard means any
+        // unused tail entries are simply never touched, same convention as d_threadDepths above.
+        d_persistBoard                         = alloc((long) MAX_THREADS * 256 * Sizeof.INT);
+        d_persistPieceIndexToTryNext            = alloc((long) MAX_THREADS * 256 * Sizeof.INT);
+        d_persistCumulativeBreaks               = alloc((long) MAX_THREADS * 256 * Sizeof.INT);
+        d_persistCumulativeHeuristicSideCount   = alloc((long) MAX_THREADS * 256 * Sizeof.INT);
+        d_persistPieceUsedBits                  = alloc((long) MAX_THREADS * 8 * Sizeof.INT);
+        d_persistBsOffset                       = alloc((long) MAX_THREADS * 23 * Sizeof.INT);
+        d_persistBsCount                        = alloc((long) MAX_THREADS * 23 * Sizeof.INT);
+        d_persistBsPayload                      = alloc((long) MAX_THREADS * MAX_BOTTOM_PAYLOAD_SIZE * Sizeof.INT);
+        d_persistRngState                       = alloc((long) MAX_THREADS * Sizeof.LONG);
+        d_persistSolveIndex                     = alloc((long) MAX_THREADS * Sizeof.INT);
+        d_persistBestBoard                      = alloc((long) MAX_THREADS * 256 * Sizeof.INT);
+        d_persistBestPiecesPlaced               = alloc((long) MAX_THREADS * Sizeof.INT);
+        d_needsInit                             = alloc((long) MAX_THREADS * Sizeof.INT);
+    }
+
+    /**
+     * Forces every thread to start a fresh attempt on its next launch, discarding any persisted
+     * in-progress state. Must be called whenever {@link #uploadTables} replaces the candidate
+     * tables -- a persisted resume cursor into a now-stale table would otherwise resume into the
+     * wrong candidates. Also called once from the constructor for the very first launch.
+     */
+    public void resetEpoch() {
+        int[] ones = new int[MAX_THREADS];
+        Arrays.fill(ones, 1);
+        cuMemcpyHtoD(d_needsInit, Pointer.to(ones), (long) MAX_THREADS * Sizeof.INT);
     }
 
     private static CUdeviceptr alloc(long bytes) {
@@ -156,7 +208,20 @@ public class BlackwoodGpuEngine {
                 Pointer.to(d_solution),
                 Pointer.to(d_solvedFlag),
                 Pointer.to(d_totalNodes),
-                Pointer.to(d_threadDepths)
+                Pointer.to(d_threadDepths),
+                Pointer.to(d_persistBoard),
+                Pointer.to(d_persistPieceIndexToTryNext),
+                Pointer.to(d_persistCumulativeBreaks),
+                Pointer.to(d_persistCumulativeHeuristicSideCount),
+                Pointer.to(d_persistPieceUsedBits),
+                Pointer.to(d_persistBsOffset),
+                Pointer.to(d_persistBsCount),
+                Pointer.to(d_persistBsPayload),
+                Pointer.to(d_persistRngState),
+                Pointer.to(d_persistSolveIndex),
+                Pointer.to(d_persistBestBoard),
+                Pointer.to(d_persistBestPiecesPlaced),
+                Pointer.to(d_needsInit)
         );
 
         int blockSize = 256;

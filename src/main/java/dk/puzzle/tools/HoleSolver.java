@@ -506,7 +506,13 @@ public class HoleSolver {
         String rest = input.substring(idx + "puzzle=".length());
         int amp = rest.indexOf('&');
         String puzzleName = amp == -1 ? rest : rest.substring(0, amp);
-        return puzzleName.toLowerCase().contains("blackwood");
+        String lower = puzzleName.toLowerCase();
+        // "knud_hansen" (2026-08-04, cosmetic rename of BwUtil.buildBoardString's puzzle= name --
+        // see that method) is checked with its underscore so it doesn't collide with
+        // BucasExporter's unrelated bucas-standard "KnudHansen" (no underscore) puzzle name used
+        // for already-normalized completed boards. Old saved links still say "Joshua_Blackwood"
+        // and must keep working too.
+        return lower.contains("blackwood") || lower.contains("knud_hansen");
     }
 
     /** Fraction of non-empty cells that resolve to a real physical piece under this inventory -- 1.0 means every placed piece was identified. */

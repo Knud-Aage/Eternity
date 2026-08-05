@@ -216,6 +216,21 @@ class HoleSolverTest {
     }
 
     @Test
+    void testDecodeBoardAutoUsesBlackwoodMapForRenamedPuzzleName() {
+        // BwUtil.buildBoardString was renamed puzzle=Joshua_Blackwood -> puzzle=Knud_Hansen
+        // (2026-08-04, cosmetic) -- the detection hint must recognize the new name too, not just
+        // old already-saved links that still say Joshua_Blackwood.
+        String edges = singleCellBoardEdges('c', 'a', 'a', 'a');
+        PieceInventory inventory = singlePieceInventory(PieceUtils.pack(6, 0, 0, 0));
+        String link = "https://e2.bucas.name/#puzzle=Knud_Hansen&board_w=16&board_h=16&board_edges=" + edges;
+
+        int[] decoded = HoleSolver.decodeBoardAuto(link, inventory, false);
+
+        assertEquals(PieceUtils.pack(6, 0, 0, 0), decoded[0],
+                "puzzle=Knud_Hansen must select the Blackwood colour map on the first guess");
+    }
+
+    @Test
     void testDecodeBoardAutoDefaultsToBucasStandardWithoutPuzzleMarker() {
         // No puzzle= at all -- must default to (and stay with) bucas-standard
         // when that guess already resolves fine, matching every link this

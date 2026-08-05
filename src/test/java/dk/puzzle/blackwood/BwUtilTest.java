@@ -251,7 +251,7 @@ class BwUtilTest {
         assertTrue(rows[15].startsWith("  1/1 "), "bottom printed row (physical row 0) shows piece 1 rotation 1: " + rows[15]);
 
         String url = "https://" + parts[1];
-        assertTrue(url.startsWith("https://e2.bucas.name/#puzzle=Joshua_Blackwood&board_w=16&board_h=16&board_edges="));
+        assertTrue(url.startsWith("https://e2.bucas.name/#puzzle=Knud_Hansen&board_w=16&board_h=16&board_edges="));
         assertTrue(url.endsWith("&motifs_order=jblackwood"));
 
         // board_edges is 4 chars per cell, appended in the same i=15..0,j=0..15 order the grid

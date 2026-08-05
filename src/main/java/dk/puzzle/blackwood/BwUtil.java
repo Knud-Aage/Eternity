@@ -316,7 +316,11 @@ public final class BwUtil {
             }
             grid.append(row).append('\n');
         }
-        return grid + "\n" + "https://e2.bucas.name/#puzzle=Joshua_Blackwood&board_w=16&board_h=16&board_edges="
+        // Cosmetic only (2026-08-04, user request) -- the puzzle= name has no effect on the
+        // encoded board itself. HoleSolver.looksLikeBlackwoodSource() still needs to recognize
+        // this name to auto-detect raw-colour boards; keep the two in sync if this ever changes
+        // again.
+        return grid + "\n" + "https://e2.bucas.name/#puzzle=Knud_Hansen&board_w=16&board_h=16&board_edges="
                 + url + "&motifs_order=jblackwood";
     }
 
