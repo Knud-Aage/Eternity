@@ -494,8 +494,11 @@ public class BlackwoodGpuRunner {
             }
 
             // Dedupe on the completed board, not the partial one it came from -- see
-            // savedCompletedBoards for why the partial-level seed filter is insufficient.
-            if (!savedCompletedBoards.add(dk.puzzle.io.BucasExporter.exportBoard(completed))) {
+            // savedCompletedBoards for why the partial-level seed filter is insufficient. This is
+            // also the real, playable link for the COMPLETED board -- distinct from the partial-board
+            // `link` computed above, which still has holes and is only an intermediate value here.
+            String completedLink = dk.puzzle.io.BucasExporter.exportBoard(completed);
+            if (!savedCompletedBoards.add(completedLink)) {
                 logger.debug("Completed board at {} conflicts already saved, skipping duplicate", conflicts);
                 return;
             }
@@ -508,6 +511,8 @@ public class BlackwoodGpuRunner {
             HoleSolver.writeRawBoardFile(outputDir.resolve(prefix + "_RawBoard.txt").toString(), inventory, completed);
             logger.info("SAVED [{}]: {} pieces, {} conflicts -> {}",
                     depthRecord ? "depth-record" : "harvest", maxSolveIndex, conflicts, prefix);
+            // Same convention as the C# solver's Util.cs, so both logs are grep-able the same way.
+            logger.info("COMPLETED_LINK {}_RawBoard.txt: {}", prefix, completedLink);
 
             pruneAboveThreshold(outputDir, conflicts);
         } catch (Exception e) {
