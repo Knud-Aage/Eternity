@@ -83,6 +83,37 @@
 #define HEURISTIC_MAX_INDEX 160
 #define MAX_BOTTOM_PAYLOAD  96
 
+// Warp-divergence instrumentation, compiled in ONLY with -DBW_PROFILE_COUNTERS
+// (see build-blackwood-profile-ptx.ps1). Without the flag this file produces
+// exactly the PTX it always has -- same signature, same body, zero cost -- so
+// the production kernel is unaffected by anything below.
+//
+// Why this exists: the GPU port has always trailed the CPU port of the same
+// algorithm (12 depth records logged vs 1785/1066 for the two CPU variants),
+// and the usual explanation offered for GPU backtracking search is warp
+// divergence -- but nobody had ever measured it here. These counters answer
+// three specific competing hypotheses with numbers instead of plausibility:
+// (1) BW_PC_ACTIVE_LANE_SUM/WARP_ITERATIONS = mean active lanes per warp per
+//     search step. 32.0 means no divergence at all; ~3 would be the "GPU
+//     running at 10% efficiency" claim. This is the headline number.
+// (2) The RESEED_* counters test the narrower theory that one lane hitting
+//     genuine exhaustion stalls 31 masked-off warp-mates through
+//     seedFreshAttempt()'s insertion sort.
+// (3) The CNT_* counters record the candidate-list length distribution --
+//     a precondition for whether uniform-trip-count restructuring could ever
+//     pay off (it only helps if lengths cluster tightly).
+#define BW_PC_WARP_ITERATIONS       0
+#define BW_PC_ACTIVE_LANE_SUM       1
+#define BW_PC_GENERAL_WARP_SAMPLES  2
+#define BW_PC_GENERAL_MIXED         3
+#define BW_PC_RESEED_WARP_SAMPLES   4
+#define BW_PC_RESEED_MIXED          5
+#define BW_PC_RESEED_EVENTS         6
+#define BW_PC_CNT_SUM               7
+#define BW_PC_CNT_SAMPLES           8
+#define BW_PC_CNT_MAX               9
+#define BW_PC_SLOTS                16
+
 __constant__ int c_csrOffset[NUM_TABLES * KEY_SPACE];        // 21,160 B
 __constant__ int c_csrCount [NUM_TABLES * KEY_SPACE];        // 21,160 B
 __constant__ int c_bottomRawOffset[23];                      // 92 B
@@ -145,9 +176,12 @@ __device__ inline int randInt(unsigned long long *state, unsigned int bound) {
 // thread's very first attempt (d_needsInit) and for re-seeding immediately
 // after genuine exhaustion mid-launch (solveIndex < 1) -- factored out so
 // both call sites can never drift apart.
-__device__ inline void seedFreshAttempt(
-    const int* d_payload,
-    int* board, int* pieceIndexToTryNext, int* cumulativeBreaks, int* cumulativeHeuristicSideCount,
+// Clears the board and rebuilds this thread's own randomized bottomSides table -- the part
+// every new attempt needs regardless of whether step 0 onward then comes from a random corner
+// (seedFreshAttempt) or from a saved board (seedFromSavedBoard). Split out so those two entry
+// points can never drift apart on the setup they share.
+__device__ inline void resetAndBuildBottomSides(
+    int* board, int* pieceIndexToTryNext,
     unsigned int* pieceUsedBits, int* bsOffset, int* bsCount, int* bsPayload,
     unsigned long long* rngState)
 {
@@ -186,6 +220,16 @@ __device__ inline void seedFreshAttempt(
             fillPos += rawCnt;
         }
     }
+}
+
+__device__ inline void seedFreshAttempt(
+    const int* d_payload,
+    int* board, int* pieceIndexToTryNext, int* cumulativeBreaks, int* cumulativeHeuristicSideCount,
+    unsigned int* pieceUsedBits, int* bsOffset, int* bsCount, int* bsPayload,
+    unsigned long long* rngState)
+{
+    resetAndBuildBottomSides(board, pieceIndexToTryNext, pieceUsedBits,
+                             bsOffset, bsCount, bsPayload, rngState);
 
     // Step 0: uniform-random pick from corners at key 0 (left=0,bottom=0) --
     // mirrors BlackwoodSolver.solvePuzzle()'s uniform pick from corners[0]
@@ -199,6 +243,142 @@ __device__ inline void seedFreshAttempt(
     bitSet(pieceUsedBits, bwPieceNum(board[0]) - 1);
     cumulativeBreaks[0] = 0;
     cumulativeHeuristicSideCount[0] = bwHeuristicCount(board[0]);
+}
+
+/**
+ * Resolves the candidate list for one step exactly the way the main search loop does, so a
+ * replayed board is indexed against the identical tables the search will use when it later
+ * backtracks through those same steps. Any divergence here would corrupt the resume cursors.
+ */
+__device__ inline void candidateListForStep(
+    int solveIndex, int boardIdx, const int* board,
+    const int* bsOffset, const int* bsCount,
+    int* outOff, int* outCnt, bool* outUseBottom)
+{
+    int row = boardIdx >> 4;
+    int col = boardIdx & 15;
+    *outUseBottom = false;
+    if (row == 0) {
+        int westRight = bwRightSide(board[boardIdx - 1]);
+        if (col < 15) {
+            *outUseBottom = true;
+            *outOff = bsOffset[westRight];
+            *outCnt = bsCount[westRight];
+        } else {
+            int key = westRight * 23;
+            *outOff = c_csrOffset[TABLE_CORNERS * KEY_SPACE + key];
+            *outCnt = c_csrCount [TABLE_CORNERS * KEY_SPACE + key];
+        }
+    } else {
+        int leftSide = (col == 0) ? 0 : bwRightSide(board[boardIdx - 1]);
+        int southTop = bwTopSide(board[boardIdx - 16]);
+        int key = leftSide * 23 + southTop;
+        int tableId = c_stepToTableId[solveIndex];
+        *outOff = c_csrOffset[tableId * KEY_SPACE + key];
+        *outCnt = c_csrCount [tableId * KEY_SPACE + key];
+    }
+}
+
+/**
+ * Rebuilds a full in-progress search state from a previously saved board, so the GPU can start
+ * at the frontier instead of re-deriving 250 pieces of already-known progress from scratch.
+ *
+ * <p>Crucially this does NOT just copy pieces onto the board -- a copied board would have no
+ * resume cursors, so the first backtrack would re-try pieces the original search already
+ * rejected. Instead each seeded piece is LOCATED in its step's candidate list, and
+ * pieceIndexToTryNext[step] is set past it. Backtracking into seeded territory then correctly
+ * continues with the alternatives that were never tried, which is what makes the seeded state a
+ * genuine resumption rather than a snapshot.</p>
+ *
+ * <p>Candidate ORDER is re-randomized per epoch while candidate MEMBERSHIP is not, so searching
+ * for the piece (rather than trusting a stored index) is what makes a seed survive table
+ * rebuilds.</p>
+ *
+ * @param seed  per-step (pieceNumber << 2) | rotation, or negative where the seed ends
+ * @return number of pieces successfully placed. A short return is safe, not an error: the thread
+ *         simply continues from the shallower point it did manage to reach.
+ */
+__device__ inline int seedFromSavedBoard(
+    const int* d_payload, const int* seed, int targetDepth,
+    int* board, int* pieceIndexToTryNext, int* cumulativeBreaks, int* cumulativeHeuristicSideCount,
+    unsigned int* pieceUsedBits, int* bsOffset, int* bsCount, int* bsPayload,
+    unsigned long long* rngState)
+{
+    resetAndBuildBottomSides(board, pieceIndexToTryNext, pieceUsedBits,
+                             bsOffset, bsCount, bsPayload, rngState);
+
+    for (int step = 0; step <= targetDepth; step++) {
+        int want = seed[step];
+        if (want < 0) return step;                 // seed ran out -- continue from here
+        int wantPiece = want >> 2;
+        int wantRot = want & 3;
+        if (wantPiece < 1 || wantPiece > 256) return step;
+        if (bitGet(pieceUsedBits, wantPiece - 1)) return step;  // duplicate piece: refuse to corrupt state
+
+        int boardIdx = c_stepBoardIdx[step];
+        int off, cnt;
+        bool useBottom = false;
+        if (step == 0) {
+            off = c_csrOffset[TABLE_CORNERS * KEY_SPACE + 0];
+            cnt = c_csrCount [TABLE_CORNERS * KEY_SPACE + 0];
+        } else {
+            candidateListForStep(step, boardIdx, board, bsOffset, bsCount, &off, &cnt, &useBottom);
+        }
+
+        int foundAt = -1;
+        int foundRec = 0;
+        for (int i = 0; i < cnt; i++) {
+            int rec = useBottom ? bsPayload[off + i] : d_payload[off + i];
+            if (bwPieceNum(rec) == wantPiece && bwRotation(rec) == wantRot) { foundAt = i; foundRec = rec; break; }
+        }
+        if (foundAt < 0) return step;              // not reachable through these tables -- stop cleanly
+
+        board[boardIdx] = foundRec;
+        bitSet(pieceUsedBits, wantPiece - 1);
+        int prevBreaks = (step == 0) ? 0 : cumulativeBreaks[step - 1];
+        int prevHeur   = (step == 0) ? 0 : cumulativeHeuristicSideCount[step - 1];
+        cumulativeBreaks[step] = prevBreaks + ((step == 0) ? 0 : bwBreakCount(foundRec));
+        cumulativeHeuristicSideCount[step] = prevHeur + bwHeuristicCount(foundRec);
+        pieceIndexToTryNext[step] = foundAt + 1;   // resume AFTER the seeded piece
+    }
+    return targetDepth + 1;
+}
+
+/**
+ * Starts a new attempt, from a saved board when seeding is on and from a random corner otherwise.
+ * Both the very first attempt and every mid-launch restart after genuine exhaustion go through
+ * here, so a seeded run never silently degrades into unseeded work once threads exhaust.
+ *
+ * @return the new solveIndex (== number of pieces now placed)
+ */
+__device__ inline int startNewAttempt(
+    const int* d_payload, const int* d_seedBoards, const int* d_seedDepths,
+    int numSeeds, int maxRetreat, unsigned int* d_seedShortfalls,
+    int* board, int* pieceIndexToTryNext, int* cumulativeBreaks, int* cumulativeHeuristicSideCount,
+    unsigned int* pieceUsedBits, int* bsOffset, int* bsCount, int* bsPayload,
+    unsigned long long* rngState)
+{
+    if (numSeeds > 0) {
+        // Spread threads over both WHICH saved board they resume and HOW FAR BACK they pull from
+        // its tip. Without that spread, threads sharing a seed would walk identical candidate
+        // orders and duplicate each other's work -- candidate order is global, only bottomSides
+        // is per-thread.
+        int seedIdx = randInt(rngState, (unsigned int)numSeeds);
+        int fullDepth = d_seedDepths[seedIdx];
+        int target = fullDepth - 1 - ((maxRetreat > 0) ? randInt(rngState, (unsigned int)(maxRetreat + 1)) : 0);
+        if (target < 0) target = 0;
+
+        int placed = seedFromSavedBoard(d_payload, d_seedBoards + (size_t)seedIdx * 256, target,
+                                        board, pieceIndexToTryNext, cumulativeBreaks,
+                                        cumulativeHeuristicSideCount, pieceUsedBits,
+                                        bsOffset, bsCount, bsPayload, rngState);
+        if (placed < target + 1) atomicAdd(d_seedShortfalls, 1u);
+        if (placed >= 1) return placed;
+        // Could not place even step 0 -- fall through rather than run on a broken state.
+    }
+    seedFreshAttempt(d_payload, board, pieceIndexToTryNext, cumulativeBreaks,
+                      cumulativeHeuristicSideCount, pieceUsedBits, bsOffset, bsCount, bsPayload, rngState);
+    return 1;
 }
 
 extern "C" __global__ void solveBlackwoodDfs(
@@ -226,11 +406,25 @@ extern "C" __global__ void solveBlackwoodDfs(
     int* d_persistSolveIndex,
     int* d_persistBestBoard,
     int* d_persistBestPiecesPlaced,
-    int* d_needsInit                  // [numThreads] 1 = start a fresh attempt this launch, 0 = resume persisted state
+    int* d_needsInit,                 // [numThreads] 1 = start a fresh attempt this launch, 0 = resume persisted state
+    // Seeding from previously saved deep boards. numSeeds == 0 reproduces the original
+    // always-start-from-a-random-corner behaviour exactly, so this is opt-in.
+    const int* d_seedBoards,          // [numSeeds * 256], per step: (pieceNumber << 2) | rotation, negative = end
+    const int* d_seedDepths,          // [numSeeds] how many steps each seed actually covers
+    int numSeeds,
+    int maxRetreat,                   // per-thread random pull-back from the seed's full depth (diversity)
+    unsigned int* d_seedShortfalls    // counts threads whose replay stopped short of its target
+#ifdef BW_PROFILE_COUNTERS
+    , unsigned long long* d_profileCounters   // [BW_PC_SLOTS], appended LAST so every existing parameter keeps its index
+#endif
 )
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numThreads) return;
+
+#ifdef BW_PROFILE_COUNTERS
+    const int bwLane = threadIdx.x & 31;
+#endif
 
     int board[256];
     int pieceIndexToTryNext[256];
@@ -256,11 +450,12 @@ extern "C" __global__ void solveBlackwoodDfs(
         rngState = seedBase ^ ((unsigned long long)tid * 0x9E3779B97F4A7C15ULL);
         if (rngState == 0) rngState = 0x9E3779B97F4A7C15ULL; // xorshift64* requires a non-zero state
 
-        seedFreshAttempt(d_payload, board, pieceIndexToTryNext, cumulativeBreaks,
-                          cumulativeHeuristicSideCount, pieceUsedBits, bsOffset, bsCount, bsPayload, &rngState);
-        solveIndex = 1;
-        maxSolveIndex = 1;
-        bestPiecesPlaced = 1;
+        solveIndex = startNewAttempt(d_payload, d_seedBoards, d_seedDepths, numSeeds, maxRetreat,
+                                     d_seedShortfalls, board, pieceIndexToTryNext, cumulativeBreaks,
+                                     cumulativeHeuristicSideCount, pieceUsedBits,
+                                     bsOffset, bsCount, bsPayload, &rngState);
+        maxSolveIndex = solveIndex;
+        bestPiecesPlaced = solveIndex;
         for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
         d_needsInit[tid] = 0;
     } else {
@@ -289,6 +484,24 @@ extern "C" __global__ void solveBlackwoodDfs(
     while (true) {
         nodeCount++;
 
+#ifdef BW_PROFILE_COUNTERS
+        // THE headline measurement: how many lanes of this warp are still
+        // executing this search step at all. Threads leave this loop at
+        // wildly different times (budget exhaustion, a peer solving, genuine
+        // completion), so __activemask() -- NOT a hardcoded 0xFFFFFFFF mask --
+        // is the only safe way to ballot here; naming already-exited threads
+        // in a sync mask is undefined behaviour and can hang the kernel.
+        // Only the lowest active lane does the atomicAdd, so this costs 1/32
+        // of the atomic traffic a naive per-lane version would.
+        {
+            unsigned act = __activemask();
+            if (bwLane == __ffs(act) - 1) {
+                atomicAdd(&d_profileCounters[BW_PC_WARP_ITERATIONS], 1ULL);
+                atomicAdd(&d_profileCounters[BW_PC_ACTIVE_LANE_SUM], (unsigned long long)__popc(act));
+            }
+        }
+#endif
+
         if (solveIndex > maxSolveIndex) {
             maxSolveIndex = solveIndex;
             if (maxSolveIndex > bestPiecesPlaced) {
@@ -301,50 +514,71 @@ extern "C" __global__ void solveBlackwoodDfs(
         if (nodeCount > stepBudget) break;           // this launch's budget hit -- checkpoint and resume next launch
         if (*d_solvedFlag == 1) break;                // another thread already found a full solution this launch
 
+#ifdef BW_PROFILE_COUNTERS
+        // Tests the narrow hypothesis: when only SOME lanes of a warp need a
+        // reseed, the others sit masked off while seedFreshAttempt()'s nested
+        // loop + 23-bucket insertion sort runs serially. A high MIXED/SAMPLES
+        // ratio here is what would justify building a warp-cooperative reseed.
+        {
+            unsigned act = __activemask();
+            unsigned needs = __ballot_sync(act, solveIndex < 1);
+            if (bwLane == __ffs(act) - 1) {
+                int yes = __popc(needs), tot = __popc(act);
+                atomicAdd(&d_profileCounters[BW_PC_RESEED_WARP_SAMPLES], 1ULL);
+                atomicAdd(&d_profileCounters[BW_PC_RESEED_EVENTS], (unsigned long long)yes);
+                if (yes != 0 && yes != tot) atomicAdd(&d_profileCounters[BW_PC_RESEED_MIXED], 1ULL);
+            }
+        }
+#endif
+
         if (solveIndex < 1) {
             // Genuine exhaustion of this attempt (BlackwoodSolver.attemptExhausted()'s guard).
-            // Rather than idling for the rest of this launch's node budget, start a fresh
-            // attempt immediately from a new random corner and keep going.
-            seedFreshAttempt(d_payload, board, pieceIndexToTryNext, cumulativeBreaks,
-                              cumulativeHeuristicSideCount, pieceUsedBits, bsOffset, bsCount, bsPayload, &rngState);
-            solveIndex = 1;
+            // Rather than idling for the rest of this launch's node budget, start another attempt
+            // immediately and keep going -- from a saved board if seeding is on (a thread that
+            // exhausts a deep subtree should return to the frontier, not to a random corner).
+            solveIndex = startNewAttempt(d_payload, d_seedBoards, d_seedDepths, numSeeds, maxRetreat,
+                                         d_seedShortfalls, board, pieceIndexToTryNext, cumulativeBreaks,
+                                         cumulativeHeuristicSideCount, pieceUsedBits,
+                                         bsOffset, bsCount, bsPayload, &rngState);
             continue;
         }
 
         int boardIdx = c_stepBoardIdx[solveIndex];
-        int row = boardIdx >> 4;
-        int col = boardIdx & 15;
 
         if (board[boardIdx] != -1) {
             bitClear(pieceUsedBits, bwPieceNum(board[boardIdx]) - 1);
             board[boardIdx] = -1;
         }
 
+        // Shared with seedFromSavedBoard() so a replayed board's resume cursors are guaranteed to
+        // index the same lists this loop will scan. (row=0,col=0) is exclusively step 0, which the
+        // solveIndex<1 guard above keeps this loop from ever revisiting, so the helper's row-0
+        // branch always has a valid already-placed west neighbour.
         int off, cnt;
         bool useBottom = false;
-        if (row == 0) {
-            // (row=0,col=0) is exclusively step 0, seeded above -- the solveIndex<1
-            // guard prevents the general loop from ever revisiting it, so col>=1
-            // here is guaranteed and board[boardIdx-1] is always a valid, already-
-            // placed west neighbour.
-            int westRight = bwRightSide(board[boardIdx - 1]);
-            if (col < 15) {
-                useBottom = true;
-                off = bsOffset[westRight];
-                cnt = bsCount[westRight];
-            } else {
-                int key = westRight * 23;
-                off = c_csrOffset[TABLE_CORNERS * KEY_SPACE + key];
-                cnt = c_csrCount [TABLE_CORNERS * KEY_SPACE + key];
+        candidateListForStep(solveIndex, boardIdx, board, bsOffset, bsCount, &off, &cnt, &useBottom);
+
+#ifdef BW_PROFILE_COUNTERS
+        // General mixed-warp fraction (do the lanes of this warp even agree on
+        // whether there's a candidate list to scan?), plus the candidate-list
+        // length distribution. __reduce_add_sync/__reduce_max_sync are single
+        // instructions on sm_80+ (we target sm_120), so the true per-lane sum
+        // and max cost about the same as sampling one lane would.
+        {
+            unsigned act = __activemask();
+            unsigned hasCandidates = __ballot_sync(act, cnt > 0);
+            unsigned sumCnt = __reduce_add_sync(act, (unsigned)cnt);
+            unsigned maxCnt = __reduce_max_sync(act, (unsigned)cnt);
+            if (bwLane == __ffs(act) - 1) {
+                int yes = __popc(hasCandidates), tot = __popc(act);
+                atomicAdd(&d_profileCounters[BW_PC_GENERAL_WARP_SAMPLES], 1ULL);
+                if (yes != 0 && yes != tot) atomicAdd(&d_profileCounters[BW_PC_GENERAL_MIXED], 1ULL);
+                atomicAdd(&d_profileCounters[BW_PC_CNT_SUM], (unsigned long long)sumCnt);
+                atomicAdd(&d_profileCounters[BW_PC_CNT_SAMPLES], (unsigned long long)tot);
+                atomicMax(&d_profileCounters[BW_PC_CNT_MAX], (unsigned long long)maxCnt);
             }
-        } else {
-            int leftSide = (col == 0) ? 0 : bwRightSide(board[boardIdx - 1]);
-            int southTop = bwTopSide(board[boardIdx - 16]);
-            int key = leftSide * 23 + southTop;
-            int tableId = c_stepToTableId[solveIndex];
-            off = c_csrOffset[tableId * KEY_SPACE + key];
-            cnt = c_csrCount [tableId * KEY_SPACE + key];
         }
+#endif
 
         bool foundPiece = false;
         if (cnt > 0) {

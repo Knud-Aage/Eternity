@@ -7,6 +7,7 @@ import jcuda.driver.*;
 import jcuda.runtime.JCuda;
 
 import java.util.Arrays;
+import java.util.List;
 
 import static jcuda.driver.JCudaDriver.*;
 
@@ -39,8 +40,22 @@ public class BlackwoodGpuEngine {
     private static final int MAX_PAYLOAD_SIZE = 50_000;
     private static final int MAX_BOTTOM_PAYLOAD_SIZE = 96;
 
+    private static final String PRODUCTION_PTX = "SolveBlackwoodKernel.ptx";
+    private static final String PROFILE_PTX = "SolveBlackwoodKernel.profile.ptx";
+    /** Must match BW_PC_SLOTS in SolveBlackwoodKernel.cu. */
+    public static final int PROFILE_COUNTER_SLOTS = 16;
+
     private CUfunction blackwoodDfsFunction;
     private CUmodule cuModule;
+
+    /**
+     * When true this engine loaded {@link #PROFILE_PTX} (built by
+     * build-blackwood-profile-ptx.ps1 with -DBW_PROFILE_COUNTERS), whose kernel takes one extra
+     * trailing parameter for the warp-divergence counters. The production PTX has no such
+     * parameter, so this flag decides the argument list -- passing the wrong one is an immediate
+     * launch failure, not a silent misread.
+     */
+    private final boolean profilingEnabled;
 
     // Persistent device buffers -- allocated once, reused every launch.
     private CUdeviceptr d_payload;
@@ -66,8 +81,29 @@ public class BlackwoodGpuEngine {
     private CUdeviceptr d_persistBestBoard;
     private CUdeviceptr d_persistBestPiecesPlaced;
     private CUdeviceptr d_needsInit;
+    private CUdeviceptr d_profileCounters; // null unless profilingEnabled
+
+    // Seeding from previously saved deep boards. numSeeds == 0 keeps the original
+    // always-start-from-a-random-corner behaviour, so seeding is strictly opt-in.
+    private static final int MAX_SEEDS = 512;
+    private CUdeviceptr d_seedBoards;
+    private CUdeviceptr d_seedDepths;
+    private CUdeviceptr d_seedShortfalls;
+    private volatile int numSeeds = 0;
+    private volatile int maxRetreat = 0;
 
     public BlackwoodGpuEngine() {
+        this(false);
+    }
+
+    /**
+     * @param profilingEnabled load the instrumented kernel instead of the production one. Only
+     *                         {@code BlackwoodGpuProfileHarness} should pass true -- the counters
+     *                         add atomic traffic, so a profiling run's throughput is not
+     *                         representative of production throughput.
+     */
+    public BlackwoodGpuEngine(boolean profilingEnabled) {
+        this.profilingEnabled = profilingEnabled;
         JCuda.cudaSetDeviceFlags(JCuda.cudaDeviceScheduleBlockingSync);
         initCUDA();
     }
@@ -81,7 +117,7 @@ public class BlackwoodGpuEngine {
         cuCtxCreate(cuContext, 0, device);
 
         cuModule = new CUmodule();
-        cuModuleLoad(cuModule, "SolveBlackwoodKernel.ptx");
+        cuModuleLoad(cuModule, profilingEnabled ? PROFILE_PTX : PRODUCTION_PTX);
 
         blackwoodDfsFunction = new CUfunction();
         cuModuleGetFunction(blackwoodDfsFunction, cuModule, "solveBlackwoodDfs");
@@ -115,6 +151,91 @@ public class BlackwoodGpuEngine {
         d_persistBestBoard                      = alloc((long) MAX_THREADS * 256 * Sizeof.INT);
         d_persistBestPiecesPlaced               = alloc((long) MAX_THREADS * Sizeof.INT);
         d_needsInit                             = alloc((long) MAX_THREADS * Sizeof.INT);
+
+        d_seedBoards     = alloc((long) MAX_SEEDS * 256 * Sizeof.INT);
+        d_seedDepths     = alloc((long) MAX_SEEDS * Sizeof.INT);
+        d_seedShortfalls = alloc(Sizeof.INT);
+
+        if (profilingEnabled) {
+            d_profileCounters = alloc((long) PROFILE_COUNTER_SLOTS * Sizeof.LONG);
+            resetProfileCounters();
+        }
+    }
+
+    /**
+     * Supplies saved boards for threads to resume from instead of starting at a random corner.
+     * Each seed is a 256-entry step-ordered array of {@code (pieceNumber << 2) | rotation}, negative
+     * where the seed ends -- see {@code BwSeedLoader}.
+     *
+     * <p>{@code maxRetreat} is how far back from a seed's own tip a thread may randomly pull before
+     * resuming. Some spread is essential: candidate ORDER is global, so threads resuming the same
+     * board at the same depth would walk identical orders and duplicate each other's work.</p>
+     *
+     * <p>Takes effect on the next fresh attempt (i.e. after {@link #resetEpoch()}); already-running
+     * threads keep the search state they have.</p>
+     *
+     * @param seeds      step-ordered encodings, each 256 long
+     * @param depths     how many steps each seed covers
+     * @param maxRetreat 0 means every thread resumes at its seed's full depth
+     */
+    public void uploadSeeds(List<int[]> seeds, int[] depths, int maxRetreat) {
+        if (seeds.size() != depths.length) {
+            throw new IllegalArgumentException("seeds/depths length mismatch: " + seeds.size() + " vs " + depths.length);
+        }
+        if (seeds.size() > MAX_SEEDS) {
+            throw new IllegalArgumentException("seed count " + seeds.size() + " exceeds MAX_SEEDS=" + MAX_SEEDS);
+        }
+        if (maxRetreat < 0) throw new IllegalArgumentException("maxRetreat must be >= 0, was " + maxRetreat);
+
+        if (seeds.isEmpty()) {
+            this.numSeeds = 0;
+            return;
+        }
+
+        int[] flat = new int[seeds.size() * 256];
+        for (int s = 0; s < seeds.size(); s++) {
+            int[] seed = seeds.get(s);
+            if (seed.length != 256) {
+                throw new IllegalArgumentException("seed " + s + " has length " + seed.length + ", expected 256");
+            }
+            System.arraycopy(seed, 0, flat, s * 256, 256);
+        }
+        cuMemcpyHtoD(d_seedBoards, Pointer.to(flat), (long) flat.length * Sizeof.INT);
+        cuMemcpyHtoD(d_seedDepths, Pointer.to(depths), (long) depths.length * Sizeof.INT);
+        this.numSeeds = seeds.size();
+        this.maxRetreat = maxRetreat;
+    }
+
+    /** Number of seeds currently in use; 0 means threads start from a random corner. */
+    public int getNumSeeds() {
+        return numSeeds;
+    }
+
+    /**
+     * Threads whose seed replay stopped short of its target depth since the last reset. Persistently
+     * high means the seed boards are not reachable through the current candidate tables -- e.g.
+     * boards produced under a different piece numbering or a different break schedule.
+     */
+    public int readAndResetSeedShortfalls() {
+        int[] out = new int[1];
+        cuMemcpyDtoH(Pointer.to(out), d_seedShortfalls, Sizeof.INT);
+        cuMemcpyHtoD(d_seedShortfalls, Pointer.to(new int[]{0}), Sizeof.INT);
+        return out[0];
+    }
+
+    /** Zeroes the divergence counters. Call before a measured batch of launches. */
+    public void resetProfileCounters() {
+        if (!profilingEnabled) throw new IllegalStateException("engine was not built with profiling enabled");
+        cuMemcpyHtoD(d_profileCounters, Pointer.to(new long[PROFILE_COUNTER_SLOTS]),
+                (long) PROFILE_COUNTER_SLOTS * Sizeof.LONG);
+    }
+
+    /** Reads the raw counter slots; indices match the BW_PC_* defines in SolveBlackwoodKernel.cu. */
+    public long[] readProfileCounters() {
+        if (!profilingEnabled) throw new IllegalStateException("engine was not built with profiling enabled");
+        long[] out = new long[PROFILE_COUNTER_SLOTS];
+        cuMemcpyDtoH(Pointer.to(out), d_profileCounters, (long) PROFILE_COUNTER_SLOTS * Sizeof.LONG);
+        return out;
     }
 
     /**
@@ -198,7 +319,7 @@ public class BlackwoodGpuEngine {
         cuMemcpyHtoD(d_totalNodes, Pointer.to(new long[]{0L}), Sizeof.LONG);
         cuMemcpyHtoD(d_threadDepths, Pointer.to(new int[numThreads]), (long) numThreads * Sizeof.INT);
 
-        Pointer kernelParameters = Pointer.to(
+        Pointer[] params = {
                 Pointer.to(d_payload),
                 Pointer.to(new long[]{seedBase}),
                 Pointer.to(new long[]{stepBudget}),
@@ -221,8 +342,19 @@ public class BlackwoodGpuEngine {
                 Pointer.to(d_persistSolveIndex),
                 Pointer.to(d_persistBestBoard),
                 Pointer.to(d_persistBestPiecesPlaced),
-                Pointer.to(d_needsInit)
-        );
+                Pointer.to(d_needsInit),
+                Pointer.to(d_seedBoards),
+                Pointer.to(d_seedDepths),
+                Pointer.to(new int[]{numSeeds}),
+                Pointer.to(new int[]{maxRetreat}),
+                Pointer.to(d_seedShortfalls)
+        };
+        if (profilingEnabled) {
+            // The instrumented kernel's one extra trailing parameter -- see the .cu's #ifdef block.
+            params = Arrays.copyOf(params, params.length + 1);
+            params[params.length - 1] = Pointer.to(d_profileCounters);
+        }
+        Pointer kernelParameters = Pointer.to(params);
 
         int blockSize = 256;
         int gridSize = (int) Math.ceil((double) numThreads / blockSize);
