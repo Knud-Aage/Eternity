@@ -168,6 +168,24 @@ public class BlackwoodGpuRunner {
     /** Boards already scored, so a stable population isn't re-scored every harvest. */
     private static final Set<String> harvestedFingerprints = new HashSet<>();
     private static final int HARVEST_MEMORY_CAP = 200_000;
+    /**
+     * Fingerprints of the current seed boards. A thread that replayed its seed and never improved
+     * on it still holds that seed as its best board, so without this the harvest re-saves the seed
+     * pool back into the output folder under new names -- inflating it with copies of boards that
+     * already exist and diluting the next epoch's seed pool with duplicates.
+     */
+    private static final Set<String> seedFingerprints = new HashSet<>();
+    /**
+     * Completed boards already saved, keyed by their bucas encoding.
+     *
+     * <p>Filtering seed replays by PARTIAL board is not enough: two different partial boards in the
+     * same lineage can complete to the identical 256-piece board, so a "novel" partial can still
+     * produce a duplicate result. Observed directly -- a harvested board that passed the seed
+     * filter completed to a board byte-identical to the existing 12-conflict record. Deduping on
+     * the COMPLETED board is the level that actually matters, since that is what gets saved,
+     * compared, and reported.</p>
+     */
+    private static final Set<String> savedCompletedBoards = new HashSet<>();
 
     public static void main(String[] args) throws Exception {
         // NOT Documents: it is OneDrive-redirected by Known Folder Move on this machine, so every
@@ -284,9 +302,12 @@ public class BlackwoodGpuRunner {
 
             List<int[]> encoded = new ArrayList<>(seeds.size());
             int[] depths = new int[seeds.size()];
+            seedFingerprints.clear();
             for (int i = 0; i < seeds.size(); i++) {
-                encoded.add(seeds.get(i).stepEncoded());
-                depths[i] = seeds.get(i).depth();
+                BwSeedLoader.Seed seed = seeds.get(i);
+                encoded.add(seed.stepEncoded());
+                depths[i] = seed.depth();
+                seedFingerprints.add(fingerprintOfSeed(seed, stepBoardIdx));
             }
             engine.uploadSeeds(encoded, depths, MAX_RETREAT, FRESH_FRACTION_PERCENT);
 
@@ -384,18 +405,41 @@ public class BlackwoodGpuRunner {
             if (harvestedFingerprints.size() > HARVEST_MEMORY_CAP) harvestedFingerprints.clear();
 
             int scored = 0;
+            int skippedSeeds = 0;
             for (int idx = 0; idx < numThreads && scored < HARVEST_SAMPLE; idx++) {
                 int t = order[idx];
                 if (threadDepths[t] < HARVEST_MIN_DEPTH) break; // sorted, so nothing deeper remains
                 int[] board = java.util.Arrays.copyOfRange(allBoards, t * 256, (t + 1) * 256);
-                if (!harvestedFingerprints.add(fingerprintOf(board))) continue;
+                String fp = fingerprintOf(board);
+                if (seedFingerprints.contains(fp)) { skippedSeeds++; continue; } // a seed handed back, not a find
+                if (!harvestedFingerprints.add(fp)) continue;
                 evaluateAndMaybeSave(board, threadDepths[t], pieceByNumber, inventory, outputDir, false);
                 scored++;
             }
-            if (scored > 0) logger.info("Harvest: scored {} new population board(s)", scored);
+            if (scored > 0 || skippedSeeds > 0) {
+                logger.info("Harvest: scored {} new board(s), skipped {} seed replay(s)", scored, skippedSeeds);
+            }
         } catch (Exception e) {
             logger.warn("Population harvest failed", e);
         }
+    }
+
+    /**
+     * Same cell-wise identity as {@link #fingerprintOf}, but built from a seed's step-ordered
+     * encoding. The two must agree exactly or seed replays won't be recognised in the harvest.
+     */
+    private static String fingerprintOfSeed(BwSeedLoader.Seed seed, int[] stepBoardIdx) {
+        int[] byBoardIdx = new int[256];
+        java.util.Arrays.fill(byBoardIdx, -1);
+        for (int step = 0; step < seed.depth(); step++) {
+            byBoardIdx[stepBoardIdx[step]] = seed.stepEncoded()[step];
+        }
+        StringBuilder sb = new StringBuilder(1024);
+        for (int i = 0; i < 256; i++) {
+            if (byBoardIdx[i] < 0) { sb.append("..,"); continue; }
+            sb.append(byBoardIdx[i] >> 2).append(':').append(byBoardIdx[i] & 3).append(',');
+        }
+        return sb.toString();
     }
 
     /** Cell-wise (pieceNumber,rotation) identity, for skipping boards already scored. */
@@ -446,6 +490,13 @@ public class BlackwoodGpuRunner {
                     logger.debug("Harvested board at {} pieces completed to {} conflicts (best-on-disk {}), not saving",
                             maxSolveIndex, conflicts, bestOnDisk);
                 }
+                return;
+            }
+
+            // Dedupe on the completed board, not the partial one it came from -- see
+            // savedCompletedBoards for why the partial-level seed filter is insufficient.
+            if (!savedCompletedBoards.add(dk.puzzle.io.BucasExporter.exportBoard(completed))) {
+                logger.debug("Completed board at {} conflicts already saved, skipping duplicate", conflicts);
                 return;
             }
 
