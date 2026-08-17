@@ -1,6 +1,10 @@
 package dk.puzzle.blackwood;
 
+import dk.puzzle.core.Eternity;
 import dk.puzzle.gpu.BlackwoodGpuEngine;
+import dk.puzzle.model.PieceInventory;
+import dk.puzzle.tools.HoleSolver;
+import dk.puzzle.util.PieceUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -8,8 +12,14 @@ import java.io.IOException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Standalone launcher for the GPU-native Blackwood kernel ({@code SolveBlackwoodKernel.cu}),
@@ -78,6 +88,13 @@ public class BlackwoodGpuRunner {
     // also lets threads explore alternatives that branch off well below the tip.
     private static final int MAX_RETREAT = 40;
 
+    // Trials for HoleSolver's completion pass when scoring a candidate save (see trySave).
+    // Matches the C# solver's own established choice (Util.cs's TryLabelWithConflictCount) rather
+    // than HoleSolver's much heavier 200,000-trial CLI default -- this runs in the same thread as
+    // the main launch loop, only on the (already rare) event of a new per-run depth record, but
+    // still shouldn't stall launches for longer than that cadence tolerates.
+    private static final int SCORING_TRIALS = 5000;
+
     public static void main(String[] args) throws Exception {
         // NOT Documents: it is OneDrive-redirected by Known Folder Move on this machine, so every
         // board saved here was being uploaded to the cloud. UserProfile is never redirected.
@@ -95,6 +112,9 @@ public class BlackwoodGpuRunner {
         for (BwPiece p : pieces) {
             pieceByNumber[p.pieceNumber()] = p;
         }
+        // Separate from BwGpuTables' Blackwood-raw packing -- this is HoleSolver's own
+        // PieceInventory, needed to run its actual completion logic in-process below.
+        PieceInventory inventory = new PieceInventory(Eternity.loadPieces());
 
         BlackwoodGpuEngine engine = new BlackwoodGpuEngine();
         long launchCounter = 0;
@@ -142,7 +162,7 @@ public class BlackwoodGpuRunner {
             if (result.newHighScore() > currentHighScore || result.solved()) {
                 currentHighScore = result.newHighScore();
                 if (currentHighScore >= SAVE_THRESHOLD) {
-                    trySave(bestBoardOut, currentHighScore, pieceByNumber, outputDir);
+                    trySave(bestBoardOut, currentHighScore, pieceByNumber, inventory, outputDir);
                 }
             }
 
@@ -207,27 +227,30 @@ public class BlackwoodGpuRunner {
         return String.format("min=%d mean=%.1f max=%d", min, (double) sum / depths.length, max);
     }
 
+    private static final Pattern LABELLED_NAME = Pattern.compile("^Errors(\\d+)_Base(\\d+)_.*_RawBoard\\.txt$");
+    private static final Pattern LEGACY_NAME = Pattern.compile("^(\\d+)_[0-9a-fA-F-]+_\\d+\\.txt$");
+
     /**
      * Recovers {@code currentHighScore} from the boards already saved on disk from a previous run,
-     * instead of always starting bookkeeping at 0 -- every save already contains its full board
-     * (via {@link #trySave}), so the deepest board ever found is already durably persisted the
-     * moment it's saved; this just stops the runner from acting like a restart erased that
-     * progress. Filenames are {@code "<pieces>_<uuid>_<timestamp>.txt"}, the same convention the
-     * conflict-tracking scripts already parse.
+     * instead of always starting bookkeeping at 0. Reads both this method's own {@code ErrorsN_BaseD_...}
+     * naming (introduced 2026-08-17 alongside conflict-based save gating -- see {@link #trySave}) and
+     * the older {@code "<pieces>_<uuid>_<timestamp>.txt"} files it superseded, so a restart doesn't
+     * regress to comparing against 0 just because every save on disk predates the rename.
      */
-    private static int scanExistingHighScore(Path outputDir) {
+    static int scanExistingHighScore(Path outputDir) {
         if (!Files.isDirectory(outputDir)) return 0;
         int max = 0;
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(outputDir)) {
             for (Path p : stream) {
                 String name = p.getFileName().toString();
-                int underscore = name.indexOf('_');
-                if (underscore <= 0) continue;
-                try {
-                    int pieces = Integer.parseInt(name.substring(0, underscore));
-                    if (pieces > max) max = pieces;
-                } catch (NumberFormatException ignored) {
-                    // not one of our save files -- skip
+                Matcher labelled = LABELLED_NAME.matcher(name);
+                if (labelled.matches()) {
+                    max = Math.max(max, Integer.parseInt(labelled.group(2)));
+                    continue;
+                }
+                Matcher legacy = LEGACY_NAME.matcher(name);
+                if (legacy.matches()) {
+                    max = Math.max(max, Integer.parseInt(legacy.group(1)));
                 }
             }
         } catch (IOException e) {
@@ -237,16 +260,118 @@ public class BlackwoodGpuRunner {
         return max;
     }
 
-    private static void trySave(int[] board, int maxSolveIndex, BwPiece[] pieceByNumber, Path outputDir) {
-        BwRotatedPiece[] rotatedBoard = new BwRotatedPiece[256];
-        for (int i = 0; i < 256; i++) {
-            rotatedBoard[i] = (board[i] == -1) ? BwRotatedPiece.EMPTY : BwGpuTables.unpack(board[i]);
-        }
+    /**
+     * Depth was the save criterion until 2026-08-17, and it is a poor proxy for what's actually
+     * wanted: a board's REAL quality only shows up after hole-filling, and depth doesn't predict it
+     * monotonically. Confirmed directly -- a GPU-found 252-piece board completed to 13 conflicts,
+     * while a 251-piece board already in the CPU archive completes to 12. Maximizing depth was
+     * actively steering the GPU away from its own better boards.
+     *
+     * <p>Runs the same completion HoleSolver already does for the C# and CPU-port pipelines, in
+     * process (no subprocess -- this IS Java, {@link HoleSolver}'s methods are directly callable),
+     * and only saves if the REAL conflict count is competitive. This also incidentally fixes a
+     * second problem: a board that's just a replayed, unmodified seed cannot beat the board it came
+     * from, so it no longer gets saved back under a new name.</p>
+     */
+    static void trySave(int[] board, int maxSolveIndex, BwPiece[] pieceByNumber,
+                                PieceInventory inventory, Path outputDir) {
         try {
-            Path saved = BwUtil.saveBoard(rotatedBoard, maxSolveIndex, pieceByNumber, outputDir);
-            logger.info("Saved new personal best: maxSolveIndex={} -> {}", maxSolveIndex, saved);
+            BwRotatedPiece[] rotatedBoard = new BwRotatedPiece[256];
+            for (int i = 0; i < 256; i++) {
+                rotatedBoard[i] = (board[i] == -1) ? BwRotatedPiece.EMPTY : BwGpuTables.unpack(board[i]);
+            }
+            // buildBoardString's own trailing line is the bucas link -- reused as-is rather than
+            // re-deriving it, so this goes through the exact same URL encoding trySave always has.
+            String boardString = BwUtil.buildBoardString(rotatedBoard, pieceByNumber);
+            String link = boardString.substring(boardString.lastIndexOf("https://"));
+
+            // decodeBoardAuto translates Blackwood's raw 0-22 colour numbering (what the GPU board
+            // and this link use) into HoleSolver's own packed representation -- required before any
+            // of HoleSolver's board logic (PieceUtils.getNorth/East/South/West etc.) is meaningful.
+            int[] decoded = HoleSolver.decodeBoardAuto(link, inventory, false);
+            HoleSolver.ConflictSolveResult result = HoleSolver.solveConflicts(decoded, inventory, false, SCORING_TRIALS);
+            int[] completed = result.bestBoard();
+            int conflicts = countConflicts(completed);
+
+            int bestOnDisk = bestConflictsOnDisk(outputDir);
+            int keepThreshold = (bestOnDisk == Integer.MAX_VALUE) ? Integer.MAX_VALUE : bestOnDisk + 1;
+            if (conflicts > keepThreshold) {
+                logger.info("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving",
+                        maxSolveIndex, conflicts, bestOnDisk);
+                return;
+            }
+
+            Files.createDirectories(outputDir);
+            String timeId = LocalTime.now().format(DateTimeFormatter.ofPattern("HHmmss_SSS"));
+            String prefix = "Errors" + conflicts + "_Base" + maxSolveIndex + "_" + timeId;
+            HoleSolver.writePhysicalLayoutFile(outputDir.resolve(prefix + "_physical_layout.txt").toString(),
+                    inventory, result.finalBoard(), result.repairedBoard());
+            HoleSolver.writeRawBoardFile(outputDir.resolve(prefix + "_RawBoard.txt").toString(), inventory, completed);
+            logger.info("Saved: maxSolveIndex={} conflicts={} -> {}", maxSolveIndex, conflicts, prefix);
+
+            pruneAboveThreshold(outputDir, conflicts);
         } catch (Exception e) {
-            logger.error("Failed to save board at solveIndex={}", maxSolveIndex, e);
+            logger.error("Failed to evaluate/save board at solveIndex={}", maxSolveIndex, e);
+        }
+    }
+
+    /** Edge conflicts among ALL 256 cells of a fully hole-filled board (empty cells are not expected here). */
+    static int countConflicts(int[] board) {
+        int conflicts = 0;
+        for (int r = 0; r < 16; r++) {
+            for (int c = 0; c < 16; c++) {
+                int i = r * 16 + c;
+                if (c < 15 && PieceUtils.getEast(board[i]) != PieceUtils.getWest(board[i + 1])) conflicts++;
+                if (r < 15 && PieceUtils.getSouth(board[i]) != PieceUtils.getNorth(board[i + 16])) conflicts++;
+            }
+        }
+        return conflicts;
+    }
+
+    static int bestConflictsOnDisk(Path outputDir) {
+        int best = Integer.MAX_VALUE;
+        if (!Files.isDirectory(outputDir)) return best;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(outputDir, "Errors*_RawBoard.txt")) {
+            for (Path p : stream) {
+                Matcher m = LABELLED_NAME.matcher(p.getFileName().toString());
+                if (m.matches()) best = Math.min(best, Integer.parseInt(m.group(1)));
+            }
+        } catch (IOException e) {
+            logger.warn("Could not scan {} for best-on-disk conflicts", outputDir, e);
+        }
+        return best;
+    }
+
+    /**
+     * Keeps only boards within 1 conflict of the best currently on disk, deleting the rest --
+     * mirrors the policy already validated for the C# solver's output folder (same rationale: this
+     * folder would otherwise accumulate every depth record ever reached, most of them superseded
+     * within minutes). Recomputed from disk every time rather than tracked as running state, so a
+     * later improvement retroactively cleans out now-stale near-misses too, not just future ones.
+     */
+    static void pruneAboveThreshold(Path outputDir, int justSavedConflicts) {
+        try {
+            Map<Path, Integer> conflictsByFile = new HashMap<>();
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(outputDir, "Errors*_RawBoard.txt")) {
+                for (Path p : stream) {
+                    Matcher m = LABELLED_NAME.matcher(p.getFileName().toString());
+                    if (m.matches()) conflictsByFile.put(p, Integer.parseInt(m.group(1)));
+                }
+            }
+            if (conflictsByFile.isEmpty()) return;
+
+            int keepThreshold = conflictsByFile.values().stream().mapToInt(Integer::intValue).min().orElse(0) + 1;
+            for (Map.Entry<Path, Integer> entry : conflictsByFile.entrySet()) {
+                if (entry.getValue() <= keepThreshold) continue;
+                Path rawBoardFile = entry.getKey();
+                String name = rawBoardFile.getFileName().toString();
+                Path layoutFile = rawBoardFile.resolveSibling(
+                        name.substring(0, name.length() - "_RawBoard.txt".length()) + "_physical_layout.txt");
+                Files.deleteIfExists(rawBoardFile);
+                Files.deleteIfExists(layoutFile);
+            }
+        } catch (IOException e) {
+            logger.warn("Retention cleanup failed in {}", outputDir, e);
         }
     }
 }
