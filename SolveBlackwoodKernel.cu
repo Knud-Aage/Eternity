@@ -349,16 +349,26 @@ __device__ inline int seedFromSavedBoard(
  * Both the very first attempt and every mid-launch restart after genuine exhaustion go through
  * here, so a seeded run never silently degrades into unseeded work once threads exhaust.
  *
+ * <p>freshFractionPercent reserves that percentage of attempts for genuine from-scratch search
+ * even while seeds are loaded. Without it, EVERY attempt resumes one of a small set of already
+ * heavily-searched archive boards and only re-explores its last maxRetreat steps -- so the whole
+ * population stays confined to variations of boards that are plausibly already exhausted, with no
+ * mechanism to look anywhere else. The fresh fraction is what feeds genuinely new boards back into
+ * the seed pool at the next epoch, making the run a real explore/exploit loop rather than a closed
+ * one. Affordable because unseeded search is not weak in absolute terms: after the epoch-reset fix
+ * it reaches ~249 pieces in 90 seconds on its own.</p>
+ *
  * @return the new solveIndex (== number of pieces now placed)
  */
 __device__ inline int startNewAttempt(
     const int* d_payload, const int* d_seedBoards, const int* d_seedDepths,
-    int numSeeds, int maxRetreat, unsigned int* d_seedShortfalls,
+    int numSeeds, int maxRetreat, int freshFractionPercent, unsigned int* d_seedShortfalls,
     int* board, int* pieceIndexToTryNext, int* cumulativeBreaks, int* cumulativeHeuristicSideCount,
     unsigned int* pieceUsedBits, int* bsOffset, int* bsCount, int* bsPayload,
     unsigned long long* rngState)
 {
-    if (numSeeds > 0) {
+    bool goFresh = (freshFractionPercent > 0) && (randInt(rngState, 100) < (unsigned int)freshFractionPercent);
+    if (numSeeds > 0 && !goFresh) {
         // Spread threads over both WHICH saved board they resume and HOW FAR BACK they pull from
         // its tip. Without that spread, threads sharing a seed would walk identical candidate
         // orders and duplicate each other's work -- candidate order is global, only bottomSides
@@ -413,6 +423,7 @@ extern "C" __global__ void solveBlackwoodDfs(
     const int* d_seedDepths,          // [numSeeds] how many steps each seed actually covers
     int numSeeds,
     int maxRetreat,                   // per-thread random pull-back from the seed's full depth (diversity)
+    int freshFractionPercent,         // % of attempts that ignore seeds entirely and start from a random corner
     unsigned int* d_seedShortfalls    // counts threads whose replay stopped short of its target
 #ifdef BW_PROFILE_COUNTERS
     , unsigned long long* d_profileCounters   // [BW_PC_SLOTS], appended LAST so every existing parameter keeps its index
@@ -450,7 +461,7 @@ extern "C" __global__ void solveBlackwoodDfs(
         rngState = seedBase ^ ((unsigned long long)tid * 0x9E3779B97F4A7C15ULL);
         if (rngState == 0) rngState = 0x9E3779B97F4A7C15ULL; // xorshift64* requires a non-zero state
 
-        solveIndex = startNewAttempt(d_payload, d_seedBoards, d_seedDepths, numSeeds, maxRetreat,
+        solveIndex = startNewAttempt(d_payload, d_seedBoards, d_seedDepths, numSeeds, maxRetreat, freshFractionPercent,
                                      d_seedShortfalls, board, pieceIndexToTryNext, cumulativeBreaks,
                                      cumulativeHeuristicSideCount, pieceUsedBits,
                                      bsOffset, bsCount, bsPayload, &rngState);
@@ -536,7 +547,7 @@ extern "C" __global__ void solveBlackwoodDfs(
             // Rather than idling for the rest of this launch's node budget, start another attempt
             // immediately and keep going -- from a saved board if seeding is on (a thread that
             // exhausts a deep subtree should return to the frontier, not to a random corner).
-            solveIndex = startNewAttempt(d_payload, d_seedBoards, d_seedDepths, numSeeds, maxRetreat,
+            solveIndex = startNewAttempt(d_payload, d_seedBoards, d_seedDepths, numSeeds, maxRetreat, freshFractionPercent,
                                          d_seedShortfalls, board, pieceIndexToTryNext, cumulativeBreaks,
                                          cumulativeHeuristicSideCount, pieceUsedBits,
                                          bsOffset, bsCount, bsPayload, &rngState);

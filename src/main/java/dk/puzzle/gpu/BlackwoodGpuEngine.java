@@ -91,6 +91,7 @@ public class BlackwoodGpuEngine {
     private CUdeviceptr d_seedShortfalls;
     private volatile int numSeeds = 0;
     private volatile int maxRetreat = 0;
+    private volatile int freshFractionPercent = 0;
 
     public BlackwoodGpuEngine() {
         this(false);
@@ -177,8 +178,12 @@ public class BlackwoodGpuEngine {
      * @param seeds      step-ordered encodings, each 256 long
      * @param depths     how many steps each seed covers
      * @param maxRetreat 0 means every thread resumes at its seed's full depth
+     * @param freshFractionPercent percentage of attempts that ignore the seeds entirely and start
+     *                             from a random corner. 0 means every attempt seeds, which confines
+     *                             the whole population to variations of the supplied boards -- with
+     *                             no way for a genuinely new board to enter the pool.
      */
-    public void uploadSeeds(List<int[]> seeds, int[] depths, int maxRetreat) {
+    public void uploadSeeds(List<int[]> seeds, int[] depths, int maxRetreat, int freshFractionPercent) {
         if (seeds.size() != depths.length) {
             throw new IllegalArgumentException("seeds/depths length mismatch: " + seeds.size() + " vs " + depths.length);
         }
@@ -186,6 +191,9 @@ public class BlackwoodGpuEngine {
             throw new IllegalArgumentException("seed count " + seeds.size() + " exceeds MAX_SEEDS=" + MAX_SEEDS);
         }
         if (maxRetreat < 0) throw new IllegalArgumentException("maxRetreat must be >= 0, was " + maxRetreat);
+        if (freshFractionPercent < 0 || freshFractionPercent > 100) {
+            throw new IllegalArgumentException("freshFractionPercent must be 0..100, was " + freshFractionPercent);
+        }
 
         if (seeds.isEmpty()) {
             this.numSeeds = 0;
@@ -204,6 +212,7 @@ public class BlackwoodGpuEngine {
         cuMemcpyHtoD(d_seedDepths, Pointer.to(depths), (long) depths.length * Sizeof.INT);
         this.numSeeds = seeds.size();
         this.maxRetreat = maxRetreat;
+        this.freshFractionPercent = freshFractionPercent;
     }
 
     /** Number of seeds currently in use; 0 means threads start from a random corner. */
@@ -347,6 +356,7 @@ public class BlackwoodGpuEngine {
                 Pointer.to(d_seedDepths),
                 Pointer.to(new int[]{numSeeds}),
                 Pointer.to(new int[]{maxRetreat}),
+                Pointer.to(new int[]{freshFractionPercent}),
                 Pointer.to(d_seedShortfalls)
         };
         if (profilingEnabled) {

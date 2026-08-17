@@ -87,6 +87,22 @@ public class BlackwoodGpuRunner {
     // diversity (candidate order is global, so same board + same depth = duplicated work), and it
     // also lets threads explore alternatives that branch off well below the tip.
     private static final int MAX_RETREAT = 40;
+    // Percentage of attempts that ignore the seeds and start from a random corner.
+    //
+    // Without this the run is a CLOSED loop: every thread resumes one of a small set of archive
+    // boards and only re-explores its last MAX_RETREAT steps, so the population never leaves the
+    // neighbourhood of boards the C# solver already searched for days -- plausibly exhausted
+    // ground, with no mechanism to look elsewhere. The fresh fraction is what lets a genuinely new
+    // board be found, scored, saved, and then picked up as a seed at the next epoch, closing the
+    // explore/exploit loop instead of just exploiting.
+    //
+    // 25% is a starting point, not a measured optimum: unseeded search reaches ~249 pieces on its
+    // own in 90 seconds (BlackwoodGpuEpochResetHarness), so the exploration arm is not weak, but
+    // whether a quarter is the right split has NOT been A/B'd yet.
+    private static final int FRESH_FRACTION_PERCENT = 25;
+    // Candidates to score before ranking. Scoring runs HoleSolver once per board (~1s each), and
+    // only at an epoch boundary, so this bounds a startup cost rather than a per-launch one.
+    private static final int MAX_SEED_CANDIDATES = 120;
 
     // Trials for HoleSolver's completion pass when scoring a candidate save (see trySave).
     // Matches the C# solver's own established choice (Util.cs's TryLabelWithConflictCount) rather
@@ -131,7 +147,7 @@ public class BlackwoodGpuRunner {
                 engine.uploadTables(tables);
                 // Reload seeds at each epoch: boards saved since the last boundary (including this
                 // run's own new records) become seeds for the next one, so the frontier advances.
-                loadSeeds(engine, tables.stepBoardIdx(), outputDir);
+                loadSeeds(engine, tables.stepBoardIdx(), outputDir, inventory);
                 engine.resetEpoch();
                 logger.info("Epoch boundary at launch {}: tables refreshed, {} seed board(s) active, all thread state reset",
                         launchCounter, engine.getNumSeeds());
@@ -180,7 +196,8 @@ public class BlackwoodGpuRunner {
      * format (see {@link BwSeedLoader}). Failure here is never fatal: with no seeds the kernel just
      * starts from random corners as it always did.
      */
-    private static void loadSeeds(BlackwoodGpuEngine engine, int[] stepBoardIdx, Path gpuOutputDir) {
+    private static void loadSeeds(BlackwoodGpuEngine engine, int[] stepBoardIdx, Path gpuOutputDir,
+                                  PieceInventory inventory) {
         try {
             Path home = Path.of(System.getProperty("user.home"));
             List<Path> dirs = List.of(
@@ -189,12 +206,17 @@ public class BlackwoodGpuRunner {
                     home.resolve("EternitySolutions_drop239"),     // C# solver, tuned break schedule
                     home.resolve("Documents").resolve("EternitySolutions_JavaPort"));
 
-            List<BwSeedLoader.Seed> seeds = BwSeedLoader.load(dirs, MIN_SEED_DEPTH, MAX_SEEDS, stepBoardIdx);
-            if (seeds.isEmpty()) {
+            List<BwSeedLoader.Seed> candidates =
+                    BwSeedLoader.load(dirs, MIN_SEED_DEPTH, MAX_SEED_CANDIDATES, stepBoardIdx);
+            if (candidates.isEmpty()) {
                 logger.info("No seed boards at depth >= {} found; threads will start from random corners", MIN_SEED_DEPTH);
-                engine.uploadSeeds(List.of(), new int[0], 0);
+                engine.uploadSeeds(List.of(), new int[0], 0, 0);
                 return;
             }
+
+            // Rank by what each board actually completes to, not by depth -- see BwSeedLoader.
+            List<BwSeedLoader.Seed> seeds =
+                    BwSeedLoader.rankByConflicts(candidates, inventory, SCORING_TRIALS, MAX_SEEDS);
 
             List<int[]> encoded = new ArrayList<>(seeds.size());
             int[] depths = new int[seeds.size()];
@@ -202,13 +224,18 @@ public class BlackwoodGpuRunner {
                 encoded.add(seeds.get(i).stepEncoded());
                 depths[i] = seeds.get(i).depth();
             }
-            engine.uploadSeeds(encoded, depths, MAX_RETREAT);
-            logger.info("Seeding from {} board(s), depths {}..{}, maxRetreat={}",
-                    seeds.size(), depths[depths.length - 1], depths[0], MAX_RETREAT);
+            engine.uploadSeeds(encoded, depths, MAX_RETREAT, FRESH_FRACTION_PERCENT);
+
+            BwSeedLoader.Seed best = seeds.get(0);
+            BwSeedLoader.Seed worst = seeds.get(seeds.size() - 1);
+            logger.info("Seeding from {} of {} candidate board(s): conflicts {}..{}, best is {} pieces -> {} conflicts ({}). maxRetreat={}, freshFraction={}%",
+                    seeds.size(), candidates.size(), best.conflicts(), worst.conflicts(),
+                    best.depth(), best.conflicts(), best.source().getFileName(),
+                    MAX_RETREAT, FRESH_FRACTION_PERCENT);
         } catch (Exception e) {
             logger.warn("Seed loading failed; continuing without seeds", e);
             try {
-                engine.uploadSeeds(List.of(), new int[0], 0);
+                engine.uploadSeeds(List.of(), new int[0], 0, 0);
             } catch (Exception ignored) {
                 // already unseeded
             }

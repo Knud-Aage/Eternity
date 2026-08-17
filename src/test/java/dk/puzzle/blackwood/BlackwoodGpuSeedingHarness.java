@@ -81,7 +81,7 @@ public class BlackwoodGpuSeedingHarness {
         // --- Stage 2: replay fidelity on the GPU ---
         BlackwoodGpuEngine engine = new BlackwoodGpuEngine();
         engine.uploadTables(tables);
-        engine.uploadSeeds(encoded, depths, 0); // retreat 0: every thread must reach its seed's full depth
+        engine.uploadSeeds(encoded, depths, 0, 0); // retreat 0 AND no fresh fraction: every thread must reach its seed's full depth
         engine.resetEpoch();
 
         System.out.println();
@@ -109,9 +109,9 @@ public class BlackwoodGpuSeedingHarness {
                                List<int[]> encoded, int[] depths, boolean seeded) {
         engine.uploadTables(tables);
         if (seeded) {
-            engine.uploadSeeds(encoded, depths, MAX_RETREAT);
+            engine.uploadSeeds(encoded, depths, MAX_RETREAT, 0); // 0% fresh: isolates the seeding effect being A/B'd here
         } else {
-            engine.uploadSeeds(List.of(), new int[0], 0);
+            engine.uploadSeeds(List.of(), new int[0], 0, 0);
         }
         engine.resetEpoch();
 

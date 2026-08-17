@@ -1,5 +1,8 @@
 package dk.puzzle.blackwood;
 
+import dk.puzzle.model.PieceInventory;
+import dk.puzzle.tools.HoleSolver;
+import dk.puzzle.util.PieceUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -35,8 +38,17 @@ public final class BwSeedLoader {
     private BwSeedLoader() {
     }
 
-    /** One saved board, already converted to the kernel's step-ordered encoding. */
-    public record Seed(Path source, int depth, int[] stepEncoded) {
+    /**
+     * One saved board, already converted to the kernel's step-ordered encoding.
+     *
+     * @param link      the board's own bucas link, straight from the file's last line -- kept so
+     *                  {@link #rankByConflicts} can score the board without reconstructing it
+     * @param conflicts what this board completes to via HoleSolver, or -1 if not scored yet.
+     *                  Depth alone is a poor quality signal (a 252-piece board has been measured
+     *                  completing to 13 conflicts while a 251-piece one completes to 12), so an
+     *                  unscored pool would resume from mediocre boards as readily as good ones.
+     */
+    public record Seed(Path source, int depth, int[] stepEncoded, String link, int conflicts) {
     }
 
     /**
@@ -133,6 +145,58 @@ public final class BwSeedLoader {
             depth++;
         }
         if (depth == 0) return null;
-        return new Seed(file, depth, stepEncoded);
+
+        String link = null;
+        for (int i = lines.size() - 1; i >= 16; i--) {
+            int idx = lines.get(i).indexOf("https://");
+            if (idx >= 0) { link = lines.get(i).substring(idx).trim(); break; }
+        }
+        return new Seed(file, depth, stepEncoded, link, -1);
+    }
+
+    /**
+     * Scores each seed by what it actually completes to and returns the best {@code maxSeeds},
+     * lowest conflicts first. This is what stops the pool from treating a 247-piece board that
+     * completes to 21 conflicts as equal to a 250-piece board that completes to 13.
+     *
+     * <p>Runs HoleSolver's real completion once per candidate, which costs roughly a second each --
+     * affordable because the pool is only rebuilt at an epoch boundary, and epochs are now long.
+     * Seeds whose link is missing or unreadable keep conflicts = -1 and sort last rather than being
+     * dropped, so a parse quirk degrades the ranking instead of silently shrinking the pool.</p>
+     */
+    public static List<Seed> rankByConflicts(List<Seed> seeds, PieceInventory inventory,
+                                             int trials, int maxSeeds) {
+        List<Seed> scored = new ArrayList<>(seeds.size());
+        for (Seed seed : seeds) {
+            int conflicts = Integer.MAX_VALUE;
+            if (seed.link() != null) {
+                try {
+                    int[] decoded = HoleSolver.decodeBoardAuto(seed.link(), inventory, false);
+                    HoleSolver.ConflictSolveResult result =
+                            HoleSolver.solveConflicts(decoded, inventory, false, trials);
+                    conflicts = countConflicts(result.bestBoard());
+                } catch (Exception e) {
+                    logger.debug("Could not score seed {}", seed.source().getFileName(), e);
+                }
+            }
+            scored.add(new Seed(seed.source(), seed.depth(), seed.stepEncoded(), seed.link(), conflicts));
+        }
+
+        // Fewest conflicts wins; deeper breaks ties, since a deeper board of equal completed
+        // quality leaves the GPU less ground to re-cover.
+        scored.sort(Comparator.comparingInt(Seed::conflicts).thenComparing(Comparator.comparingInt(Seed::depth).reversed()));
+        return scored.size() > maxSeeds ? new ArrayList<>(scored.subList(0, maxSeeds)) : scored;
+    }
+
+    private static int countConflicts(int[] board) {
+        int conflicts = 0;
+        for (int r = 0; r < 16; r++) {
+            for (int c = 0; c < 16; c++) {
+                int i = r * 16 + c;
+                if (c < 15 && PieceUtils.getEast(board[i]) != PieceUtils.getWest(board[i + 1])) conflicts++;
+                if (r < 15 && PieceUtils.getSouth(board[i]) != PieceUtils.getNorth(board[i + 16])) conflicts++;
+            }
+        }
+        return conflicts;
     }
 }
