@@ -42,6 +42,13 @@ public class BlackwoodGpuRunner {
     private static final Logger logger = LogManager.getLogger(BlackwoodGpuRunner.class);
 
     private static final String PIECES_PATH = "src/main/resources/JBlackwood_Pieces.txt";
+    // Dedicated, small, append-only file for just the completed links -- eternity_solver.log is
+    // shared with every other Java tool in this project and fills up fast (7.9MB / 36k GPU lines
+    // alone as of 2026-08-17), so finding a link there means scrolling past everything else. A
+    // direct file write here rather than a second log4j appender, since log4j2.xml is shared config
+    // touching every logger in the project -- not worth the risk of misrouting something else's
+    // output to get one dedicated file right.
+    private static final Path COMPLETED_LINKS_LOG = Path.of("logs", "gpu_completed_links.log");
     private static final int SAVE_THRESHOLD = 190; // matches BlackwoodSolver's own default, for direct comparability
     // 2026-08-17, measured (BlackwoodGpuBreadthDepthHarness): 16384 was chosen for SM saturation --
     // i.e. for raw node throughput -- but throughput turns out to be nearly irrelevant to the metric
@@ -513,6 +520,7 @@ public class BlackwoodGpuRunner {
                     depthRecord ? "depth-record" : "harvest", maxSolveIndex, conflicts, prefix);
             // Same convention as the C# solver's Util.cs, so both logs are grep-able the same way.
             logger.info("COMPLETED_LINK {}_RawBoard.txt: {}", prefix, completedLink);
+            appendCompletedLink(prefix, conflicts, maxSolveIndex, completedLink);
 
             pruneAboveThreshold(outputDir, conflicts);
         } catch (Exception e) {
@@ -523,6 +531,25 @@ public class BlackwoodGpuRunner {
     /** Kept package-private for the harnesses; the runner itself only needs the two wrappers above. */
     static int harvestedCount() {
         return harvestedFingerprints.size();
+    }
+
+    /**
+     * Appends one line to {@link #COMPLETED_LINKS_LOG}. Best-effort: a failure here must never
+     * affect the save that already succeeded, matching this file's established pattern for every
+     * other piece of ancillary bookkeeping (retention, dedup).
+     */
+    private static void appendCompletedLink(String prefix, int conflicts, int depth, String link) {
+        try {
+            Files.createDirectories(COMPLETED_LINKS_LOG.getParent());
+            String timestamp = java.time.LocalDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            String line = String.format("%s  conflicts=%-3d depth=%-3d  %s_RawBoard.txt  %s%n",
+                    timestamp, conflicts, depth, prefix, link);
+            Files.writeString(COMPLETED_LINKS_LOG, line, java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            logger.warn("Could not append to {}", COMPLETED_LINKS_LOG, e);
+        }
     }
 
     /** Edge conflicts among ALL 256 cells of a fully hole-filled board (empty cells are not expected here). */
