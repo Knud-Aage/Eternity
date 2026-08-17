@@ -86,7 +86,26 @@ public class BlackwoodGpuRunner {
     // How far back from a seed's tip a thread may randomly pull before resuming. Needed for
     // diversity (candidate order is global, so same board + same depth = duplicated work), and it
     // also lets threads explore alternatives that branch off well below the tip.
-    private static final int MAX_RETREAT = 40;
+    //
+    // 2026-08-17, A/B'd (BlackwoodGpuRetreatHarness), 4 arms x 180s, fresh held at 10% so retreat
+    // is the only variable. Novel = distinct population best-boards that are not a seed handed back
+    // unchanged; conflicts are real HoleSolver completions over a sample of those:
+    //     retreat   novel   bestConf   medConf
+    //          40      98         13        14
+    //         100     122         12        14
+    //         180     215         13        19
+    //         250     301         13        20
+    // 100 dominates the old 40 on all three: more novel boards, better best, equal median. And it
+    // was the only arm to produce a NOVEL 12-conflict board -- one not in the seed pool -- i.e. the
+    // first genuinely independent record-tying board the GPU has produced rather than replayed.
+    //
+    // Past ~100 the same trade the fresh fraction showed reappears: much more diversity, much worse
+    // quality. Unfreezing most of the board discards the very structure that made the seed good.
+    //
+    // Caveat: bestConf is a min over a 25-board sample, so the single 12 could be luck. What
+    // actually justifies 100 over 40 is that its MEDIAN is equal-best while producing 24% more
+    // novel boards -- the tail result is a bonus, not the argument.
+    private static final int MAX_RETREAT = 100;
     // Percentage of attempts that ignore the seeds and start from a random corner.
     //
     // Without this the run is a CLOSED loop: every thread resumes one of a small set of archive
