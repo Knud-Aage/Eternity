@@ -448,9 +448,22 @@ namespace EternityII_Solver
                 // old 14,850-file EternitySolutions pile on 2026-08-16, just automatic
                 // here so that pile never reaccumulates. Scoped strictly to saveDir and
                 // to the exact naming this method itself produces.
+                //
+                // 2026-08-18: before pruning, rename the baseboard (still in Blackwood's own
+                // numbering, unlike the RawBoard/physical_layout files -- see PruneAboveThreshold)
+                // onto the same Errors{N}_Base{D}_{time} prefix as its siblings, as "..._baseboard.txt".
+                // This is what makes it a directly usable GPU seed: BwSeedLoader needs a file in
+                // Blackwood's own piece numbering, and until now the only one that existed got
+                // deleted the moment it stopped being needed here.
                 if (labelledName != null)
                 {
-                    PruneAboveThreshold(saveDir, baseboardFilePath);
+                    string prefix = labelledName.Substring(0, labelledName.Length - "_RawBoard.txt".Length);
+                    if (!string.IsNullOrEmpty(baseboardFilePath) && System.IO.File.Exists(baseboardFilePath))
+                    {
+                        string renamedBaseboard = Path.Combine(saveDir, prefix + "_baseboard.txt");
+                        System.IO.File.Move(baseboardFilePath, renamedBaseboard, overwrite: true);
+                    }
+                    PruneAboveThreshold(saveDir);
                 }
             }
             catch (Exception e)
@@ -459,7 +472,7 @@ namespace EternityII_Solver
             }
         }
 
-        private static void PruneAboveThreshold(string saveDir, string baseboardFilePath)
+        private static void PruneAboveThreshold(string saveDir)
         {
             try
             {
@@ -473,32 +486,26 @@ namespace EternityII_Solver
 
                 int keepThreshold = conflictsByFile.Values.Min() + 1;
 
+                // 2026-08-18: the baseboard is now a THIRD sibling (renamed onto the same prefix
+                // right before this runs -- see the call site) instead of being deleted
+                // unconditionally. It is Blackwood's own numbering, unlike RawBoard/physical_layout
+                // (HoleSolver's internal numbering), which is what makes it usable as a GPU seed --
+                // BwSeedLoader needs Blackwood-numbered files and previously had nothing this fresh
+                // to read. Managing it here, under the same prefix-matched keep/delete rule as its
+                // siblings, is what fixes the old "16 permanent orphans" problem: a baseboard whose
+                // pair falls below a later-tightened threshold is deleted right along with it,
+                // instead of being untouchable because nothing linked its GUID name back to a
+                // conflict count.
                 foreach (var kv in conflictsByFile)
                 {
                     if (kv.Value <= keepThreshold) continue;
                     string rawBoardFile = kv.Key;
-                    string layoutFile = rawBoardFile.Substring(0, rawBoardFile.Length - "_RawBoard.txt".Length) + "_physical_layout.txt";
+                    string prefix = rawBoardFile.Substring(0, rawBoardFile.Length - "_RawBoard.txt".Length);
+                    string layoutFile = prefix + "_physical_layout.txt";
+                    string baseboardFile = prefix + "_baseboard.txt";
                     System.IO.File.Delete(rawBoardFile);
                     if (System.IO.File.Exists(layoutFile)) System.IO.File.Delete(layoutFile);
-                }
-
-                // The baseboard (GUID-named) file is deleted unconditionally once labelling has
-                // succeeded, not just when this save is above threshold.
-                //
-                // 2026-08-17: judging it only against THIS save's own result leaked files. A
-                // baseboard kept because its save was within threshold at the time could never be
-                // reconsidered later, because nothing links a GUID name back to its
-                // ErrorsNN_BaseMMM_* pair -- so when the threshold tightened (a 13 arrived and cut
-                // the keep line to 14), the labelled pair got deleted and the baseboard was
-                // orphaned permanently. 16 orphans had accumulated by the time this was noticed.
-                //
-                // TRADE-OFF, deliberately accepted: the baseboard holds the PARTIAL board as the
-                // search left it (with its holes), which is not recoverable from the completed
-                // RawBoard -- the completion overwrites the holes. What survives is the completed
-                // board, its conflict count in the filename, and its bucas link in the run log.
-                if (!string.IsNullOrEmpty(baseboardFilePath) && System.IO.File.Exists(baseboardFilePath))
-                {
-                    System.IO.File.Delete(baseboardFilePath);
+                    if (System.IO.File.Exists(baseboardFile)) System.IO.File.Delete(baseboardFile);
                 }
             }
             catch (Exception e)

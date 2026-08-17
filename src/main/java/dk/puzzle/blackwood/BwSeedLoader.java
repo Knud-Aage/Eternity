@@ -57,6 +57,20 @@ public final class BwSeedLoader {
      * @param maxSeeds     keep at most this many, deepest first
      * @param stepBoardIdx step -> board index, from {@code GpuTableSet.stepBoardIdx}
      */
+    // Matches ONLY files known to be in Blackwood's own piece numbering (row 15 first, plain
+    // pieceNumber/rotation) -- the legacy "<pieces>_<uuid>_<n>.txt" convention, and its 2026-08-18
+    // successor "..._baseboard.txt", which is the SAME format under a name that survives labelling
+    // instead of being deleted. Deliberately excludes "*_RawBoard.txt"/"*_physical_layout.txt": those
+    // use HoleSolver's own internal piece indexing (Java's PieceInventory.physicalMapping), a
+    // DIFFERENT numbering entirely -- confirmed directly while reconstructing bucas links earlier
+    // this project. A blanket "*.txt" scan would have fed those straight into parse() as if they
+    // were Blackwood-numbered, producing a seed built from the wrong pieces with no error at all
+    // (parse() has no way to detect the mismatch -- the numbers just happen to also be small ints).
+    private static final java.util.regex.Pattern LEGACY_NAME =
+            java.util.regex.Pattern.compile("^\\d+_[0-9a-fA-F-]+_\\d+\\.txt$");
+    private static final java.util.regex.Pattern BASEBOARD_NAME =
+            java.util.regex.Pattern.compile("^Errors\\d+_Base(\\d+)_.*_baseboard\\.txt$");
+
     public static List<Seed> load(List<Path> dirs, int minDepth, int maxSeeds, int[] stepBoardIdx) {
         List<Seed> seeds = new ArrayList<>();
         for (Path dir : dirs) {
@@ -67,8 +81,8 @@ public final class BwSeedLoader {
             int loadedHere = 0;
             try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, "*.txt")) {
                 for (Path file : stream) {
-                    // Cheap pre-filter on the filename's leading depth ("<pieces>_<hash>_<n>.txt")
-                    // so a directory of 14,000 shallow boards isn't fully parsed to reject them.
+                    // Cheap pre-filter on filename-encoded depth, so a directory of thousands of
+                    // shallow or wrong-format boards isn't fully parsed just to reject it.
                     if (depthFromFilename(file) < minDepth) continue;
                     Seed seed = parse(file, stepBoardIdx);
                     if (seed != null && seed.depth() >= minDepth) {
@@ -86,16 +100,25 @@ public final class BwSeedLoader {
         return seeds.size() > maxSeeds ? new ArrayList<>(seeds.subList(0, maxSeeds)) : seeds;
     }
 
-    /** -1 when the name does not carry a parseable leading depth. */
+    /** -1 for anything not in one of the two Blackwood-numbered conventions -- see LEGACY_NAME/BASEBOARD_NAME. */
     private static int depthFromFilename(Path file) {
         String name = file.getFileName().toString();
-        int underscore = name.indexOf('_');
-        if (underscore <= 0) return -1;
-        try {
-            return Integer.parseInt(name.substring(0, underscore));
-        } catch (NumberFormatException e) {
-            return -1;
+
+        java.util.regex.Matcher baseboard = BASEBOARD_NAME.matcher(name);
+        if (baseboard.matches()) {
+            return Integer.parseInt(baseboard.group(1));
         }
+
+        if (LEGACY_NAME.matcher(name).matches()) {
+            int underscore = name.indexOf('_');
+            try {
+                return Integer.parseInt(name.substring(0, underscore));
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+
+        return -1; // includes *_RawBoard.txt / *_physical_layout.txt -- wrong numbering, never a seed source
     }
 
     /** Returns null if the file is not a readable board grid. */

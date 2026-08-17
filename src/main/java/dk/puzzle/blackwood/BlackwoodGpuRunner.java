@@ -516,6 +516,11 @@ public class BlackwoodGpuRunner {
             HoleSolver.writePhysicalLayoutFile(outputDir.resolve(prefix + "_physical_layout.txt").toString(),
                     inventory, result.finalBoard(), result.repairedBoard());
             HoleSolver.writeRawBoardFile(outputDir.resolve(prefix + "_RawBoard.txt").toString(), inventory, completed);
+            // Third sibling, in Blackwood's OWN piece numbering (boardString, already computed above
+            // to build the partial-board link) -- unlike the two files above, which use HoleSolver's
+            // internal numbering, this is what BwSeedLoader can actually read directly as a future
+            // seed. Same rationale as the C# solver's Util.cs baseboard rename.
+            Files.writeString(outputDir.resolve(prefix + "_baseboard.txt"), boardString);
             logger.info("SAVED [{}]: {} pieces, {} conflicts -> {}",
                     depthRecord ? "depth-record" : "harvest", maxSolveIndex, conflicts, prefix);
             // Same convention as the C# solver's Util.cs, so both logs are grep-able the same way.
@@ -602,10 +607,15 @@ public class BlackwoodGpuRunner {
                 if (entry.getValue() <= keepThreshold) continue;
                 Path rawBoardFile = entry.getKey();
                 String name = rawBoardFile.getFileName().toString();
-                Path layoutFile = rawBoardFile.resolveSibling(
-                        name.substring(0, name.length() - "_RawBoard.txt".length()) + "_physical_layout.txt");
+                String prefix = name.substring(0, name.length() - "_RawBoard.txt".length());
+                Path layoutFile = rawBoardFile.resolveSibling(prefix + "_physical_layout.txt");
+                // Third sibling (see evaluateAndMaybeSave) -- pruned together so a Blackwood-numbered
+                // seed can't outlive the labelled pair that established its quality, same as the C#
+                // solver's baseboard rename fixes the equivalent orphan problem there.
+                Path baseboardFile = rawBoardFile.resolveSibling(prefix + "_baseboard.txt");
                 Files.deleteIfExists(rawBoardFile);
                 Files.deleteIfExists(layoutFile);
+                Files.deleteIfExists(baseboardFile);
             }
         } catch (IOException e) {
             logger.warn("Retention cleanup failed in {}", outputDir, e);
