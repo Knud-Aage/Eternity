@@ -96,10 +96,28 @@ public class BlackwoodGpuRunner {
     // board be found, scored, saved, and then picked up as a seed at the next epoch, closing the
     // explore/exploit loop instead of just exploiting.
     //
-    // 25% is a starting point, not a measured optimum: unseeded search reaches ~249 pieces on its
-    // own in 90 seconds (BlackwoodGpuEpochResetHarness), so the exploration arm is not weak, but
-    // whether a quarter is the right split has NOT been A/B'd yet.
-    private static final int FRESH_FRACTION_PERCENT = 25;
+    // 2026-08-17, A/B'd (BlackwoodGpuFreshFractionHarness), 4 arms x 180s, 1024 threads, identical
+    // 59-board seed pool. Novel boards = distinct population best-boards that are NOT a seed handed
+    // back unchanged; conflicts are real HoleSolver completions over a sample of those:
+    //     fresh%   novel   bestConf   medConf
+    //          0      44         13        14
+    //         25     203         13        17
+    //         50     326         13        19
+    //        100     684         18        20
+    // The fresh fraction buys diversity and pays for it in quality: 0/25/50 all TIE on best board
+    // found, while median quality degrades monotonically, and pure exploration cannot even reach
+    // the seeded arms' depth. No arm beat the seed pool's own best (12).
+    //
+    // Two things this corrects. First, an earlier assumption that 0% is a closed loop that can
+    // never produce anything new -- it produced 44 novel boards, the best-quality set of any arm,
+    // because retreating up to MAX_RETREAT steps and re-searching IS exploration, just local to
+    // known-good boards. Second, the original 25% guess: it is strictly worse than 0% here.
+    //
+    // Kept small but non-zero rather than 0 because the experiment measures the quality
+    // DISTRIBUTION over 3 minutes, not the rare long-horizon event exploration actually exists for
+    // (escaping a basin the whole seed pool may share). That payoff is not measurable at this
+    // timescale, so this is a deliberate hedge, not a measured optimum.
+    private static final int FRESH_FRACTION_PERCENT = 10;
     // Candidates to score before ranking. Scoring runs HoleSolver once per board (~1s each), and
     // only at an epoch boundary, so this bounds a startup cost rather than a per-launch one.
     private static final int MAX_SEED_CANDIDATES = 120;

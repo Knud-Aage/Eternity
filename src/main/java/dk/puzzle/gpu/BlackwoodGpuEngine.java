@@ -221,6 +221,25 @@ public class BlackwoodGpuEngine {
     }
 
     /**
+     * Reads back every thread's own best-ever board this epoch ({@code d_persistBestBoard}), as
+     * {@code numThreads} consecutive 256-entry blocks of packed candidate records.
+     *
+     * <p>{@link #runBlackwoodDfs} only ever surfaces the single globally deepest board, which is
+     * not enough to judge a population: with seeding on, that one board is usually just the deepest
+     * seed replayed back, identical across configurations. Reading the whole population is what
+     * makes it possible to ask how many DISTINCT boards a configuration actually produced and how
+     * good they are -- the questions that decide whether exploration is paying for itself.</p>
+     */
+    public int[] readThreadBestBoards(int numThreads) {
+        if (numThreads > MAX_THREADS) {
+            throw new IllegalArgumentException("numThreads " + numThreads + " exceeds MAX_THREADS=" + MAX_THREADS);
+        }
+        int[] out = new int[numThreads * 256];
+        cuMemcpyDtoH(Pointer.to(out), d_persistBestBoard, (long) numThreads * 256 * Sizeof.INT);
+        return out;
+    }
+
+    /**
      * Threads whose seed replay stopped short of its target depth since the last reset. Persistently
      * high means the seed boards are not reachable through the current candidate tables -- e.g.
      * boards produced under a different piece numbering or a different break schedule.
