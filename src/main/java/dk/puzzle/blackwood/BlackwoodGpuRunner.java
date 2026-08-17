@@ -16,8 +16,10 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -148,6 +150,25 @@ public class BlackwoodGpuRunner {
     // still shouldn't stall launches for longer than that cadence tolerates.
     private static final int SCORING_TRIALS = 5000;
 
+    // Population harvesting.
+    //
+    // 2026-08-17: without this the run can save NOTHING. trySave is only reached when a launch
+    // beats the running depth high score, and that high score sits at 252 (recovered from disk) --
+    // so a 250-piece board completing to 11 conflicts is thrown away without ever being scored.
+    // Fixing the save criterion to use conflicts (earlier today) fixed the wrong level: the GATE
+    // was still depth. Confirmed empirically -- the retreat A/B found a novel 12-conflict board
+    // that production would have discarded, because it was not deeper than 252.
+    //
+    // So periodically read the whole population's best boards, score the deepest previously-unseen
+    // ones, and save on conflicts alone. Interval and sample are sized so scoring (~1s/board) stays
+    // a few percent of wall time: 12 boards per ~300 launches is ~12s per ~3.5 minutes.
+    private static final int HARVEST_INTERVAL = 300;
+    private static final int HARVEST_SAMPLE = 12;
+    private static final int HARVEST_MIN_DEPTH = 240;
+    /** Boards already scored, so a stable population isn't re-scored every harvest. */
+    private static final Set<String> harvestedFingerprints = new HashSet<>();
+    private static final int HARVEST_MEMORY_CAP = 200_000;
+
     public static void main(String[] args) throws Exception {
         // NOT Documents: it is OneDrive-redirected by Known Folder Move on this machine, so every
         // board saved here was being uploaded to the cloud. UserProfile is never redirected.
@@ -217,6 +238,12 @@ public class BlackwoodGpuRunner {
                 if (currentHighScore >= SAVE_THRESHOLD) {
                     trySave(bestBoardOut, currentHighScore, pieceByNumber, inventory, outputDir);
                 }
+            }
+
+            // Depth records are rare once seeded (the pool's own depth is already the ceiling), so
+            // this -- not the branch above -- is what actually finds good boards on a seeded run.
+            if (launchCounter % HARVEST_INTERVAL == 0) {
+                harvestPopulation(engine, result.threadDepths(), pieceByNumber, inventory, outputDir);
             }
 
             if (launchMillis < FAST_LAUNCH_MILLIS) {
@@ -337,8 +364,58 @@ public class BlackwoodGpuRunner {
      * second problem: a board that's just a replayed, unmodified seed cannot beat the board it came
      * from, so it no longer gets saved back under a new name.</p>
      */
+    /**
+     * Scores the deepest previously-unseen boards in the live population and saves any that are
+     * competitive on conflicts. See HARVEST_INTERVAL for why this exists: the depth-record path
+     * alone saves nothing once the seed pool's own depth is already the ceiling.
+     */
+    private static void harvestPopulation(BlackwoodGpuEngine engine, int[] threadDepths,
+                                          BwPiece[] pieceByNumber, PieceInventory inventory, Path outputDir) {
+        try {
+            int numThreads = threadDepths.length;
+            int[] allBoards = engine.readThreadBestBoards(numThreads);
+
+            // Deepest first: a deeper board leaves fewer holes for completion to guess at, so it is
+            // the better use of a bounded scoring budget.
+            Integer[] order = new Integer[numThreads];
+            for (int i = 0; i < numThreads; i++) order[i] = i;
+            java.util.Arrays.sort(order, (a, b) -> Integer.compare(threadDepths[b], threadDepths[a]));
+
+            if (harvestedFingerprints.size() > HARVEST_MEMORY_CAP) harvestedFingerprints.clear();
+
+            int scored = 0;
+            for (int idx = 0; idx < numThreads && scored < HARVEST_SAMPLE; idx++) {
+                int t = order[idx];
+                if (threadDepths[t] < HARVEST_MIN_DEPTH) break; // sorted, so nothing deeper remains
+                int[] board = java.util.Arrays.copyOfRange(allBoards, t * 256, (t + 1) * 256);
+                if (!harvestedFingerprints.add(fingerprintOf(board))) continue;
+                evaluateAndMaybeSave(board, threadDepths[t], pieceByNumber, inventory, outputDir, false);
+                scored++;
+            }
+            if (scored > 0) logger.info("Harvest: scored {} new population board(s)", scored);
+        } catch (Exception e) {
+            logger.warn("Population harvest failed", e);
+        }
+    }
+
+    /** Cell-wise (pieceNumber,rotation) identity, for skipping boards already scored. */
+    private static String fingerprintOf(int[] board) {
+        StringBuilder sb = new StringBuilder(1024);
+        for (int i = 0; i < 256; i++) {
+            if (board[i] == -1) { sb.append("..,"); continue; }
+            BwRotatedPiece p = BwGpuTables.unpack(board[i]);
+            sb.append(p.pieceNumber()).append(':').append(p.rotations()).append(',');
+        }
+        return sb.toString();
+    }
+
     static void trySave(int[] board, int maxSolveIndex, BwPiece[] pieceByNumber,
                                 PieceInventory inventory, Path outputDir) {
+        evaluateAndMaybeSave(board, maxSolveIndex, pieceByNumber, inventory, outputDir, true);
+    }
+
+    private static void evaluateAndMaybeSave(int[] board, int maxSolveIndex, BwPiece[] pieceByNumber,
+                                             PieceInventory inventory, Path outputDir, boolean depthRecord) {
         try {
             BwRotatedPiece[] rotatedBoard = new BwRotatedPiece[256];
             for (int i = 0; i < 256; i++) {
@@ -360,8 +437,15 @@ public class BlackwoodGpuRunner {
             int bestOnDisk = bestConflictsOnDisk(outputDir);
             int keepThreshold = (bestOnDisk == Integer.MAX_VALUE) ? Integer.MAX_VALUE : bestOnDisk + 1;
             if (conflicts > keepThreshold) {
-                logger.info("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving",
-                        maxSolveIndex, conflicts, bestOnDisk);
+                // Harvest rejects most of what it scores by design, so keep that at debug level;
+                // a rejected DEPTH record is rare and worth seeing.
+                if (depthRecord) {
+                    logger.info("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving",
+                            maxSolveIndex, conflicts, bestOnDisk);
+                } else {
+                    logger.debug("Harvested board at {} pieces completed to {} conflicts (best-on-disk {}), not saving",
+                            maxSolveIndex, conflicts, bestOnDisk);
+                }
                 return;
             }
 
@@ -371,12 +455,18 @@ public class BlackwoodGpuRunner {
             HoleSolver.writePhysicalLayoutFile(outputDir.resolve(prefix + "_physical_layout.txt").toString(),
                     inventory, result.finalBoard(), result.repairedBoard());
             HoleSolver.writeRawBoardFile(outputDir.resolve(prefix + "_RawBoard.txt").toString(), inventory, completed);
-            logger.info("Saved: maxSolveIndex={} conflicts={} -> {}", maxSolveIndex, conflicts, prefix);
+            logger.info("SAVED [{}]: {} pieces, {} conflicts -> {}",
+                    depthRecord ? "depth-record" : "harvest", maxSolveIndex, conflicts, prefix);
 
             pruneAboveThreshold(outputDir, conflicts);
         } catch (Exception e) {
             logger.error("Failed to evaluate/save board at solveIndex={}", maxSolveIndex, e);
         }
+    }
+
+    /** Kept package-private for the harnesses; the runner itself only needs the two wrappers above. */
+    static int harvestedCount() {
+        return harvestedFingerprints.size();
     }
 
     /** Edge conflicts among ALL 256 cells of a fully hole-filled board (empty cells are not expected here). */
