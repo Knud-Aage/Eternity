@@ -64,6 +64,25 @@
  * launch -- closing a second gap flagged in the original design as a
  * deliberate de-risking simplification, revisited now that the kernel's
  * correctness is already established.
+ *
+ * 2026-08-18: SHARED-MEMORY CACHING FOR THE FOUR PER-STEP TABLES. The
+ * divergence profile (BlackwoodGpuProfileHarness, see BW_PROFILE_COUNTERS
+ * below) measured 100% warp efficiency -- divergence was never the
+ * bottleneck. But c_stepToTableId/c_stepBoardIdx/c_breakArray/
+ * c_heuristicArray (4KB total) are read from __constant__ memory at a
+ * per-lane-different index on every single outer-loop iteration, and this
+ * kernel was the only one of the two in this project using 0 bytes of
+ * __shared__ memory (confirmed via nvcc -cubin -Xptxas -v) -- solvePBP's own
+ * buildSharedIndex() (SolveEternityKernel.cu) already proves this exact
+ * pattern pays off in this codebase. The per-thread search body is now
+ * factored into runBlackwoodDfsBody() so both entry points below share it
+ * verbatim; they differ only in whether the four tables passed in point at
+ * __constant__ memory (solveBlackwoodDfs, unchanged behaviour, default) or a
+ * one-time-per-block __shared__ copy (solveBlackwoodDfsShared, opt-in via
+ * BlackwoodGpuEngine.sharedCacheEnabled). blockDim.x is fixed at 256
+ * (BlackwoodGpuEngine's own launch config), matching each table's 256-entry
+ * size exactly, so every thread in the block copies exactly one element --
+ * no thread-0-only serial copy, no loop needed.
  */
 
 #define NUM_TABLES 10
@@ -249,10 +268,14 @@ __device__ inline void seedFreshAttempt(
  * Resolves the candidate list for one step exactly the way the main search loop does, so a
  * replayed board is indexed against the identical tables the search will use when it later
  * backtracks through those same steps. Any divergence here would corrupt the resume cursors.
+ *
+ * @param stepToTableId either c_stepToTableId directly (__constant__) or a block's own
+ *                       __shared__ copy of it -- the caller decides which; this function is
+ *                       agnostic to where the 256 ints actually live.
  */
 __device__ inline void candidateListForStep(
     int solveIndex, int boardIdx, const int* board,
-    const int* bsOffset, const int* bsCount,
+    const int* bsOffset, const int* bsCount, const int* stepToTableId,
     int* outOff, int* outCnt, bool* outUseBottom)
 {
     int row = boardIdx >> 4;
@@ -273,7 +296,7 @@ __device__ inline void candidateListForStep(
         int leftSide = (col == 0) ? 0 : bwRightSide(board[boardIdx - 1]);
         int southTop = bwTopSide(board[boardIdx - 16]);
         int key = leftSide * 23 + southTop;
-        int tableId = c_stepToTableId[solveIndex];
+        int tableId = stepToTableId[solveIndex];
         *outOff = c_csrOffset[tableId * KEY_SPACE + key];
         *outCnt = c_csrCount [tableId * KEY_SPACE + key];
     }
@@ -295,6 +318,8 @@ __device__ inline void candidateListForStep(
  * rebuilds.</p>
  *
  * @param seed  per-step (pieceNumber << 2) | rotation, or negative where the seed ends
+ * @param stepBoardIdx/stepToTableId see candidateListForStep's own note -- __constant__ or
+ *                                   __shared__, this function doesn't care which
  * @return number of pieces successfully placed. A short return is safe, not an error: the thread
  *         simply continues from the shallower point it did manage to reach.
  */
@@ -302,6 +327,7 @@ __device__ inline int seedFromSavedBoard(
     const int* d_payload, const int* seed, int targetDepth,
     int* board, int* pieceIndexToTryNext, int* cumulativeBreaks, int* cumulativeHeuristicSideCount,
     unsigned int* pieceUsedBits, int* bsOffset, int* bsCount, int* bsPayload,
+    const int* stepBoardIdx, const int* stepToTableId,
     unsigned long long* rngState)
 {
     resetAndBuildBottomSides(board, pieceIndexToTryNext, pieceUsedBits,
@@ -315,14 +341,14 @@ __device__ inline int seedFromSavedBoard(
         if (wantPiece < 1 || wantPiece > 256) return step;
         if (bitGet(pieceUsedBits, wantPiece - 1)) return step;  // duplicate piece: refuse to corrupt state
 
-        int boardIdx = c_stepBoardIdx[step];
+        int boardIdx = stepBoardIdx[step];
         int off, cnt;
         bool useBottom = false;
         if (step == 0) {
             off = c_csrOffset[TABLE_CORNERS * KEY_SPACE + 0];
             cnt = c_csrCount [TABLE_CORNERS * KEY_SPACE + 0];
         } else {
-            candidateListForStep(step, boardIdx, board, bsOffset, bsCount, &off, &cnt, &useBottom);
+            candidateListForStep(step, boardIdx, board, bsOffset, bsCount, stepToTableId, &off, &cnt, &useBottom);
         }
 
         int foundAt = -1;
@@ -365,6 +391,7 @@ __device__ inline int startNewAttempt(
     int numSeeds, int maxRetreat, int freshFractionPercent, unsigned int* d_seedShortfalls,
     int* board, int* pieceIndexToTryNext, int* cumulativeBreaks, int* cumulativeHeuristicSideCount,
     unsigned int* pieceUsedBits, int* bsOffset, int* bsCount, int* bsPayload,
+    const int* stepBoardIdx, const int* stepToTableId,
     unsigned long long* rngState)
 {
     bool goFresh = (freshFractionPercent > 0) && (randInt(rngState, 100) < (unsigned int)freshFractionPercent);
@@ -381,7 +408,7 @@ __device__ inline int startNewAttempt(
         int placed = seedFromSavedBoard(d_payload, d_seedBoards + (size_t)seedIdx * 256, target,
                                         board, pieceIndexToTryNext, cumulativeBreaks,
                                         cumulativeHeuristicSideCount, pieceUsedBits,
-                                        bsOffset, bsCount, bsPayload, rngState);
+                                        bsOffset, bsCount, bsPayload, stepBoardIdx, stepToTableId, rngState);
         if (placed < target + 1) atomicAdd(d_seedShortfalls, 1u);
         if (placed >= 1) return placed;
         // Could not place even step 0 -- fall through rather than run on a broken state.
@@ -391,11 +418,18 @@ __device__ inline int startNewAttempt(
     return 1;
 }
 
-extern "C" __global__ void solveBlackwoodDfs(
+/**
+ * The full per-thread search body, shared verbatim by both __global__ entry points below. Takes
+ * the four hot per-step tables (stepToTableId/stepBoardIdx/breakArray/heuristicArray) as plain
+ * pointers rather than reaching for the c_* __constant__ globals directly, so the exact same
+ * logic runs unchanged whether the caller passes __constant__ memory (solveBlackwoodDfs) or a
+ * block-local __shared__ copy of it (solveBlackwoodDfsShared) -- see the 2026-08-18 header note.
+ */
+__device__ inline void runBlackwoodDfsBody(
+    int tid,
     const int* d_payload,             // global memory: flat candidate payload, all 10 tables concatenated
     unsigned long long seedBase,      // host-varied every launch (nanoTime ^ launchCounter)
     unsigned long long stepBudget,    // per-thread node cap THIS launch -- a TDR safety valve, not a search-depth cap
-    int  numThreads,
     int* d_gpuHighScore,              // atomic high-water maxSolveIndex across all threads, all launches this run
     int* d_bestBoardOut,              // [256] packed records of the current best board
     int* d_solution,                  // [256] set once if any thread reaches step 256 (a genuine full solve)
@@ -424,15 +458,13 @@ extern "C" __global__ void solveBlackwoodDfs(
     int numSeeds,
     int maxRetreat,                   // per-thread random pull-back from the seed's full depth (diversity)
     int freshFractionPercent,         // % of attempts that ignore seeds entirely and start from a random corner
-    unsigned int* d_seedShortfalls    // counts threads whose replay stopped short of its target
+    unsigned int* d_seedShortfalls,   // counts threads whose replay stopped short of its target
+    const int* stepToTableId, const int* stepBoardIdx, const int* breakArray, const int* heuristicArray
 #ifdef BW_PROFILE_COUNTERS
-    , unsigned long long* d_profileCounters   // [BW_PC_SLOTS], appended LAST so every existing parameter keeps its index
+    , unsigned long long* d_profileCounters   // [BW_PC_SLOTS]
 #endif
 )
 {
-    int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= numThreads) return;
-
 #ifdef BW_PROFILE_COUNTERS
     const int bwLane = threadIdx.x & 31;
 #endif
@@ -464,7 +496,7 @@ extern "C" __global__ void solveBlackwoodDfs(
         solveIndex = startNewAttempt(d_payload, d_seedBoards, d_seedDepths, numSeeds, maxRetreat, freshFractionPercent,
                                      d_seedShortfalls, board, pieceIndexToTryNext, cumulativeBreaks,
                                      cumulativeHeuristicSideCount, pieceUsedBits,
-                                     bsOffset, bsCount, bsPayload, &rngState);
+                                     bsOffset, bsCount, bsPayload, stepBoardIdx, stepToTableId, &rngState);
         maxSolveIndex = solveIndex;
         bestPiecesPlaced = solveIndex;
         for (int i = 0; i < 256; i++) bestLocalBoard[i] = board[i];
@@ -550,11 +582,11 @@ extern "C" __global__ void solveBlackwoodDfs(
             solveIndex = startNewAttempt(d_payload, d_seedBoards, d_seedDepths, numSeeds, maxRetreat, freshFractionPercent,
                                          d_seedShortfalls, board, pieceIndexToTryNext, cumulativeBreaks,
                                          cumulativeHeuristicSideCount, pieceUsedBits,
-                                         bsOffset, bsCount, bsPayload, &rngState);
+                                         bsOffset, bsCount, bsPayload, stepBoardIdx, stepToTableId, &rngState);
             continue;
         }
 
-        int boardIdx = c_stepBoardIdx[solveIndex];
+        int boardIdx = stepBoardIdx[solveIndex];
 
         if (board[boardIdx] != -1) {
             bitClear(pieceUsedBits, bwPieceNum(board[boardIdx]) - 1);
@@ -567,7 +599,7 @@ extern "C" __global__ void solveBlackwoodDfs(
         // branch always has a valid already-placed west neighbour.
         int off, cnt;
         bool useBottom = false;
-        candidateListForStep(solveIndex, boardIdx, board, bsOffset, bsCount, &off, &cnt, &useBottom);
+        candidateListForStep(solveIndex, boardIdx, board, bsOffset, bsCount, stepToTableId, &off, &cnt, &useBottom);
 
 #ifdef BW_PROFILE_COUNTERS
         // General mixed-warp fraction (do the lanes of this warp even agree on
@@ -593,9 +625,9 @@ extern "C" __global__ void solveBlackwoodDfs(
 
         bool foundPiece = false;
         if (cnt > 0) {
-            int breaksThisTurn = c_breakArray[solveIndex] - cumulativeBreaks[solveIndex - 1];
+            int breaksThisTurn = breakArray[solveIndex] - cumulativeBreaks[solveIndex - 1];
             bool heuristicGateActive = (solveIndex <= HEURISTIC_MAX_INDEX);
-            int heuristicFloor = heuristicGateActive ? c_heuristicArray[solveIndex] : 0;
+            int heuristicFloor = heuristicGateActive ? heuristicArray[solveIndex] : 0;
 
             for (int i = pieceIndexToTryNext[solveIndex]; i < cnt; i++) {
                 int rec = useBottom ? bsPayload[off + i] : d_payload[off + i];
@@ -672,4 +704,129 @@ extern "C" __global__ void solveBlackwoodDfs(
     }
     atomicAdd(d_totalNodes, nodeCount);
     d_threadDepths[tid] = bestPiecesPlaced;
+}
+
+// Unchanged behaviour: the four hot tables are read straight from __constant__ memory, exactly as
+// before this file's 2026-08-18 note. Default entry point (BlackwoodGpuEngine.sharedCacheEnabled
+// starts false), and always available as a fallback regardless of that flag.
+extern "C" __global__ void solveBlackwoodDfs(
+    const int* d_payload,
+    unsigned long long seedBase,
+    unsigned long long stepBudget,
+    int  numThreads,
+    int* d_gpuHighScore,
+    int* d_bestBoardOut,
+    int* d_solution,
+    int* d_solvedFlag,
+    unsigned long long* d_totalNodes,
+    int* d_threadDepths,
+    int* d_persistBoard,
+    int* d_persistPieceIndexToTryNext,
+    int* d_persistCumulativeBreaks,
+    int* d_persistCumulativeHeuristicSideCount,
+    unsigned int* d_persistPieceUsedBits,
+    int* d_persistBsOffset,
+    int* d_persistBsCount,
+    int* d_persistBsPayload,
+    unsigned long long* d_persistRngState,
+    int* d_persistSolveIndex,
+    int* d_persistBestBoard,
+    int* d_persistBestPiecesPlaced,
+    int* d_needsInit,
+    const int* d_seedBoards,
+    const int* d_seedDepths,
+    int numSeeds,
+    int maxRetreat,
+    int freshFractionPercent,
+    unsigned int* d_seedShortfalls
+#ifdef BW_PROFILE_COUNTERS
+    , unsigned long long* d_profileCounters
+#endif
+)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= numThreads) return;
+
+    runBlackwoodDfsBody(tid, d_payload, seedBase, stepBudget, d_gpuHighScore, d_bestBoardOut, d_solution,
+        d_solvedFlag, d_totalNodes, d_threadDepths, d_persistBoard, d_persistPieceIndexToTryNext,
+        d_persistCumulativeBreaks, d_persistCumulativeHeuristicSideCount, d_persistPieceUsedBits,
+        d_persistBsOffset, d_persistBsCount, d_persistBsPayload, d_persistRngState, d_persistSolveIndex,
+        d_persistBestBoard, d_persistBestPiecesPlaced, d_needsInit, d_seedBoards, d_seedDepths,
+        numSeeds, maxRetreat, freshFractionPercent, d_seedShortfalls,
+        c_stepToTableId, c_stepBoardIdx, c_breakArray, c_heuristicArray
+#ifdef BW_PROFILE_COUNTERS
+        , d_profileCounters
+#endif
+    );
+}
+
+// 2026-08-18: shared-memory-cached twin of solveBlackwoodDfs -- identical signature and identical
+// search logic (runBlackwoodDfsBody), differing only in where the four hot per-step tables live.
+// Opt-in via BlackwoodGpuEngine.sharedCacheEnabled; see the header note for why.
+extern "C" __global__ void solveBlackwoodDfsShared(
+    const int* d_payload,
+    unsigned long long seedBase,
+    unsigned long long stepBudget,
+    int  numThreads,
+    int* d_gpuHighScore,
+    int* d_bestBoardOut,
+    int* d_solution,
+    int* d_solvedFlag,
+    unsigned long long* d_totalNodes,
+    int* d_threadDepths,
+    int* d_persistBoard,
+    int* d_persistPieceIndexToTryNext,
+    int* d_persistCumulativeBreaks,
+    int* d_persistCumulativeHeuristicSideCount,
+    unsigned int* d_persistPieceUsedBits,
+    int* d_persistBsOffset,
+    int* d_persistBsCount,
+    int* d_persistBsPayload,
+    unsigned long long* d_persistRngState,
+    int* d_persistSolveIndex,
+    int* d_persistBestBoard,
+    int* d_persistBestPiecesPlaced,
+    int* d_needsInit,
+    const int* d_seedBoards,
+    const int* d_seedDepths,
+    int numSeeds,
+    int maxRetreat,
+    int freshFractionPercent,
+    unsigned int* d_seedShortfalls
+#ifdef BW_PROFILE_COUNTERS
+    , unsigned long long* d_profileCounters
+#endif
+)
+{
+    // 4KB total (4 x 256 x 4 bytes), populated once per block. blockDim.x is fixed at 256
+    // (BlackwoodGpuEngine's launch config) -- exactly one element per thread, no loop, no
+    // thread-0-only serial copy.
+    __shared__ int sm_stepToTableId[256];
+    __shared__ int sm_stepBoardIdx[256];
+    __shared__ int sm_breakArray[256];
+    __shared__ int sm_heuristicArray[256];
+
+    sm_stepToTableId[threadIdx.x]  = c_stepToTableId[threadIdx.x];
+    sm_stepBoardIdx[threadIdx.x]   = c_stepBoardIdx[threadIdx.x];
+    sm_breakArray[threadIdx.x]     = c_breakArray[threadIdx.x];
+    sm_heuristicArray[threadIdx.x] = c_heuristicArray[threadIdx.x];
+    __syncthreads();
+
+    // Bounds check AFTER the sync, not before -- every thread in the block must reach
+    // __syncthreads() regardless of numThreads, or the block hangs (mirrors
+    // SolveEternityKernel.cu's own buildSharedIndex()/__syncthreads() ordering).
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= numThreads) return;
+
+    runBlackwoodDfsBody(tid, d_payload, seedBase, stepBudget, d_gpuHighScore, d_bestBoardOut, d_solution,
+        d_solvedFlag, d_totalNodes, d_threadDepths, d_persistBoard, d_persistPieceIndexToTryNext,
+        d_persistCumulativeBreaks, d_persistCumulativeHeuristicSideCount, d_persistPieceUsedBits,
+        d_persistBsOffset, d_persistBsCount, d_persistBsPayload, d_persistRngState, d_persistSolveIndex,
+        d_persistBestBoard, d_persistBestPiecesPlaced, d_needsInit, d_seedBoards, d_seedDepths,
+        numSeeds, maxRetreat, freshFractionPercent, d_seedShortfalls,
+        sm_stepToTableId, sm_stepBoardIdx, sm_breakArray, sm_heuristicArray
+#ifdef BW_PROFILE_COUNTERS
+        , d_profileCounters
+#endif
+    );
 }

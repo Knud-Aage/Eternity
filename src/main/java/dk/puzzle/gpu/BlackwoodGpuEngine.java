@@ -46,6 +46,7 @@ public class BlackwoodGpuEngine {
     public static final int PROFILE_COUNTER_SLOTS = 16;
 
     private CUfunction blackwoodDfsFunction;
+    private CUfunction blackwoodDfsSharedFunction;
     private CUmodule cuModule;
 
     /**
@@ -93,6 +94,11 @@ public class BlackwoodGpuEngine {
     private volatile int maxRetreat = 0;
     private volatile int freshFractionPercent = 0;
 
+    // 2026-08-18: opt-in shared-memory caching of the four hot per-step tables -- see
+    // SolveBlackwoodKernel.cu's own header note. Default false preserves existing behaviour
+    // (solvePBP's sibling GpuEngine.lookaheadEnabled is the precedent for this convention).
+    private volatile boolean sharedCacheEnabled = false;
+
     public BlackwoodGpuEngine() {
         this(false);
     }
@@ -122,6 +128,9 @@ public class BlackwoodGpuEngine {
 
         blackwoodDfsFunction = new CUfunction();
         cuModuleGetFunction(blackwoodDfsFunction, cuModule, "solveBlackwoodDfs");
+
+        blackwoodDfsSharedFunction = new CUfunction();
+        cuModuleGetFunction(blackwoodDfsSharedFunction, cuModule, "solveBlackwoodDfsShared");
 
         allocatePersistentBuffers();
         resetEpoch(); // every thread starts needing a fresh attempt on the very first launch
@@ -218,6 +227,21 @@ public class BlackwoodGpuEngine {
     /** Number of seeds currently in use; 0 means threads start from a random corner. */
     public int getNumSeeds() {
         return numSeeds;
+    }
+
+    /**
+     * When true, {@link #runBlackwoodDfs} launches {@code solveBlackwoodDfsShared} instead of
+     * {@code solveBlackwoodDfs} -- identical search logic, but the four hot per-step tables
+     * (stepToTableId/stepBoardIdx/breakArray/heuristicArray, read on every outer-loop iteration)
+     * are cached in block-local {@code __shared__} memory instead of {@code __constant__} memory.
+     * Default false preserves existing behaviour until deliberately flipped.
+     */
+    public boolean isSharedCacheEnabled() {
+        return sharedCacheEnabled;
+    }
+
+    public void setSharedCacheEnabled(boolean enabled) {
+        this.sharedCacheEnabled = enabled;
     }
 
     /**
@@ -387,7 +411,8 @@ public class BlackwoodGpuEngine {
 
         int blockSize = 256;
         int gridSize = (int) Math.ceil((double) numThreads / blockSize);
-        cuLaunchKernel(blackwoodDfsFunction, gridSize, 1, 1, blockSize, 1, 1, 0, null, kernelParameters, null);
+        CUfunction fn = sharedCacheEnabled ? blackwoodDfsSharedFunction : blackwoodDfsFunction;
+        cuLaunchKernel(fn, gridSize, 1, 1, blockSize, 1, 1, 0, null, kernelParameters, null);
         cuCtxSynchronize();
 
         int[] resultHighScore = new int[1];

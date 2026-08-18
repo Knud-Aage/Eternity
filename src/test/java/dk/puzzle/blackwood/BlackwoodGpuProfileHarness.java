@@ -23,6 +23,13 @@ import dk.puzzle.gpu.BlackwoodGpuEngine;
  *       already receives every launch and discards. This is the separate question of whether some
  *       threads get far deeper than others, which is what a work-stealing queue would address.</li>
  * </ul>
+ *
+ * <p>2026-08-18: runs both constant-memory and shared-memory-cache configurations back to back
+ * (same seeds, same everything else) so the shared-cache change's effect on these same numbers is
+ * directly visible rather than inferred -- see SolveBlackwoodKernel.cu's shared-cache header note.
+ * Not really expected to move the divergence numbers (that was never the mechanism shared-memory
+ * caching targets -- it's about __constant__ cache-miss latency, not warp lockstep), but it should
+ * not make them worse either, and re-running the same measurement is cheap insurance either way.</p>
  */
 public class BlackwoodGpuProfileHarness {
 
@@ -48,10 +55,28 @@ public class BlackwoodGpuProfileHarness {
         System.out.printf("numThreads=%d stepBudget=%d launches=%d%n", NUM_THREADS, STEP_BUDGET, LAUNCHES);
 
         BlackwoodSolver solver = new BlackwoodSolver(999, null, 1, PIECES_PATH);
-        BlackwoodGpuEngine engine = new BlackwoodGpuEngine(true);
-
         solver.prepare();
-        engine.uploadTables(BwGpuTables.build(solver));
+        BwGpuTables.GpuTableSet tables = BwGpuTables.build(solver);
+
+        // ONE engine throughout -- a second BlackwoodGpuEngine() instance creates its own CUDA
+        // context (every constructor calls cuCtxCreate) and silently makes it "current" for the
+        // process, breaking the first instance's launches with CUDA_ERROR_INVALID_HANDLE. Nothing
+        // in this codebase was built for multiple engine instances to coexist. resetEpoch() between
+        // configurations is what gives each one a genuinely fresh starting state instead.
+        BlackwoodGpuEngine engine = new BlackwoodGpuEngine(true);
+        engine.uploadTables(tables);
+
+        System.out.println();
+        System.out.println("############ CONSTANT MEMORY (existing behaviour) ############");
+        runProfile(engine, false);
+
+        System.out.println();
+        System.out.println("############ SHARED MEMORY CACHE (2026-08-18 change) ############");
+        runProfile(engine, true);
+    }
+
+    private static void runProfile(BlackwoodGpuEngine engine, boolean sharedCache) throws Exception {
+        engine.setSharedCacheEnabled(sharedCache);
         engine.resetEpoch();
         engine.resetProfileCounters();
 

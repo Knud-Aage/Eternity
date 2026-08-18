@@ -177,6 +177,15 @@ public class BlackwoodGpuRunner {
     private static final boolean SEEDING_ENABLED =
             !"false".equalsIgnoreCase(System.getenv("ETERNITY_GPU_SEEDING"));
 
+    // 2026-08-18, verified (BlackwoodGpuSharedCacheHarness): bit-identical results to the
+    // constant-memory kernel across chained launches (same highScore, nodesTaken, threadDepths,
+    // best board), so this is a pure speed change, not a behaviour change. Equal-GPU-time A/B
+    // (180s/arm): 206 launches vs 153 (+35%), max depth 247 vs 245, mean depth 226.4 vs 223.7.
+    // Divergence profile unaffected either way (100% warp efficiency both configurations, as
+    // expected -- shared memory targets __constant__ cache-miss latency, not warp lockstep).
+    private static final boolean SHARED_CACHE_ENABLED =
+            !"false".equalsIgnoreCase(System.getenv("ETERNITY_GPU_SHARED_CACHE"));
+
     // Trials for HoleSolver's completion pass when scoring a candidate save (see trySave).
     // Matches the C# solver's own established choice (Util.cs's TryLabelWithConflictCount) rather
     // than HoleSolver's much heavier 200,000-trial CLI default -- this runs in the same thread as
@@ -243,12 +252,13 @@ public class BlackwoodGpuRunner {
         PieceInventory inventory = new PieceInventory(Eternity.loadPieces());
 
         BlackwoodGpuEngine engine = new BlackwoodGpuEngine();
+        engine.setSharedCacheEnabled(SHARED_CACHE_ENABLED);
         long launchCounter = 0;
         int currentHighScore = scanExistingHighScore(outputDir);
         long stepBudget = INITIAL_STEP_BUDGET;
 
-        logger.info("BlackwoodGpuRunner starting. numThreads={}, initialStepBudget={}, saveThreshold={}, epochLaunches={}, resumedHighScore={}, seedingEnabled={}",
-                NUM_THREADS, INITIAL_STEP_BUDGET, SAVE_THRESHOLD, EPOCH_LAUNCHES, currentHighScore, SEEDING_ENABLED);
+        logger.info("BlackwoodGpuRunner starting. numThreads={}, initialStepBudget={}, saveThreshold={}, epochLaunches={}, resumedHighScore={}, seedingEnabled={}, sharedCacheEnabled={}",
+                NUM_THREADS, INITIAL_STEP_BUDGET, SAVE_THRESHOLD, EPOCH_LAUNCHES, currentHighScore, SEEDING_ENABLED, SHARED_CACHE_ENABLED);
 
         while (true) {
             if (launchCounter % EPOCH_LAUNCHES == 0) {
