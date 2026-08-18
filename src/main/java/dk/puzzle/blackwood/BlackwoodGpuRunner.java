@@ -59,10 +59,24 @@ public class BlackwoodGpuRunner {
     // 1024 keeps the population mean depth high without giving up the parallelism entirely; it and
     // 16384 tied on max depth at equal wall-clock, but 1024 held a much deeper mean (205 vs 174).
     private static final int NUM_THREADS = 1024;
-    private static final long INITIAL_STEP_BUDGET = 50_000L;
+    // 2026-08-18, measured (BlackwoodGpuTdrCeilingHarness): a single launch survived cleanly up to
+    // 171,261 ms (stepBudget=25,600,000) with no CUDA/TDR failure -- the "~2000ms WDDM TDR default"
+    // this band used to target was never real on this machine/driver, off by roughly 5000x. The two
+    // "long launch" log outliers that looked like TDR survival earlier (751,813 ms and 9,857,717 ms)
+    // turned out to be sleep/resume artifacts instead (confirmed against Windows Event Log 42/107),
+    // not evidence either way.
+    //
+    // Retargeted to settle around several-second launches -- ~15-40x inside the proven-safe margin,
+    // not the measured ceiling itself, since a longer single launch also delays when a new record
+    // gets detected/logged/saved (nothing is checked until the launch returns). The payoff mirrors
+    // EPOCH_LAUNCHES' own 2026-08-17 finding just above: a longer launch stretches how much wall-clock
+    // time elapses before the same EPOCH_LAUNCHES=20,000 launch count forces every thread's persisted
+    // search back to a fresh start, extending sustained per-lineage backtracking the same way removing
+    // the old 60-launch epoch reset did.
+    private static final long INITIAL_STEP_BUDGET = 1_000_000L;
     private static final long MIN_STEP_BUDGET = 1_000L;
-    private static final long FAST_LAUNCH_MILLIS = 500L;  // below this, double the budget next launch
-    private static final long SLOW_LAUNCH_MILLIS = 1_500L; // above this, halve it (staying under the ~2000ms WDDM TDR default)
+    private static final long FAST_LAUNCH_MILLIS = 4_000L;  // below this, double the budget next launch
+    private static final long SLOW_LAUNCH_MILLIS = 10_000L; // above this, halve it
 
     // How many launches share one table generation + persisted thread-search-state before
     // everything resets fresh (a table rebuild re-randomizes candidate order, so every resume
