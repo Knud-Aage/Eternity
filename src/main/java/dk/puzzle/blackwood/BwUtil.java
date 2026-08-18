@@ -24,7 +24,10 @@ public final class BwUtil {
 
     public static final int[] SIDE_EDGES = {1, 5, 9, 13, 17};
     public static final int[] HEURISTIC_SIDES = {13, 16, 10};
-    public static final int[] BREAK_INDEXES_ALLOWED = {201, 206, 211, 216, 221, 225, 229, 233, 237, 239};
+    // 2026-08-18: dropped 239, matching Eternity-9-breaks' ETERNITY_BREAK_INDEXES -- the schedule
+    // that produced today's two 12-conflict drop_239 boards. Was 10 entries (this one plus 239);
+    // shared with BlackwoodSolver (the Java CPU port), not GPU-only -- both read this same table.
+    public static final int[] BREAK_INDEXES_ALLOWED = {201, 206, 211, 216, 221, 225, 229, 233, 237};
     public static final int MAX_HEURISTIC_INDEX = 160;
 
     /**
