@@ -150,6 +150,19 @@ public class BlackwoodGpuRunner {
     // only at an epoch boundary, so this bounds a startup cost rather than a per-launch one.
     private static final int MAX_SEED_CANDIDATES = 120;
 
+    // 2026-08-18: A/B lever, off by default (seeding stays on, matching production). Set
+    // ETERNITY_GPU_SEEDING=false to test pure random-restart search -- WITH the epoch-reset and
+    // thread-count fixes still active, unlike the original unseeded runs that motivated seeding in
+    // the first place. Exists because the evidence since has pointed the other way: seeded search's
+    // own duplicate-detection sweep found 28 unique boards out of 59 saved (more than half were the
+    // same board re-derived from a different retreat point), and both the retreat and fresh-fraction
+    // A/Bs showed perturbing away from the seed makes results MORE diverse and WORSE, never better --
+    // the signature of a narrow local optimum, not a neighbourhood with better boards nearby. Matches
+    // Blackwood's own account of his 470: a month of continuous pure random-restart search on one
+    // PC, his own word for it "luck" -- not refinement of a near-miss.
+    private static final boolean SEEDING_ENABLED =
+            !"false".equalsIgnoreCase(System.getenv("ETERNITY_GPU_SEEDING"));
+
     // Trials for HoleSolver's completion pass when scoring a candidate save (see trySave).
     // Matches the C# solver's own established choice (Util.cs's TryLabelWithConflictCount) rather
     // than HoleSolver's much heavier 200,000-trial CLI default -- this runs in the same thread as
@@ -220,17 +233,21 @@ public class BlackwoodGpuRunner {
         int currentHighScore = scanExistingHighScore(outputDir);
         long stepBudget = INITIAL_STEP_BUDGET;
 
-        logger.info("BlackwoodGpuRunner starting. numThreads={}, initialStepBudget={}, saveThreshold={}, epochLaunches={}, resumedHighScore={}",
-                NUM_THREADS, INITIAL_STEP_BUDGET, SAVE_THRESHOLD, EPOCH_LAUNCHES, currentHighScore);
+        logger.info("BlackwoodGpuRunner starting. numThreads={}, initialStepBudget={}, saveThreshold={}, epochLaunches={}, resumedHighScore={}, seedingEnabled={}",
+                NUM_THREADS, INITIAL_STEP_BUDGET, SAVE_THRESHOLD, EPOCH_LAUNCHES, currentHighScore, SEEDING_ENABLED);
 
         while (true) {
             if (launchCounter % EPOCH_LAUNCHES == 0) {
                 solver.prepare();
                 BwGpuTables.GpuTableSet tables = BwGpuTables.build(solver);
                 engine.uploadTables(tables);
-                // Reload seeds at each epoch: boards saved since the last boundary (including this
-                // run's own new records) become seeds for the next one, so the frontier advances.
-                loadSeeds(engine, tables.stepBoardIdx(), outputDir, inventory);
+                if (SEEDING_ENABLED) {
+                    // Reload seeds at each epoch: boards saved since the last boundary (including
+                    // this run's own new records) become seeds for the next one.
+                    loadSeeds(engine, tables.stepBoardIdx(), outputDir, inventory);
+                } else {
+                    engine.uploadSeeds(List.of(), new int[0], 0, 0);
+                }
                 engine.resetEpoch();
                 logger.info("Epoch boundary at launch {}: tables refreshed, {} seed board(s) active, all thread state reset",
                         launchCounter, engine.getNumSeeds());
