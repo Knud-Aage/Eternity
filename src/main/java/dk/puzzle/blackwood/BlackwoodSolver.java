@@ -468,7 +468,8 @@ public class BlackwoodSolver {
                 logger.error("prepare() failed", e);
                 return;
             }
-            logger.info("Tables rebuilt; launching {} workers x {} attempts.", numWorkers, ATTEMPTS_PER_WORKER_PER_BATCH);
+            logger.info("Tables rebuilt; launching {} workers x {} attempts. breakIndexesAllowed={}",
+                    numWorkers, ATTEMPTS_PER_WORKER_PER_BATCH, Arrays.toString(BwUtil.BREAK_INDEXES_ALLOWED));
 
             ExecutorService executor = Executors.newFixedThreadPool(numWorkers);
             List<Future<?>> futures = new ArrayList<>();

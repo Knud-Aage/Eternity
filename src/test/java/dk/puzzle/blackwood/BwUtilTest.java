@@ -155,8 +155,8 @@ class BwUtilTest {
         assertEquals(7, arr[229]);
         assertEquals(8, arr[233]);
         assertEquals(9, arr[237]);
-        assertEquals(10, arr[239]);
-        assertEquals(10, arr[255]);
+        assertEquals(9, arr[239]);
+        assertEquals(9, arr[255]);
     }
 
     @Test

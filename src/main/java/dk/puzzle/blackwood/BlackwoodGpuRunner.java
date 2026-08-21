@@ -257,8 +257,9 @@ public class BlackwoodGpuRunner {
         int currentHighScore = scanExistingHighScore(outputDir);
         long stepBudget = INITIAL_STEP_BUDGET;
 
-        logger.info("BlackwoodGpuRunner starting. numThreads={}, initialStepBudget={}, saveThreshold={}, epochLaunches={}, resumedHighScore={}, seedingEnabled={}, sharedCacheEnabled={}",
-                NUM_THREADS, INITIAL_STEP_BUDGET, SAVE_THRESHOLD, EPOCH_LAUNCHES, currentHighScore, SEEDING_ENABLED, SHARED_CACHE_ENABLED);
+        logger.info("BlackwoodGpuRunner starting. numThreads={}, initialStepBudget={}, saveThreshold={}, epochLaunches={}, resumedHighScore={}, seedingEnabled={}, sharedCacheEnabled={}, breakIndexesAllowed={}",
+                NUM_THREADS, INITIAL_STEP_BUDGET, SAVE_THRESHOLD, EPOCH_LAUNCHES, currentHighScore, SEEDING_ENABLED, SHARED_CACHE_ENABLED,
+                java.util.Arrays.toString(BwUtil.BREAK_INDEXES_ALLOWED));
 
         while (true) {
             if (launchCounter % EPOCH_LAUNCHES == 0) {
