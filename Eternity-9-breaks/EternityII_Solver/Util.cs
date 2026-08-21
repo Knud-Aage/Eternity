@@ -17,16 +17,22 @@ namespace EternityII_Solver
 
         // 2026-08-16 break-tuning harness: overridable via ETERNITY_BREAK_INDEXES
         // (comma-separated ints) so a leave-one-out sweep can run many configs
-        // without recompiling. Falls back to Blackwood's own published 470
-        // schedule unchanged when the variable isn't set -- this is the ONLY
-        // change to search behavior anywhere in this copy.
+        // without recompiling.
+        //
+        // 2026-08-19: default changed from Blackwood's published 10-entry schedule to the 9-entry
+        // one with 239 dropped -- this used to be opt-in only (a process had to be launched with
+        // the env var explicitly set), which is exactly the kind of setting that silently reverts
+        // on the next restart if nobody remembers to set it again. It's now the baked-in default,
+        // matching BwUtil.BREAK_INDEXES_ALLOWED on the Java/GPU side, since this schedule (not the
+        // original 10-break one) is what actually produced the 12-13 conflict boards. Still
+        // overridable via ETERNITY_BREAK_INDEXES for tuning sweeps.
         private static List<int> break_indexes_allowed = Load_Break_Indexes_Allowed();
 
         private static List<int> Load_Break_Indexes_Allowed()
         {
             string env = Environment.GetEnvironmentVariable("ETERNITY_BREAK_INDEXES");
             if (string.IsNullOrWhiteSpace(env))
-                return new List<int>() { 201, 206, 211, 216, 221, 225, 229, 233, 237, 239 };
+                return new List<int>() { 201, 206, 211, 216, 221, 225, 229, 233, 237 };
 
             return env.Split(',').Select(s => int.Parse(s.Trim())).ToList();
         }

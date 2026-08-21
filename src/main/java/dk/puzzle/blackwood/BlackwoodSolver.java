@@ -1,19 +1,34 @@
 package dk.puzzle.blackwood;
 
+import dk.puzzle.core.Eternity;
+import dk.puzzle.io.BucasExporter;
+import dk.puzzle.model.PieceInventory;
+import dk.puzzle.tools.HoleSolver;
+import dk.puzzle.util.PieceUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import java.io.IOException;
+import java.nio.file.DirectoryStream;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Faithful port of Blackwood's {@code Program.cs} — table orchestration, the
@@ -25,8 +40,23 @@ public class BlackwoodSolver {
     private static final Logger logger = LogManager.getLogger(BlackwoodSolver.class);
 
     static final long DEFAULT_NODE_CAP = 50_000_000_000L; // matches C# `node_count > 50000000000`
-    private static final int DEFAULT_SAVE_THRESHOLD = 190; // matches the currently-running C# instance, not his original 252
+    // 2026-08-19: raised 190 -> 248 to match the C# solver's own Program.cs, which made the same
+    // change after 190 produced 389,856 boards (377K of them below 248, averaging 18-19 conflicts
+    // vs the 12-conflict record) that flooded OneDrive and that nothing downstream reads -- the
+    // conflict tracker's own floor is 248. Keep these two numbers in step (their comment says the
+    // same thing back).
+    private static final int DEFAULT_SAVE_THRESHOLD = 248;
     private static final int ATTEMPTS_PER_WORKER_PER_BATCH = 5;
+    // Matches the C# solver's / GPU runner's own trial count for HoleSolver's completion pass.
+    private static final int SCORING_TRIALS = 5000;
+    // 2026-08-19: labelled save format, matching the GPU runner and C# solver -- conflicts first
+    // in the name so the three engines' output is directly comparable at a glance, and so
+    // BwSeedLoader (which already recognizes this exact pattern) can use this port's own best
+    // boards as seeds elsewhere.
+    private static final Pattern LABELLED_NAME = Pattern.compile("^Errors(\\d+)_Base(\\d+)_.*_RawBoard\\.txt$");
+    // 2026-08-19: dedicated links-only log, mirroring BlackwoodGpuRunner's COMPLETED_LINKS_LOG --
+    // same reasoning, same format, so both are grep-able the same way.
+    private static final Path COMPLETED_LINKS_LOG = Path.of("logs", "java_port_completed_links.log");
 
     private final int saveThreshold;
     private final Path outputDir;
@@ -35,6 +65,9 @@ public class BlackwoodSolver {
 
     private List<BwPiece> boardPieces;
     private BwPiece[] pieceByNumber; // index = pieceNumber, length 257
+    private PieceInventory inventory; // HoleSolver's own representation, built once alongside boardPieces
+    // Concurrent: evaluateAndMaybeSave can be called from any of numWorkers worker threads at once.
+    private final Set<String> savedCompletedBoards = ConcurrentHashMap.newKeySet();
 
     // Rebuilt by prepare() once per outer batch; read-only for that batch's lifetime.
     // Safe publication relies on all workers being submit()'d only after prepare()
@@ -79,10 +112,13 @@ public class BlackwoodSolver {
     }
 
     private static Path defaultOutputDir() {
-        // Plain user.home-based heuristic, not .NET's Known Folder API -- could diverge if
-        // Documents is redirected (e.g. OneDrive). Kept separate from the C# solver's own
-        // Documents\EternitySolutions\ so provenance of any given save file is unambiguous.
-        return Path.of(System.getProperty("user.home"), "Documents", "EternitySolutions_JavaPort");
+        // 2026-08-19: moved off Documents\... -- Documents is OneDrive-redirected by Known Folder
+        // Move on this machine (see commit 9286a98, "Move C# board output off OneDrive": 389,856
+        // synced files, ~1GB, filled the quota before anyone noticed). UserProfile itself is never
+        // touched by KFM, so this stays local -- same convention as the GPU runner's
+        // ~/EternitySolutions_GpuBlackwood and the C# solver's ~/EternitySolutions, just with its
+        // own suffix so provenance of any given save file is still unambiguous.
+        return Path.of(System.getProperty("user.home"), "EternitySolutions_JavaPort");
     }
 
     private static int defaultWorkerCount() {
@@ -101,6 +137,9 @@ public class BlackwoodSolver {
             for (BwPiece p : boardPieces) {
                 pieceByNumber[p.pieceNumber()] = p;
             }
+            // HoleSolver's own representation, needed by evaluateAndMaybeSave's completion pass --
+            // separate from Blackwood's raw numbering above, built once since it never changes.
+            inventory = new PieceInventory(Eternity.loadPieces());
         }
 
         List<BwPiece> cornerPieces = boardPieces.stream().filter(p -> p.pieceType() == 2).toList();
@@ -224,7 +263,7 @@ public class BlackwoodSolver {
             if (solveIndex > maxSolveIndex) {
                 maxSolveIndex = solveIndex;
                 if (maxSolveIndex >= saveThreshold) {
-                    trySave(board, maxSolveIndex);
+                    evaluateAndMaybeSave(board, maxSolveIndex);
                     if (maxSolveIndex >= 256) {
                         return new SolveResult(maxSolveIndex, board, nodeCount, true);
                     }
@@ -296,12 +335,127 @@ public class BlackwoodSolver {
         }
     }
 
-    private void trySave(BwRotatedPiece[] board, int maxSolveIndex) {
+    /**
+     * Completes the board via HoleSolver, and saves it labelled with its real conflict count --
+     * matching the GPU runner's own evaluateAndMaybeSave and the C# solver's TryLabelWithConflictCount,
+     * so all three engines' output is directly comparable and equally disk-disciplined. Only keeps
+     * boards within 1 conflict of whatever is already the best on disk (see pruneAboveThreshold) --
+     * without this gate, this path reproduces exactly the flood that moved the output off OneDrive
+     * in the first place, just with fancier filenames.
+     */
+    private void evaluateAndMaybeSave(BwRotatedPiece[] board, int maxSolveIndex) {
         try {
-            Path saved = BwUtil.saveBoard(board, maxSolveIndex, pieceByNumber, outputDir);
-            logger.info("Saved new personal best: maxSolveIndex={} -> {}", maxSolveIndex, saved);
+            String boardString = BwUtil.buildBoardString(board, pieceByNumber);
+            String link = boardString.substring(boardString.lastIndexOf("https://"));
+
+            int[] decoded = HoleSolver.decodeBoardAuto(link, inventory, false);
+            HoleSolver.ConflictSolveResult result = HoleSolver.solveConflicts(decoded, inventory, false, SCORING_TRIALS);
+            int[] completed = result.bestBoard();
+            int conflicts = countConflicts(completed);
+
+            int bestOnDisk = bestConflictsOnDisk(outputDir);
+            int keepThreshold = (bestOnDisk == Integer.MAX_VALUE) ? Integer.MAX_VALUE : bestOnDisk + 1;
+            if (conflicts > keepThreshold) {
+                logger.debug("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving",
+                        maxSolveIndex, conflicts, bestOnDisk);
+                return;
+            }
+
+            String completedLink = BucasExporter.exportBoard(completed);
+            if (!savedCompletedBoards.add(completedLink)) {
+                logger.debug("Completed board at {} conflicts already saved, skipping duplicate", conflicts);
+                return;
+            }
+
+            Files.createDirectories(outputDir);
+            String timeId = LocalTime.now().format(DateTimeFormatter.ofPattern("HHmmss_SSS"));
+            String prefix = "Errors" + conflicts + "_Base" + maxSolveIndex + "_" + timeId;
+            HoleSolver.writePhysicalLayoutFile(outputDir.resolve(prefix + "_physical_layout.txt").toString(),
+                    inventory, result.finalBoard(), result.repairedBoard());
+            HoleSolver.writeRawBoardFile(outputDir.resolve(prefix + "_RawBoard.txt").toString(), inventory, completed);
+            // Third sibling, in Blackwood's own piece numbering -- what BwSeedLoader can actually
+            // read as a future seed, same rationale as the GPU runner's own baseboard file.
+            Files.writeString(outputDir.resolve(prefix + "_baseboard.txt"), boardString);
+            logger.info("Saved new personal best [depth-record]: {} pieces, {} conflicts -> {}", maxSolveIndex, conflicts, prefix);
+            appendCompletedLink(prefix, conflicts, maxSolveIndex, completedLink);
+
+            pruneAboveThreshold(outputDir, conflicts);
         } catch (Exception e) {
-            logger.error("Failed to save board at solveIndex={}", maxSolveIndex, e);
+            logger.error("Failed to evaluate/save board at solveIndex={}", maxSolveIndex, e);
+        }
+    }
+
+    /**
+     * Appends one line to {@link #COMPLETED_LINKS_LOG}. Best-effort: a failure here must never
+     * affect the save that already succeeded. Direct file write, not a log4j appender -- same
+     * reasoning as the GPU runner's own appendCompletedLink.
+     */
+    private static void appendCompletedLink(String prefix, int conflicts, int depth, String link) {
+        try {
+            Files.createDirectories(COMPLETED_LINKS_LOG.getParent());
+            String timestamp = java.time.LocalDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            String line = String.format("%s  conflicts=%-3d depth=%-3d  %s_RawBoard.txt  %s%n",
+                    timestamp, conflicts, depth, prefix, link);
+            Files.writeString(COMPLETED_LINKS_LOG, line, java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            logger.warn("Could not append to {}", COMPLETED_LINKS_LOG, e);
+        }
+    }
+
+    private static int countConflicts(int[] board) {
+        int conflicts = 0;
+        for (int r = 0; r < 16; r++) {
+            for (int c = 0; c < 16; c++) {
+                int i = r * 16 + c;
+                if (c < 15 && PieceUtils.getEast(board[i]) != PieceUtils.getWest(board[i + 1])) conflicts++;
+                if (r < 15 && PieceUtils.getSouth(board[i]) != PieceUtils.getNorth(board[i + 16])) conflicts++;
+            }
+        }
+        return conflicts;
+    }
+
+    static int bestConflictsOnDisk(Path outputDir) {
+        int best = Integer.MAX_VALUE;
+        if (!Files.isDirectory(outputDir)) return best;
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(outputDir, "Errors*_RawBoard.txt")) {
+            for (Path p : stream) {
+                Matcher m = LABELLED_NAME.matcher(p.getFileName().toString());
+                if (m.matches()) best = Math.min(best, Integer.parseInt(m.group(1)));
+            }
+        } catch (IOException e) {
+            logger.warn("Could not scan {} for best-on-disk conflicts", outputDir, e);
+        }
+        return best;
+    }
+
+    /** Keeps only boards within 1 conflict of the best currently on disk -- mirrors the GPU runner's own policy. */
+    static void pruneAboveThreshold(Path outputDir, int justSavedConflicts) {
+        try {
+            Map<Path, Integer> conflictsByFile = new HashMap<>();
+            try (DirectoryStream<Path> stream = Files.newDirectoryStream(outputDir, "Errors*_RawBoard.txt")) {
+                for (Path p : stream) {
+                    Matcher m = LABELLED_NAME.matcher(p.getFileName().toString());
+                    if (m.matches()) conflictsByFile.put(p, Integer.parseInt(m.group(1)));
+                }
+            }
+            if (conflictsByFile.isEmpty()) return;
+
+            int keepThreshold = conflictsByFile.values().stream().mapToInt(Integer::intValue).min().orElse(0) + 1;
+            for (Map.Entry<Path, Integer> entry : conflictsByFile.entrySet()) {
+                if (entry.getValue() <= keepThreshold) continue;
+                Path rawBoardFile = entry.getKey();
+                String name = rawBoardFile.getFileName().toString();
+                String prefix = name.substring(0, name.length() - "_RawBoard.txt".length());
+                Path layoutFile = rawBoardFile.resolveSibling(prefix + "_physical_layout.txt");
+                Path baseboardFile = rawBoardFile.resolveSibling(prefix + "_baseboard.txt");
+                Files.deleteIfExists(rawBoardFile);
+                Files.deleteIfExists(layoutFile);
+                Files.deleteIfExists(baseboardFile);
+            }
+        } catch (IOException e) {
+            logger.warn("Retention cleanup failed in {}", outputDir, e);
         }
     }
 

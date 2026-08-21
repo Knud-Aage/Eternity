@@ -529,13 +529,13 @@ public class BlackwoodGpuRunner {
             int bestOnDisk = bestConflictsOnDisk(outputDir);
             int keepThreshold = (bestOnDisk == Integer.MAX_VALUE) ? Integer.MAX_VALUE : bestOnDisk + 1;
             if (conflicts > keepThreshold) {
-                // Harvest rejects most of what it scores by design, so keep that at debug level;
-                // a rejected DEPTH record is rare and worth seeing.
+                // Harvest rejects most of what it scores by design, so this is the dominant line
+                // volume in this log once enabled at info level.
                 if (depthRecord) {
                     logger.info("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving",
                             maxSolveIndex, conflicts, bestOnDisk);
                 } else {
-                    logger.debug("Harvested board at {} pieces completed to {} conflicts (best-on-disk {}), not saving",
+                    logger.info("Harvested board at {} pieces completed to {} conflicts (best-on-disk {}), not saving",
                             maxSolveIndex, conflicts, bestOnDisk);
                 }
                 return;

@@ -13,9 +13,29 @@
             </Policies>
             <DefaultRolloverStrategy max="20"/>
         </RollingFile>
+
+        <!-- 2026-08-19: dedicated log for the Java CPU port (dk.puzzle.blackwood.BlackwoodSolver),
+             same motivation as gpu_completed_links.log: eternity_solver.log is shared with the
+             GPU runner (a launch line every ~6s) and 27 worker threads' own Tables-rebuilt/Attempt-
+             done/Saved lines were getting lost in that noise. -->
+        <RollingFile name="JavaPortLogger" fileName="logs/java_port.log"
+                     filePattern="logs/java_port-%d{yyyy-MM-dd}-%i.log">
+            <PatternLayout pattern="%d{yyyy-MM-dd HH:mm:ss} [%-5level] [%t] %logger{36} - %msg%n"/>
+            <Policies>
+                <SizeBasedTriggeringPolicy size="10MB"/>
+            </Policies>
+            <DefaultRolloverStrategy max="20"/>
+        </RollingFile>
     </Appenders>
 
     <Loggers>
+        <!-- Exact class name, not a package-level match: BlackwoodGpuRunner also lives in
+             dk.puzzle.blackwood and must stay on the shared log untouched. additivity="false" so
+             these lines land ONLY here, not duplicated into eternity_solver.log too. -->
+        <Logger name="dk.puzzle.blackwood.BlackwoodSolver" level="info" additivity="false">
+            <AppenderRef ref="JavaPortLogger"/>
+        </Logger>
+
         <Root level="info">
             <AppenderRef ref="Console"/>
             <AppenderRef ref="FileLogger"/>
