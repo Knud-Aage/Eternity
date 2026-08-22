@@ -8,6 +8,7 @@ import dk.puzzle.ui.StartupDialog;
 import javax.swing.*;
 import java.awt.*;
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
@@ -53,6 +54,16 @@ public class Eternity {
 
         if (!dialog.isStartClicked()) {
             System.exit(0);
+        }
+
+        if (dialog.isUseBlackwoodStandalone()) {
+            // Deliberately bypasses everything below -- EternitySolver's own board-order-only
+            // BuildStrategy.BLACKWOOD and this GUI's live BoardVisualizer/Director Controls don't
+            // apply here. This launches the actual tuned, verified standalone program as its own
+            // process, same class and classpath this JVM is already running with, same convention
+            // as run-blackwood.cmd/run-blackwood-gpu.cmd.
+            launchStandaloneBlackwood(dialog.isUseGpu());
+            return;
         }
 
         System.out.println("Loading Eternity II Engine...");
@@ -300,6 +311,33 @@ public class Eternity {
                 frame.setTitle(String.format("Eternity II - Current: %d | Record: %d | Total: 256 pieces %s", current, record, status));
             }).start();
         });
+    }
+
+    /**
+     * Launches the standalone, tuned Blackwood engine ({@code BlackwoodGpuRunner} or
+     * {@code BlackwoodSolver}) as its own JVM process, using this JVM's own java executable and
+     * classpath -- both already proven to have everything these classes need, since they're part
+     * of the same module. Mirrors run-blackwood-gpu.cmd/run-blackwood.cmd exactly, just without
+     * depending on cp.txt being present or current. Inherits this process's IO so console output
+     * (and this app's own working directory, for the relative logs/ and output paths both
+     * programs use) carries straight through.
+     */
+    private static void launchStandaloneBlackwood(boolean useGpu) {
+        String javaBin = System.getProperty("java.home") + File.separator + "bin" + File.separator + "java";
+        String mainClass = useGpu ? "dk.puzzle.blackwood.BlackwoodGpuRunner" : "dk.puzzle.blackwood.BlackwoodSolver";
+
+        System.out.println("Launching standalone Blackwood engine (" + (useGpu ? "GPU" : "CPU") + "): " + mainClass);
+
+        ProcessBuilder pb = new ProcessBuilder(javaBin, "-cp", System.getProperty("java.class.path"), mainClass);
+        pb.inheritIO();
+        try {
+            Process process = pb.start();
+            process.waitFor();
+        } catch (IOException e) {
+            System.err.println("Failed to launch " + mainClass + ": " + e.getMessage());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     /**
