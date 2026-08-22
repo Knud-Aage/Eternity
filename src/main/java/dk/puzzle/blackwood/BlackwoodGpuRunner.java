@@ -568,10 +568,32 @@ public class BlackwoodGpuRunner {
             // Same convention as the C# solver's Util.cs, so both logs are grep-able the same way.
             logger.info("COMPLETED_LINK {}_RawBoard.txt: {}", prefix, completedLink);
             appendCompletedLink(prefix, conflicts, maxSolveIndex, completedLink);
+            uploadRecordToDrive(prefix, conflicts, completedLink, "GPU");
 
             pruneAboveThreshold(outputDir, conflicts);
         } catch (Exception e) {
             logger.error("Failed to evaluate/save board at solveIndex={}", maxSolveIndex, e);
+        }
+    }
+
+    /**
+     * Uploads a small text record (conflicts, source, timestamp, bucas link) to Google Drive.
+     * Called on every local save -- the local save gate itself (within 1 of best-on-disk) already
+     * keeps volume bounded, and at the current 9-13 conflict range saves are rare enough that the
+     * user wants all of them mirrored to Drive rather than only strict new records. Never lets a
+     * Drive failure affect the save that already succeeded locally.
+     */
+    private static void uploadRecordToDrive(String prefix, int conflicts, String completedLink, String source) {
+        try {
+            String timestamp = java.time.LocalDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            java.io.File linkFile = java.io.File.createTempFile(prefix + "_", "_link.txt");
+            java.nio.file.Files.writeString(linkFile.toPath(), String.format(
+                    "Edge Conflicts: %d%nSource: %s%nTime: %s%n%s%n", conflicts, source, timestamp, completedLink));
+            dk.puzzle.io.RecordManager.uploadToDrive(linkFile, "text/plain", "Blackwood");
+            linkFile.delete();
+        } catch (Exception e) {
+            logger.warn("Drive upload failed for new record {} ({} conflicts)", prefix, conflicts, e);
         }
     }
 

@@ -378,6 +378,7 @@ public class BlackwoodSolver {
             Files.writeString(outputDir.resolve(prefix + "_baseboard.txt"), boardString);
             logger.info("Saved new personal best [depth-record]: {} pieces, {} conflicts -> {}", maxSolveIndex, conflicts, prefix);
             appendCompletedLink(prefix, conflicts, maxSolveIndex, completedLink);
+            uploadRecordToDrive(prefix, conflicts, completedLink, "Java-CPU");
 
             pruneAboveThreshold(outputDir, conflicts);
         } catch (Exception e) {
@@ -401,6 +402,27 @@ public class BlackwoodSolver {
                     java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
         } catch (IOException e) {
             logger.warn("Could not append to {}", COMPLETED_LINKS_LOG, e);
+        }
+    }
+
+    /**
+     * Uploads a small text record (conflicts, source, timestamp, bucas link) to Google Drive.
+     * Called on every local save -- the local save gate itself (within 1 of best-on-disk) already
+     * keeps volume bounded, and at the current 9-13 conflict range saves are rare enough that the
+     * user wants all of them mirrored to Drive rather than only strict new records. Never lets a
+     * Drive failure affect the save that already succeeded locally.
+     */
+    private static void uploadRecordToDrive(String prefix, int conflicts, String completedLink, String source) {
+        try {
+            String timestamp = java.time.LocalDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"));
+            java.io.File linkFile = java.io.File.createTempFile(prefix + "_", "_link.txt");
+            Files.writeString(linkFile.toPath(), String.format(
+                    "Edge Conflicts: %d%nSource: %s%nTime: %s%n%s%n", conflicts, source, timestamp, completedLink));
+            dk.puzzle.io.RecordManager.uploadToDrive(linkFile, "text/plain", "Blackwood");
+            linkFile.delete();
+        } catch (Exception e) {
+            logger.warn("Drive upload failed for new record {} ({} conflicts)", prefix, conflicts, e);
         }
     }
 
