@@ -20,6 +20,7 @@ public class StartupDialog extends JDialog {
     private boolean lockCenter = true;
     private boolean startClicked = false;
     private boolean usePbp = false;
+    private boolean useBlackwoodStandalone = true; // <--- NEW: default selection, index 0
     private boolean useGpu = false;
     private boolean useSpiral = false; // <--- NEW: Stores the build order choice
 
@@ -43,6 +44,7 @@ public class StartupDialog extends JDialog {
         // 1. Solving Strategy
         panel.add(new JLabel("Solving Strategy:"));
         strategyBox = new JComboBox<>(new String[]{
+                "Blackwood (standalone, tuned)",
                 "Piece-by-Piece"
         });
         panel.add(strategyBox);
@@ -72,7 +74,8 @@ public class StartupDialog extends JDialog {
         JButton startBtn = new JButton("Start Engine");
         startBtn.setFont(new Font("Arial", Font.BOLD, 14));
         startBtn.addActionListener((ActionEvent e) -> {
-            usePbp = strategyBox.getSelectedIndex() == 0;
+            useBlackwoodStandalone = strategyBox.getSelectedIndex() == 0;
+            usePbp = strategyBox.getSelectedIndex() == 1;
             useSpiral = buildOrderBox.getSelectedIndex() == 1; // Capture the spiral choice
             lockCenter = lockCenterBox.isSelected();
             useGpu = hardwareBox.getSelectedIndex() == 0;
@@ -96,11 +99,23 @@ public class StartupDialog extends JDialog {
 
     /**
      * Determines whether the Piece-by-Piece strategy was selected.
-     * 
+     *
      * @return {@code true} if Piece-by-Piece is selected; {@code false} otherwise.
      */
     public boolean isUsePbp() {
         return usePbp;
+    }
+
+    /**
+     * Determines whether the standalone Blackwood engine was selected -- the default choice.
+     * Unlike {@code dk.puzzle.core.EternitySolver.BuildStrategy.BLACKWOOD}, which only borrows
+     * Blackwood's board-fill order inside this app's own PBP search, this launches the actual
+     * tuned, verified {@code BlackwoodSolver}/{@code BlackwoodGpuRunner} standalone programs.
+     *
+     * @return {@code true} if the standalone Blackwood engine is selected.
+     */
+    public boolean isUseBlackwoodStandalone() {
+        return useBlackwoodStandalone;
     }
 
     /**
