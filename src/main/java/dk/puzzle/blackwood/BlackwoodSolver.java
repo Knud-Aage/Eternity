@@ -222,8 +222,27 @@ public class BlackwoodSolver {
         return list.stream().filter(c -> c.rotatedPiece().rotations() == rotation).toList();
     }
 
-    public record SolveResult(int maxSolveIndex, BwRotatedPiece[] board, long nodeCount, boolean completed) {
+    /**
+     * @param lastImprovementNode nodeCount at which maxSolveIndex last increased. Pure
+     *   instrumentation for the 2026-08-24 stagnation study: the gap between this and nodeCount is
+     *   how long the attempt ran without getting any deeper, which is what a stagnation-based
+     *   restart rule would need to be tuned against. Measured before building the rule rather
+     *   than guessing a threshold.
+     */
+    /**
+     * @param maxLateGap largest run of nodes that passed with NO depth gain and was then followed by
+     *   a gain reaching depth >= {@link #LATE_DEPTH}. This is the number a stagnation-based restart
+     *   threshold must exceed: set the threshold below this and the rule would have killed an
+     *   attempt during a quiet spell that was, in fact, about to produce a deep improvement.
+     *   {@code lastImprovementNode} alone can't show this -- it only measures the tail after the
+     *   final gain, not the dry spells between gains.
+     */
+    public record SolveResult(int maxSolveIndex, BwRotatedPiece[] board, long nodeCount, boolean completed,
+                              long lastImprovementNode, long maxLateGap) {
     }
+
+    /** Depth past which an improvement counts as "late" for {@link SolveResult#maxLateGap}. */
+    static final int LATE_DEPTH = 240;
 
     /** Java-only guard: the general row==0,col==0 path would otherwise read board[-1] (see plan's edge-case note). */
     static boolean attemptExhausted(int solveIndex) {
@@ -256,27 +275,37 @@ public class BlackwoodSolver {
         int solveIndex = 1;
         int maxSolveIndex = solveIndex;
         long nodeCount = 0;
+        long lastImprovementNode = 0;
+        long maxLateGap = 0;
 
         while (true) {
             nodeCount++;
 
             if (solveIndex > maxSolveIndex) {
+                // Measure the quiet spell BEFORE overwriting lastImprovementNode. Only gains that
+                // land deep count: the early climb to ~240 is near-instant and its sub-second gaps
+                // would drown out the late-stage dry spells that actually set the threshold.
+                if (solveIndex >= LATE_DEPTH) {
+                    long gap = nodeCount - lastImprovementNode;
+                    if (gap > maxLateGap) maxLateGap = gap;
+                }
                 maxSolveIndex = solveIndex;
+                lastImprovementNode = nodeCount;
                 if (maxSolveIndex >= saveThreshold) {
                     evaluateAndMaybeSave(board, maxSolveIndex);
                     if (maxSolveIndex >= 256) {
-                        return new SolveResult(maxSolveIndex, board, nodeCount, true);
+                        return new SolveResult(maxSolveIndex, board, nodeCount, true, lastImprovementNode, maxLateGap);
                     }
                 }
             }
 
             if (nodeCount > nodeCap) {
-                return new SolveResult(maxSolveIndex, board, nodeCount, false);
+                return new SolveResult(maxSolveIndex, board, nodeCount, false, lastImprovementNode, maxLateGap);
             }
 
             if (attemptExhausted(solveIndex)) {
                 exhaustedAtSeedCount.incrementAndGet();
-                return new SolveResult(maxSolveIndex, board, nodeCount, false);
+                return new SolveResult(maxSolveIndex, board, nodeCount, false, lastImprovementNode, maxLateGap);
             }
 
             int row = boardOrderRow[solveIndex];
@@ -499,8 +528,12 @@ public class BlackwoodSolver {
                 futures.add(executor.submit(() -> {
                     for (int x = 0; x < ATTEMPTS_PER_WORKER_PER_BATCH; x++) {
                         SolveResult r = solvePuzzle();
-                        logger.info("Attempt done: maxSolveIndex={} nodeCount={} completed={}",
-                                r.maxSolveIndex(), r.nodeCount(), r.completed());
+                        // stagnationNodes = how far this attempt ran after its LAST depth gain.
+                        // That gap is what a stagnation-based restart rule would cut off, so its
+                        // distribution is what should pick the threshold -- not a guessed 2B/5B.
+                        logger.info("Attempt done: maxSolveIndex={} nodeCount={} completed={} lastImprovementNode={} stagnationNodes={} maxLateGap={}",
+                                r.maxSolveIndex(), r.nodeCount(), r.completed(),
+                                r.lastImprovementNode(), r.nodeCount() - r.lastImprovementNode(), r.maxLateGap());
                     }
                 }));
             }

@@ -58,7 +58,12 @@ public class BlackwoodGpuRunner {
     // depth went 160 (16384 threads) -> 246 (64 threads).
     // 1024 keeps the population mean depth high without giving up the parallelism entirely; it and
     // 16384 tied on max depth at equal wall-clock, but 1024 held a much deeper mean (205 vs 174).
-    private static final int NUM_THREADS = 1024;
+    // 2026-08-23: that comparison never actually included 64 or 256 -- BlackwoodGpuBreadthDepthHarness
+    // later found maxDepth flat (243-244) across 64..16384 threads at equal wall-clock, with meanDepth
+    // *favouring* fewer threads (151.6 at 64 vs 137.9 at 1024). A same-day quality harness scoring
+    // actual post-HoleSolver conflicts found no comparably large effect, but on too small a sample
+    // (18-56 boards) to rule one out. Overridable so a real overnight run can test it properly.
+    private static final int NUM_THREADS = parseIntEnv("ETERNITY_GPU_NUM_THREADS", 1024);
     // 2026-08-18, measured (BlackwoodGpuTdrCeilingHarness): a single launch survived cleanly up to
     // 171,261 ms (stepBudget=25,600,000) with no CUDA/TDR failure -- the "~2000ms WDDM TDR default"
     // this band used to target was never real on this machine/driver, off by roughly 5000x. The two
@@ -185,6 +190,17 @@ public class BlackwoodGpuRunner {
     // expected -- shared memory targets __constant__ cache-miss latency, not warp lockstep).
     private static final boolean SHARED_CACHE_ENABLED =
             !"false".equalsIgnoreCase(System.getenv("ETERNITY_GPU_SHARED_CACHE"));
+
+    private static int parseIntEnv(String name, int defaultValue) {
+        String v = System.getenv(name);
+        if (v == null || v.isBlank()) return defaultValue;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            System.err.println("Ignoring invalid " + name + "=" + v + ", using default " + defaultValue);
+            return defaultValue;
+        }
+    }
 
     // Trials for HoleSolver's completion pass when scoring a candidate save (see trySave).
     // Matches the C# solver's own established choice (Util.cs's TryLabelWithConflictCount) rather

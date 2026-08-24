@@ -24,9 +24,26 @@ public final class BwUtil {
 
     public static final int[] SIDE_EDGES = {1, 5, 9, 13, 17};
     public static final int[] HEURISTIC_SIDES = {13, 16, 10};
-    // 2026-08-18: dropped 239, matching Eternity-9-breaks' ETERNITY_BREAK_INDEXES -- the schedule
-    // that produced today's two 12-conflict drop_239 boards. Was 10 entries (this one plus 239);
-    // shared with BlackwoodSolver (the Java CPU port), not GPU-only -- both read this same table.
+    // 9-break (239 dropped). Shared by BlackwoodSolver (Java CPU port) AND BlackwoodGpuRunner.
+    //
+    // THE DECIDING REASON (2026-08-24): the goal is 471 = 9 conflicts. A search granted 10 breaks
+    // can spend all 10, so its best possible product is a 10-conflict board (470). Reaching 471
+    // structurally REQUIRES a 9-entry schedule. 10-break cannot get there by definition, however
+    // well it performs on intermediate metrics.
+    //
+    // Both schedules have produced 12-conflict boards here, so neither is "better" on results:
+    //   - 9-break 12s: logs/drop239_current.log (header confirms break_indexes without 239),
+    //     Errors12_Base249 and Errors12_Base250, 2026-08-19.
+    //   - 10-break 12s: 2026-08-13 (C#), and 2026-08-17 22:56/23:39 (GPU, inside a seeded-replay
+    //     window, so possibly not organic finds).
+    // A 2026-08-18 comment here once credited the 9-break switch with those 2026-08-17 GPU boards;
+    // that was wrong (they predate commit 54095c3 by ~18h), but the C# drop_239 run above is a
+    // separate, genuine 9-break result.
+    //
+    // Known cost, accepted deliberately: the leave-one-out sweep measured drop_239 reaching depth
+    // 248 ~70x more rarely than 10-break (0.2% vs 14.1%) -- though at a 500M node cap rather than
+    // production's 50B, and scored on raw depth rather than post-HoleSolver conflicts, so how much
+    // of that penalty transfers to production is not established.
     public static final int[] BREAK_INDEXES_ALLOWED = {201, 206, 211, 216, 221, 225, 229, 233, 237};
     public static final int MAX_HEURISTIC_INDEX = 160;
 

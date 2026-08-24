@@ -155,6 +155,8 @@ class BwUtilTest {
         assertEquals(7, arr[229]);
         assertEquals(8, arr[233]);
         assertEquals(9, arr[237]);
+        // Tracks BwUtil.BREAK_INDEXES_ALLOWED -- update whenever that schedule changes.
+        // Currently 9-break (239 dropped), so the budget tops out at 9, not 10.
         assertEquals(9, arr[239]);
         assertEquals(9, arr[255]);
     }
