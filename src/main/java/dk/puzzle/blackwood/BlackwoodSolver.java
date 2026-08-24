@@ -519,33 +519,49 @@ public class BlackwoodSolver {
                 logger.error("prepare() failed", e);
                 return;
             }
-            logger.info("Tables rebuilt; launching {} workers x {} attempts. breakIndexesAllowed={}",
-                    numWorkers, ATTEMPTS_PER_WORKER_PER_BATCH, Arrays.toString(BwUtil.BREAK_INDEXES_ALLOWED));
+            logger.info("Tables rebuilt; {} attempts queued across {} workers. breakIndexesAllowed={}",
+                    numWorkers * ATTEMPTS_PER_WORKER_PER_BATCH, numWorkers,
+                    Arrays.toString(BwUtil.BREAK_INDEXES_ALLOWED));
 
+            // 2026-08-24: shared work queue rather than a fixed slice of attempts per worker.
+            //
+            // The old shape was `for each of numWorkers: submit(() -> do exactly N attempts)`, which
+            // puts a barrier at the end of every batch: a worker that finishes its N early has
+            // nothing left to do and idles until the SLOWEST worker finishes its Nth. Attempt
+            // durations vary a lot (they all retire ~50B nodes, but not at the same rate), so that
+            // tail is not small. Measured over 8 complete batches in logs/java_port.log: mean 11.5%
+            // of all worker-time idle, and growing -- pool 7 wasted 4.2% with a 13-minute tail,
+            // pool 14 wasted 16.0% with a 2.6-HOUR tail.
+            //
+            // Same total attempts per batch and the same table-rebuild cadence; the only change is
+            // that a free worker pulls the next attempt instead of waiting. The batch still ends
+            // when all attempts are done, so tables are never rebuilt under a running search
+            // (which would invalidate the candidate tables a worker is mid-way through reading).
+            int attemptsThisBatch = numWorkers * ATTEMPTS_PER_WORKER_PER_BATCH;
             ExecutorService executor = Executors.newFixedThreadPool(numWorkers);
             List<Future<?>> futures = new ArrayList<>();
-            for (int w = 0; w < numWorkers; w++) {
+            for (int i = 0; i < attemptsThisBatch; i++) {
                 futures.add(executor.submit(() -> {
-                    for (int x = 0; x < ATTEMPTS_PER_WORKER_PER_BATCH; x++) {
-                        SolveResult r = solvePuzzle();
-                        // stagnationNodes = how far this attempt ran after its LAST depth gain.
-                        // That gap is what a stagnation-based restart rule would cut off, so its
-                        // distribution is what should pick the threshold -- not a guessed 2B/5B.
-                        logger.info("Attempt done: maxSolveIndex={} nodeCount={} completed={} lastImprovementNode={} stagnationNodes={} maxLateGap={}",
-                                r.maxSolveIndex(), r.nodeCount(), r.completed(),
-                                r.lastImprovementNode(), r.nodeCount() - r.lastImprovementNode(), r.maxLateGap());
-                    }
+                    SolveResult r = solvePuzzle();
+                    // stagnationNodes = how far this attempt ran after its LAST depth gain.
+                    // Kept from the 2026-08-24 stagnation study: measured, found not actionable
+                    // (deep gains follow LONG quiet spells), retained because it costs nothing --
+                    // period-over-period throughput was unchanged with it enabled.
+                    logger.info("Attempt done: maxSolveIndex={} nodeCount={} completed={} lastImprovementNode={} stagnationNodes={} maxLateGap={}",
+                            r.maxSolveIndex(), r.nodeCount(), r.completed(),
+                            r.lastImprovementNode(), r.nodeCount() - r.lastImprovementNode(), r.maxLateGap());
                 }));
             }
             for (Future<?> f : futures) {
                 try {
                     f.get();
                 } catch (Exception e) {
-                    logger.error("Worker failed", e);
+                    logger.error("Attempt failed", e);
                 }
             }
             executor.shutdown();
-            logger.info("Batch complete. exhaustedAtSeedCount so far = {}", exhaustedAtSeedCount());
+            logger.info("Batch complete ({} attempts). exhaustedAtSeedCount so far = {}",
+                    attemptsThisBatch, exhaustedAtSeedCount());
         }
     }
 
