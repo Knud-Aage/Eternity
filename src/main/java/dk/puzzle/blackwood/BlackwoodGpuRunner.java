@@ -392,6 +392,13 @@ public class BlackwoodGpuRunner {
         }
     }
 
+    /**
+     * min/mean/max alone can't answer the question that actually matters mid-run -- "how much of the
+     * population is still near the high score, and how much has fallen back?" A mean of 246 is the
+     * same whether one thread sits at 250 and the rest at 246, or thousands are at 249-250 and a
+     * long tail drags it down. So this also reports how many threads are within 0/1/2/5 of the
+     * deepest thread this launch. Costs nothing: threadDepths is already returned every launch.
+     */
     private static String describeDepths(int[] depths) {
         if (depths == null || depths.length == 0) return "n/a";
         int min = Integer.MAX_VALUE, max = Integer.MIN_VALUE;
@@ -401,7 +408,20 @@ public class BlackwoodGpuRunner {
             if (d > max) max = d;
             sum += d;
         }
-        return String.format("min=%d mean=%.1f max=%d", min, (double) sum / depths.length, max);
+        int atMax = 0, within1 = 0, within2 = 0, within5 = 0;
+        for (int d : depths) {
+            if (d == max) atMax++;
+            if (d >= max - 1) within1++;
+            if (d >= max - 2) within2++;
+            if (d >= max - 5) within5++;
+        }
+        int n = depths.length;
+        return String.format("min=%d mean=%.1f max=%d | at max:%d (%.1f%%) within1:%d (%.1f%%) within2:%d (%.1f%%) within5:%d (%.1f%%)",
+                min, (double) sum / n, max,
+                atMax, 100.0 * atMax / n,
+                within1, 100.0 * within1 / n,
+                within2, 100.0 * within2 / n,
+                within5, 100.0 * within5 / n);
     }
 
     private static final Pattern LABELLED_NAME = Pattern.compile("^Errors(\\d+)_Base(\\d+)_.*_RawBoard\\.txt$");
@@ -471,6 +491,11 @@ public class BlackwoodGpuRunner {
 
             int scored = 0;
             int skippedSeeds = 0;
+            // Conflict counts of everything scored this harvest. The per-board lines already carry
+            // these, but they're spread across ~12 lines buried between launch lines -- this rolls
+            // them into one number so "what quality is the population actually producing right now"
+            // is readable at a glance, without grepping.
+            List<Integer> harvestConflicts = new ArrayList<>();
             for (int idx = 0; idx < numThreads && scored < HARVEST_SAMPLE; idx++) {
                 int t = order[idx];
                 if (threadDepths[t] < HARVEST_MIN_DEPTH) break; // sorted, so nothing deeper remains
@@ -478,11 +503,20 @@ public class BlackwoodGpuRunner {
                 String fp = fingerprintOf(board);
                 if (seedFingerprints.contains(fp)) { skippedSeeds++; continue; } // a seed handed back, not a find
                 if (!harvestedFingerprints.add(fp)) continue;
-                evaluateAndMaybeSave(board, threadDepths[t], pieceByNumber, inventory, outputDir, false);
+                int conflicts = evaluateAndMaybeSave(board, threadDepths[t], pieceByNumber, inventory, outputDir, false);
+                if (conflicts >= 0) harvestConflicts.add(conflicts);
                 scored++;
             }
             if (scored > 0 || skippedSeeds > 0) {
-                logger.info("Harvest: scored {} new board(s), skipped {} seed replay(s)", scored, skippedSeeds);
+                String conflictSummary = "none scored";
+                if (!harvestConflicts.isEmpty()) {
+                    List<Integer> sorted = new ArrayList<>(harvestConflicts);
+                    java.util.Collections.sort(sorted);
+                    conflictSummary = String.format("best=%d median=%d worst=%d",
+                            sorted.get(0), sorted.get(sorted.size() / 2), sorted.get(sorted.size() - 1));
+                }
+                logger.info("Harvest: scored {} new board(s), skipped {} seed replay(s), conflicts[{}]",
+                        scored, skippedSeeds, conflictSummary);
             }
         } catch (Exception e) {
             logger.warn("Population harvest failed", e);
@@ -523,8 +557,13 @@ public class BlackwoodGpuRunner {
         evaluateAndMaybeSave(board, maxSolveIndex, pieceByNumber, inventory, outputDir, true);
     }
 
-    private static void evaluateAndMaybeSave(int[] board, int maxSolveIndex, BwPiece[] pieceByNumber,
-                                             PieceInventory inventory, Path outputDir, boolean depthRecord) {
+    /**
+     * @return the board's post-completion conflict count, whether or not it was saved, or -1 if
+     *   scoring failed. Callers that only want the side effect (see trySave) can ignore it;
+     *   harvestPopulation uses it to summarise the population's current quality in one line.
+     */
+    private static int evaluateAndMaybeSave(int[] board, int maxSolveIndex, BwPiece[] pieceByNumber,
+                                            PieceInventory inventory, Path outputDir, boolean depthRecord) {
         try {
             BwRotatedPiece[] rotatedBoard = new BwRotatedPiece[256];
             for (int i = 0; i < 256; i++) {
@@ -555,7 +594,7 @@ public class BlackwoodGpuRunner {
                     logger.info("Harvested board at {} pieces completed to {} conflicts (best-on-disk {}), not saving",
                             maxSolveIndex, conflicts, bestOnDisk);
                 }
-                return;
+                return conflicts;
             }
 
             // Dedupe on the completed board, not the partial one it came from -- see
@@ -565,7 +604,7 @@ public class BlackwoodGpuRunner {
             String completedLink = dk.puzzle.io.BucasExporter.exportBoard(completed);
             if (!savedCompletedBoards.add(completedLink)) {
                 logger.debug("Completed board at {} conflicts already saved, skipping duplicate", conflicts);
-                return;
+                return conflicts;
             }
 
             Files.createDirectories(outputDir);
@@ -587,8 +626,10 @@ public class BlackwoodGpuRunner {
             uploadRecordToDrive(prefix, conflicts, completedLink, "GPU");
 
             pruneAboveThreshold(outputDir, conflicts);
+            return conflicts;
         } catch (Exception e) {
             logger.error("Failed to evaluate/save board at solveIndex={}", maxSolveIndex, e);
+            return -1;
         }
     }
 
