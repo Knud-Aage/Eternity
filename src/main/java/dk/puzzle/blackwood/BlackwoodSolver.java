@@ -39,7 +39,11 @@ public class BlackwoodSolver {
 
     private static final Logger logger = LogManager.getLogger(BlackwoodSolver.class);
 
-    static final long DEFAULT_NODE_CAP = 50_000_000_000L; // matches C# `node_count > 50000000000`
+    // 2026-08-20 (ab_break9_cap25/cap100 vs ab_break9, all 8h): 25B/50B/100B tied on best (14) and
+    // mean/median (~16.9/17) -- no quality difference found, but that 4x range never got anywhere
+    // near GPU's persistent-lineage scale (~164 trillion nodes/epoch, 3000x+ beyond 50B), so it
+    // doesn't settle whether a much larger cap matters. Overridable so that can actually be tested.
+    static final long DEFAULT_NODE_CAP = parseLongEnv("ETERNITY_NODE_CAP", 50_000_000_000L); // matches C# `node_count > 50000000000`
     // 2026-08-19: raised 190 -> 248 to match the C# solver's own Program.cs, which made the same
     // change after 190 produced 389,856 boards (377K of them below 248, averaging 18-19 conflicts
     // vs the 12-conflict record) that flooded OneDrive and that nothing downstream reads -- the
@@ -452,6 +456,17 @@ public class BlackwoodSolver {
             linkFile.delete();
         } catch (Exception e) {
             logger.warn("Drive upload failed for new record {} ({} conflicts)", prefix, conflicts, e);
+        }
+    }
+
+    private static long parseLongEnv(String name, long defaultValue) {
+        String v = System.getenv(name);
+        if (v == null || v.isBlank()) return defaultValue;
+        try {
+            return Long.parseLong(v.trim());
+        } catch (NumberFormatException e) {
+            System.err.println("Ignoring invalid " + name + "=" + v + ", using default " + defaultValue);
+            return defaultValue;
         }
     }
 
