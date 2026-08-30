@@ -164,23 +164,30 @@ public class BlackwoodGpuRunner {
     // DISTRIBUTION over 3 minutes, not the rare long-horizon event exploration actually exists for
     // (escaping a basin the whole seed pool may share). That payoff is not measurable at this
     // timescale, so this is a deliberate hedge, not a measured optimum.
+    //
+    // Moot since 2026-08-30, SEEDING_ENABLED defaults off -- kept for whoever re-enables seeding.
     private static final int FRESH_FRACTION_PERCENT = 10;
     // Candidates to score before ranking. Scoring runs HoleSolver once per board (~1s each), and
     // only at an epoch boundary, so this bounds a startup cost rather than a per-launch one.
     private static final int MAX_SEED_CANDIDATES = 120;
 
-    // 2026-08-18: A/B lever, off by default (seeding stays on, matching production). Set
-    // ETERNITY_GPU_SEEDING=false to test pure random-restart search -- WITH the epoch-reset and
-    // thread-count fixes still active, unlike the original unseeded runs that motivated seeding in
-    // the first place. Exists because the evidence since has pointed the other way: seeded search's
-    // own duplicate-detection sweep found 28 unique boards out of 59 saved (more than half were the
-    // same board re-derived from a different retreat point), and both the retreat and fresh-fraction
-    // A/Bs showed perturbing away from the seed makes results MORE diverse and WORSE, never better --
-    // the signature of a narrow local optimum, not a neighbourhood with better boards nearby. Matches
-    // Blackwood's own account of his 470: a month of continuous pure random-restart search on one
-    // PC, his own word for it "luck" -- not refinement of a near-miss.
+    // 2026-08-18: A/B lever, added off by default. Exists because the evidence pointed the other
+    // way even then: seeded search's own duplicate-detection sweep found 28 unique boards out of 59
+    // saved (more than half were the same board re-derived from a different retreat point), and
+    // both the retreat and fresh-fraction A/Bs showed perturbing away from the seed makes results
+    // MORE diverse and WORSE, never better -- the signature of a narrow local optimum, not a
+    // neighbourhood with better boards nearby. Matches Blackwood's own account of his 470: a month
+    // of continuous pure random-restart search on one PC, his own word for it "luck" -- not
+    // refinement of a near-miss.
+    //
+    // 2026-08-30: default actually flipped to match this comment, on Blackwood's direct authority.
+    // The gap between what this comment already said and what the constant did went unnoticed for
+    // 12 days, during which the same-day mistake of raising FRESH_FRACTION_PERCENT to fight a
+    // duplicate-save rate was made without reading this file first -- that fix was already shown
+    // not to work by the exact A/B this comment cites. Read FRESH_FRACTION_PERCENT's own comment
+    // for the numbers before re-enabling seeding for that reason.
     private static final boolean SEEDING_ENABLED =
-            !"false".equalsIgnoreCase(System.getenv("ETERNITY_GPU_SEEDING"));
+            "true".equalsIgnoreCase(System.getenv("ETERNITY_GPU_SEEDING"));
 
     // 2026-08-18, verified (BlackwoodGpuSharedCacheHarness): bit-identical results to the
     // constant-memory kernel across chained launches (same highScore, nodesTaken, threadDepths,
