@@ -120,9 +120,9 @@ public class BlackwoodSolver {
         // Move on this machine (see commit 9286a98, "Move C# board output off OneDrive": 389,856
         // synced files, ~1GB, filled the quota before anyone noticed). UserProfile itself is never
         // touched by KFM, so this stays local -- same convention as the GPU runner's
-        // ~/EternitySolutions_GpuBlackwood and the C# solver's ~/EternitySolutions, just with its
+        // ~/EternitySolutions_GPU and the C# solver's ~/EternitySolutions_CSharpCPU, just with its
         // own suffix so provenance of any given save file is still unambiguous.
-        return Path.of(System.getProperty("user.home"), "EternitySolutions_JavaPort");
+        return Path.of(System.getProperty("user.home"), "EternitySolutions_JavaCPU");
     }
 
     private static int defaultWorkerCount() {
@@ -386,11 +386,18 @@ public class BlackwoodSolver {
             int[] completed = result.bestBoard();
             int conflicts = countConflicts(completed);
 
+            // 2026-08-28: see BlackwoodGpuRunner's identical comment -- measures how often
+            // HoleSolver's exact MRV completion clears every region vs. falling back to MCV
+            // heuristic repair, and (via budgetExhausted) whether that's an inconclusive
+            // budget timeout or a proven dead end, to decide whether an adaptive-rewind tail
+            // is worth building.
+            boolean exact = result.repairedBoard() == null;
+            boolean budgetExhausted = result.anyRegionBudgetExhausted();
             int bestOnDisk = bestConflictsOnDisk(outputDir);
             int keepThreshold = (bestOnDisk == Integer.MAX_VALUE) ? Integer.MAX_VALUE : bestOnDisk + 1;
             if (conflicts > keepThreshold) {
-                logger.debug("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving",
-                        maxSolveIndex, conflicts, bestOnDisk);
+                logger.info("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving, exact={}, budgetExhausted={}",
+                        maxSolveIndex, conflicts, bestOnDisk, exact, budgetExhausted);
                 return;
             }
 
@@ -409,7 +416,7 @@ public class BlackwoodSolver {
             // Third sibling, in Blackwood's own piece numbering -- what BwSeedLoader can actually
             // read as a future seed, same rationale as the GPU runner's own baseboard file.
             Files.writeString(outputDir.resolve(prefix + "_baseboard.txt"), boardString);
-            logger.info("Saved new personal best [depth-record]: {} pieces, {} conflicts -> {}", maxSolveIndex, conflicts, prefix);
+            logger.info("Saved new personal best [depth-record]: {} pieces, {} conflicts -> {}, exact={}, budgetExhausted={}", maxSolveIndex, conflicts, prefix, exact, budgetExhausted);
             appendCompletedLink(prefix, conflicts, maxSolveIndex, completedLink);
             uploadRecordToDrive(prefix, conflicts, completedLink, "Java-CPU");
 

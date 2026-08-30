@@ -42,10 +42,9 @@ public class BlackwoodGpuSeedingHarness {
         // --- Stage 1: load and validate seeds host-side ---
         Path home = Path.of(System.getProperty("user.home"));
         List<Path> dirs = List.of(
-                home.resolve("EternitySolutions_GpuBlackwood"),
-                home.resolve("EternitySolutions"),
-                home.resolve("EternitySolutions_drop239"),
-                home.resolve("Documents").resolve("EternitySolutions_JavaPort"));
+                home.resolve("EternitySolutions_GPU"),
+                home.resolve("EternitySolutions_CSharpCPU"),
+                home.resolve("EternitySolutions_JavaCPU"));
 
         List<BwSeedLoader.Seed> seeds = BwSeedLoader.load(dirs, MIN_SEED_DEPTH, MAX_SEEDS, tables.stepBoardIdx());
         System.out.println("=== Stage 1: seed pool ===");

@@ -219,10 +219,22 @@ public class BlackwoodGpuRunner {
     // that production would have discarded, because it was not deeper than 252.
     //
     // So periodically read the whole population's best boards, score the deepest previously-unseen
-    // ones, and save on conflicts alone. Interval and sample are sized so scoring (~1s/board) stays
-    // a few percent of wall time: 12 boards per ~300 launches is ~12s per ~3.5 minutes.
+    // ones, and save on conflicts alone. Interval and sample were originally sized so scoring
+    // (~1s/board, estimated) would stay a few percent of wall time: 12 boards per ~300 launches
+    // as ~12s per ~3.5 minutes.
+    //
+    // 2026-08-25: raised 12->100. Measured cost is actually ~0.3s/board (eternity_solver.log:
+    // 12 boards score in 3-4s wall clock per harvest), and the eligible population dwarfs the old
+    // sample -- a launch sampled at the same time showed depth[min=244 mean=246.6 max=251] across
+    // all 16384 threads, i.e. the ENTIRE population already clears HARVEST_MIN_DEPTH=240, so a
+    // top-12-by-depth cut was scoring under 0.1% of it. That matters because depth doesn't cleanly
+    // predict the post-HoleSolver conflict count (observed directly: depth-250 boards scoring
+    // 15/15/17 conflicts alongside depth-248 boards ranging 14-18), so a narrow top-N window misses
+    // better boards sitting just below the max depth. 100 boards/harvest is ~30s, still only ~1-2%
+    // of the ~22-25min interval between harvests at current launch speed -- HARVEST_INTERVAL has
+    // enough headroom on its own that it doesn't need to shrink to afford the bigger sample.
     private static final int HARVEST_INTERVAL = 300;
-    private static final int HARVEST_SAMPLE = 12;
+    private static final int HARVEST_SAMPLE = 100;
     private static final int HARVEST_MIN_DEPTH = 240;
     /** Boards already scored, so a stable population isn't re-scored every harvest. */
     private static final Set<String> harvestedFingerprints = new HashSet<>();
@@ -253,7 +265,7 @@ public class BlackwoodGpuRunner {
         // save path. Override with ETERNITY_GPU_SOLUTIONS_DIR to put boards on another drive.
         String configuredDir = System.getenv("ETERNITY_GPU_SOLUTIONS_DIR");
         Path outputDir = (configuredDir == null || configuredDir.isBlank())
-                ? Path.of(System.getProperty("user.home"), "EternitySolutions_GpuBlackwood")
+                ? Path.of(System.getProperty("user.home"), "EternitySolutions_GPU")
                 : Path.of(configuredDir);
 
         BlackwoodSolver solver = new BlackwoodSolver(SAVE_THRESHOLD, outputDir, 1, PIECES_PATH);
@@ -349,9 +361,12 @@ public class BlackwoodGpuRunner {
             Path home = Path.of(System.getProperty("user.home"));
             List<Path> dirs = List.of(
                     gpuOutputDir,
-                    home.resolve("EternitySolutions"),             // C# solver
-                    home.resolve("EternitySolutions_drop239"),     // C# solver, tuned break schedule
-                    home.resolve("Documents").resolve("EternitySolutions_JavaPort"));
+                    home.resolve("EternitySolutions_CSharpCPU"),   // C# solver (was split across
+                                                                    // EternitySolutions + _drop239;
+                                                                    // consolidated 2026-08-30)
+                    home.resolve("EternitySolutions_JavaCPU"));    // Java CPU port (was wrongly pointed
+                                                                    // at ~/Documents -- that path never
+                                                                    // existed; fixed 2026-08-30)
 
             List<BwSeedLoader.Seed> candidates =
                     BwSeedLoader.load(dirs, MIN_SEED_DEPTH, MAX_SEED_CANDIDATES, stepBoardIdx);
@@ -492,9 +507,9 @@ public class BlackwoodGpuRunner {
             int scored = 0;
             int skippedSeeds = 0;
             // Conflict counts of everything scored this harvest. The per-board lines already carry
-            // these, but they're spread across ~12 lines buried between launch lines -- this rolls
-            // them into one number so "what quality is the population actually producing right now"
-            // is readable at a glance, without grepping.
+            // these, but they're spread across up to HARVEST_SAMPLE lines buried between launch
+            // lines -- this rolls them into one number so "what quality is the population actually
+            // producing right now" is readable at a glance, without grepping.
             List<Integer> harvestConflicts = new ArrayList<>();
             for (int idx = 0; idx < numThreads && scored < HARVEST_SAMPLE; idx++) {
                 int t = order[idx];
@@ -584,15 +599,26 @@ public class BlackwoodGpuRunner {
 
             int bestOnDisk = bestConflictsOnDisk(outputDir);
             int keepThreshold = (bestOnDisk == Integer.MAX_VALUE) ? Integer.MAX_VALUE : bestOnDisk + 1;
+            // 2026-08-28: exact=true/false measures how often HoleSolver's primary MRV
+            // completion (RegionSolver) fully clears every region vs. falling back to the
+            // weaker MCV-heuristic repair (see HoleSolver.solveConflicts) -- repairedBoard()
+            // is non-null exactly when the fallback ran. budgetExhausted distinguishes WHY:
+            // true means a region hit its step budget inconclusively (more budget/a rewind
+            // could plausibly help); false means the region's search tree was fully exhausted,
+            // proving no zero-conflict rearrangement exists (more budget cannot change that).
+            // Only budgetExhausted=true cases are evidence for building an igorpejic-style
+            // adaptive-rewind tail -- see ConflictSolveResult's own doc for the full reasoning.
+            boolean exact = result.repairedBoard() == null;
+            boolean budgetExhausted = result.anyRegionBudgetExhausted();
             if (conflicts > keepThreshold) {
                 // Harvest rejects most of what it scores by design, so this is the dominant line
                 // volume in this log once enabled at info level.
                 if (depthRecord) {
-                    logger.info("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving",
-                            maxSolveIndex, conflicts, bestOnDisk);
+                    logger.info("Depth record at {} pieces completed to {} conflicts -- not within 1 of best-on-disk ({}), not saving, exact={}, budgetExhausted={}",
+                            maxSolveIndex, conflicts, bestOnDisk, exact, budgetExhausted);
                 } else {
-                    logger.info("Harvested board at {} pieces completed to {} conflicts (best-on-disk {}), not saving",
-                            maxSolveIndex, conflicts, bestOnDisk);
+                    logger.info("Harvested board at {} pieces completed to {} conflicts (best-on-disk {}), not saving, exact={}, budgetExhausted={}",
+                            maxSolveIndex, conflicts, bestOnDisk, exact, budgetExhausted);
                 }
                 return conflicts;
             }
@@ -618,8 +644,8 @@ public class BlackwoodGpuRunner {
             // internal numbering, this is what BwSeedLoader can actually read directly as a future
             // seed. Same rationale as the C# solver's Util.cs baseboard rename.
             Files.writeString(outputDir.resolve(prefix + "_baseboard.txt"), boardString);
-            logger.info("SAVED [{}]: {} pieces, {} conflicts -> {}",
-                    depthRecord ? "depth-record" : "harvest", maxSolveIndex, conflicts, prefix);
+            logger.info("SAVED [{}]: {} pieces, {} conflicts -> {}, exact={}, budgetExhausted={}",
+                    depthRecord ? "depth-record" : "harvest", maxSolveIndex, conflicts, prefix, exact, budgetExhausted);
             // Same convention as the C# solver's Util.cs, so both logs are grep-able the same way.
             logger.info("COMPLETED_LINK {}_RawBoard.txt: {}", prefix, completedLink);
             appendCompletedLink(prefix, conflicts, maxSolveIndex, completedLink);

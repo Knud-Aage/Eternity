@@ -339,7 +339,7 @@ namespace EternityII_Solver
             string path = Environment.GetEnvironmentVariable("ETERNITY_SOLUTIONS_DIR");
             if (string.IsNullOrWhiteSpace(path))
             {
-                path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "EternitySolutions");
+                path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "EternitySolutions_CSharpCPU");
             }
             Directory.CreateDirectory(path);
             System.IO.File.WriteAllText(Path.Combine(path, filename), board_string);
@@ -435,11 +435,12 @@ namespace EternityII_Solver
                 string captured = stdout.ToString();
                 int markerIdx = captured.IndexOf(marker, StringComparison.Ordinal);
                 string labelledName = newFiles.Select(Path.GetFileName).FirstOrDefault(n => n.Contains("_RawBoard.txt"));
+                string completedLink = null;
                 if (markerIdx >= 0)
                 {
                     string afterMarker = captured.Substring(markerIdx + marker.Length).TrimStart('\r', '\n');
                     int lineEnd = afterMarker.IndexOfAny(new[] { '\r', '\n' });
-                    string completedLink = (lineEnd >= 0 ? afterMarker.Substring(0, lineEnd) : afterMarker).Trim();
+                    completedLink = (lineEnd >= 0 ? afterMarker.Substring(0, lineEnd) : afterMarker).Trim();
                     if (completedLink.Length > 0)
                     {
                         Console.WriteLine("COMPLETED_LINK {0}: {1}", labelledName ?? ("depth" + maxSolveIndex), completedLink);
@@ -470,11 +471,68 @@ namespace EternityII_Solver
                         System.IO.File.Move(baseboardFilePath, renamedBaseboard, overwrite: true);
                     }
                     PruneAboveThreshold(saveDir);
+
+                    // PruneAboveThreshold may have just deleted THIS board (if it wasn't within 1 of
+                    // the best on disk) -- checking survival here instead of recomputing the threshold
+                    // ourselves means this can never drift out of sync with what pruning actually decided.
+                    Match conflictMatch = Regex.Match(prefix, @"^Errors(\d+)_");
+                    if (conflictMatch.Success && !string.IsNullOrEmpty(completedLink) &&
+                        System.IO.File.Exists(Path.Combine(saveDir, prefix + "_RawBoard.txt")))
+                    {
+                        UploadRecordToDrive(prefix, int.Parse(conflictMatch.Groups[1].Value), completedLink, "CSharp-9break");
+                    }
                 }
             }
             catch (Exception e)
             {
                 Console.WriteLine("WARNING: HoleSolver labelling failed for depth {0}: {1}", maxSolveIndex, e.Message);
+            }
+        }
+
+        /// <summary>
+        /// Mirrors the GPU/Java engines' own uploadRecordToDrive -- shelled out to a small Java CLI
+        /// (dk.puzzle.io.DriveUploadCli) rather than reimplemented here, since RecordManager's actual
+        /// Drive upload logic (auth, folder lookup, multipart upload) only exists on the Java side.
+        /// Same "never let this affect the save that already succeeded" wrapping as the HoleSolver call.
+        /// </summary>
+        private static void UploadRecordToDrive(string prefix, int conflicts, string completedLink, string source)
+        {
+            try
+            {
+                const string eternityRoot = @"C:\Users\knuda\IdeaProjects\Eternity";
+                const string javaExe = @"C:\Users\knuda\.jdks\ms-21.0.10\bin\java.exe";
+                string classpath = eternityRoot + @"\target\classes;" +
+                    System.IO.File.ReadAllText(Path.Combine(eternityRoot, "cp.txt")).Trim();
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = javaExe,
+                    WorkingDirectory = eternityRoot,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                psi.ArgumentList.Add("-cp");
+                psi.ArgumentList.Add(classpath);
+                psi.ArgumentList.Add("dk.puzzle.io.DriveUploadCli");
+                psi.ArgumentList.Add(prefix);
+                psi.ArgumentList.Add(conflicts.ToString());
+                psi.ArgumentList.Add(source);
+                psi.ArgumentList.Add(completedLink);
+
+                using (var proc = Process.Start(psi))
+                {
+                    if (!proc.WaitForExit(60000))
+                    {
+                        proc.Kill(entireProcessTree: true);
+                        Console.WriteLine("WARNING: Drive upload timed out for {0}", prefix);
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine("WARNING: Drive upload failed for {0}: {1}", prefix, e.Message);
             }
         }
 
@@ -490,7 +548,17 @@ namespace EternityII_Solver
                 }
                 if (conflictsByFile.Count == 0) return;
 
-                int keepThreshold = conflictsByFile.Values.Min() + 1;
+                // Normally "within 1 of best-on-disk", which tightens forever as the record
+                // improves -- fine near 471, but on the way there it means every future 12
+                // (already rare on its own) stops being saved/uploaded/kept the moment anything
+                // ever beats it, however far off that might be. This floor keeps <=12
+                // permanently save-worthy regardless of how much better minOnDisk gets, so
+                // results stay visible instead of thinning out over time. Mirror any change here
+                // in the Java ports' ALWAYS_SAVE_AT_OR_BELOW (BlackwoodGpuRunner.java,
+                // BlackwoodSolver.java in both repos).
+                string saveFloorEnv = Environment.GetEnvironmentVariable("ETERNITY_SAVE_FLOOR");
+                int saveFloor = string.IsNullOrWhiteSpace(saveFloorEnv) ? 12 : int.Parse(saveFloorEnv);
+                int keepThreshold = Math.Max(saveFloor, conflictsByFile.Values.Min() + 1);
 
                 // 2026-08-18: the baseboard is now a THIRD sibling (renamed onto the same prefix
                 // right before this runs -- see the call site) instead of being deleted
