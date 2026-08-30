@@ -24,27 +24,37 @@ public final class BwUtil {
 
     public static final int[] SIDE_EDGES = {1, 5, 9, 13, 17};
     public static final int[] HEURISTIC_SIDES = {13, 16, 10};
-    // 9-break (239 dropped). Shared by BlackwoodSolver (Java CPU port) AND BlackwoodGpuRunner.
+    // Blackwood's original 10-entry schedule. Shared by BlackwoodSolver (Java CPU port) AND
+    // BlackwoodGpuRunner.
     //
-    // THE DECIDING REASON (2026-08-24): the goal is 471 = 9 conflicts. A search granted 10 breaks
-    // can spend all 10, so its best possible product is a 10-conflict board (470). Reaching 471
-    // structurally REQUIRES a 9-entry schedule. 10-break cannot get there by definition, however
-    // well it performs on intermediate metrics.
+    // 239 was dropped 2026-08-24 and RESTORED 2026-08-30, because the reason for dropping it was
+    // wrong. That reason was: "a search granted 10 breaks can spend all 10, so its best possible
+    // product is a 10-conflict board (470); reaching 471 structurally REQUIRES a 9-entry schedule."
+    // It does not. The array is a per-depth CEILING, not a quota -- see getBreakArray() and the
+    // `breaksThisTurn = breakArray[solveIndex] - cumulativeBreaks[solveIndex-1]` check in
+    // BlackwoodSolver. Nothing obliges the search to spend its allowance, and candidates are scored
+    // `score - 100000 * breakCount` against only +/-99 of random jitter, so break-free placements
+    // are tried first at every step and a break is taken only when the search is otherwise stuck.
+    // A 10-break-allowed run that finishes on 9 breaks is a 471, perfectly legally.
     //
-    // Both schedules have produced 12-conflict boards here, so neither is "better" on results:
+    // Dropping 239 also cost reachability outright rather than trading it: getBreakArray() counts
+    // entries <= i, so the 9- and 10-entry arrays are IDENTICAL at every depth below 239 and the
+    // 10-entry one is strictly more permissive above it. The 10-break search tree is therefore a
+    // SUPERSET -- every board reachable under 9 breaks is also reachable under 10.
+    //
+    // The price paid for that was large and had already been measured: the leave-one-out sweep put
+    // drop_239 at ~70x rarer arrival at depth 248 (0.2% vs 14.1%), albeit at a 500M node cap rather
+    // than production's 50B and scored on raw depth rather than post-HoleSolver conflicts.
+    //
+    // Both schedules have produced 12-conflict boards, so neither is "better" on results:
     //   - 9-break 12s: logs/drop239_current.log (header confirms break_indexes without 239),
     //     Errors12_Base249 and Errors12_Base250, 2026-08-19.
     //   - 10-break 12s: 2026-08-13 (C#), and 2026-08-17 22:56/23:39 (GPU, inside a seeded-replay
     //     window, so possibly not organic finds).
-    // A 2026-08-18 comment here once credited the 9-break switch with those 2026-08-17 GPU boards;
-    // that was wrong (they predate commit 54095c3 by ~18h), but the C# drop_239 run above is a
-    // separate, genuine 9-break result.
-    //
-    // Known cost, accepted deliberately: the leave-one-out sweep measured drop_239 reaching depth
-    // 248 ~70x more rarely than 10-break (0.2% vs 14.1%) -- though at a 500M node cap rather than
-    // production's 50B, and scored on raw depth rather than post-HoleSolver conflicts, so how much
-    // of that penalty transfers to production is not established.
-    public static final int[] BREAK_INDEXES_ALLOWED = {201, 206, 211, 216, 221, 225, 229, 233, 237};
+    // Note also that the break budget is not what binds the final score in production: runs capped
+    // at 9 search breaks still finish at 12-13 conflicts, because HoleSolver's completion of the
+    // remaining holes adds the rest.
+    public static final int[] BREAK_INDEXES_ALLOWED = {201, 206, 211, 216, 221, 225, 229, 233, 237, 239};
     public static final int MAX_HEURISTIC_INDEX = 160;
 
     /**

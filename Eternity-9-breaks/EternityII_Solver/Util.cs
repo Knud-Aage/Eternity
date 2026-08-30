@@ -32,7 +32,14 @@ namespace EternityII_Solver
         {
             string env = Environment.GetEnvironmentVariable("ETERNITY_BREAK_INDEXES");
             if (string.IsNullOrWhiteSpace(env))
-                return new List<int>() { 201, 206, 211, 216, 221, 225, 229, 233, 237 };
+                // Blackwood's original 10-entry schedule. 239 was dropped 2026-08-24 on the theory
+                // that allowing 10 breaks capped the best possible result at 470, and restored
+                // 2026-08-30 because that was wrong: the schedule is a per-depth CEILING, not a
+                // quota, and Get_Rotated_Pieces scores breaks at -100000 each so the search takes
+                // one only when stuck. A 10-break-allowed run finishing on 9 breaks is a 471.
+                // See BwUtil.BREAK_INDEXES_ALLOWED in the Java ports for the full write-up.
+                // (The containing folder is still named Eternity-9-breaks for path stability.)
+                return new List<int>() { 201, 206, 211, 216, 221, 225, 229, 233, 237, 239 };
 
             return env.Split(',').Select(s => int.Parse(s.Trim())).ToList();
         }
