@@ -11,8 +11,8 @@
 .address_size 64
 
 	// .globl	solveBlackwoodDfs
-.const .align 4 .b8 c_csrOffset[21160];
-.const .align 4 .b8 c_csrCount[21160];
+.const .align 4 .b8 c_csrOffset[29624];
+.const .align 4 .b8 c_csrCount[29624];
 .const .align 4 .b8 c_bottomRawOffset[92];
 .const .align 4 .b8 c_bottomRawCount[92];
 .const .align 4 .b8 c_bottomRawPayload[384];

@@ -16,7 +16,10 @@ import java.util.List;
  */
 public final class BwGpuTables {
 
-    public static final int NUM_TABLES = 10;
+    // Must stay in sync with SolveBlackwoodKernel.cu's NUM_TABLES #define -- no automatic
+    // enforcement, and a mismatch silently corrupts the CSR layout on the GPU side. Requires a
+    // .ptx rebuild whenever this changes.
+    public static final int NUM_TABLES = 14;
     public static final int KEY_SPACE = 529;
 
     public static final int TABLE_CORNERS = 0;
@@ -29,6 +32,10 @@ public final class BwGpuTables {
     public static final int TABLE_SOUTH_START = 7;
     public static final int TABLE_WEST_START = 8;
     public static final int TABLE_START = 9;
+    public static final int TABLE_HINT_208 = 10;
+    public static final int TABLE_HINT_255 = 11;
+    public static final int TABLE_HINT_181 = 12;
+    public static final int TABLE_HINT_249 = 13;
 
     /** row==0 steps bypass c_stepToTableId entirely (handled directly in the kernel, mirroring
      *  BlackwoodSolver.solvePuzzle()'s own row==0 special case) -- this value is never read. */
@@ -69,13 +76,14 @@ public final class BwGpuTables {
         return new BwRotatedPiece(pieceNumber, rotations, topSide, rightSide, breakCount, heuristicSideCount);
     }
 
-    /** The 10 batch-level tables, in the fixed order the TABLE_* constants index into. */
+    /** The 14 batch-level tables, in the fixed order the TABLE_* constants index into. */
     private static BwRotatedPiece[][][] tablesInOrder(BlackwoodSolver solver) {
         return new BwRotatedPiece[][][]{
                 solver.corners, solver.leftSides, solver.topSides,
                 solver.rightSidesWithoutBreaks, solver.rightSidesWithBreaks,
                 solver.middlesNoBreak, solver.middlesWithBreak,
-                solver.southStart, solver.westStart, solver.start
+                solver.southStart, solver.westStart, solver.start,
+                solver.hint208, solver.hint255, solver.hint181, solver.hint249
         };
     }
 
