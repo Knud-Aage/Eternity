@@ -281,8 +281,14 @@ namespace EternityII_Solver
             var board_pieces = Util.Get_Pieces();
             var corner_pieces = board_pieces.Where(x => x.PieceType() == 2).ToList();
             var side_pieces = board_pieces.Where(x => x.PieceType() == 1).ToList();
-            var middle_pieces = board_pieces.Where(x => x.PieceType() == 0).Where(x => x.PieceNumber != 139).ToList(); // exclude start piece
+            var middle_pieces = board_pieces.Where(x => x.PieceType() == 0)
+                .Where(x => x.PieceNumber != 139 && x.PieceNumber != 208 && x.PieceNumber != 255 && x.PieceNumber != 181 && x.PieceNumber != 249)
+                .ToList(); // exclude the 5 official clue pieces
             var start_piece = board_pieces.Where(x => x.PieceNumber == 139).ToList();
+            var hint208_piece = board_pieces.Where(x => x.PieceNumber == 208).ToList();
+            var hint255_piece = board_pieces.Where(x => x.PieceNumber == 255).ToList();
+            var hint181_piece = board_pieces.Where(x => x.PieceNumber == 181).ToList();
+            var hint249_piece = board_pieces.Where(x => x.PieceNumber == 249).ToList();
 
             // corners
             var corner_pieces_rotated = corner_pieces.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
@@ -302,6 +308,10 @@ namespace EternityII_Solver
             var south_start_piece_rotated = middle_pieces.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.TopSide == 6).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
             var west_start_piece_rotated = middle_pieces.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.RightSide == 11).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
             var start_piece_rotated = start_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            var hint208_piece_rotated = hint208_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            var hint255_piece_rotated = hint255_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            var hint181_piece_rotated = hint181_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            var hint249_piece_rotated = hint249_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 3).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
 
             Random rand = new Random();
 
@@ -344,6 +354,22 @@ namespace EternityII_Solver
             start = new RotatedPiece[529][];
             foreach (var m in start_piece_rotated)
                 start[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
+
+            hint208 = new RotatedPiece[529][];
+            foreach (var m in hint208_piece_rotated)
+                hint208[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
+
+            hint255 = new RotatedPiece[529][];
+            foreach (var m in hint255_piece_rotated)
+                hint255[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
+
+            hint181 = new RotatedPiece[529][];
+            foreach (var m in hint181_piece_rotated)
+                hint181[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
+
+            hint249 = new RotatedPiece[529][];
+            foreach (var m in hint249_piece_rotated)
+                hint249[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
 
             board_search_sequence = Util.Get_Board_Order();
             break_array = Util.Get_Break_Array();
@@ -403,6 +429,14 @@ namespace EternityII_Solver
                                     master_piece_lookup[row * 16 + col] = middles_with_break;
                             }
                         }
+                        else if (row == 2 && col == 2)
+                            master_piece_lookup[row * 16 + col] = hint208;
+                        else if (row == 2 && col == 13)
+                            master_piece_lookup[row * 16 + col] = hint255;
+                        else if (row == 13 && col == 2)
+                            master_piece_lookup[row * 16 + col] = hint181;
+                        else if (row == 13 && col == 13)
+                            master_piece_lookup[row * 16 + col] = hint249;
                         else
                         {
                             if (i < Util.First_Break_Index())
@@ -442,6 +476,14 @@ namespace EternityII_Solver
         static RotatedPiece[][] south_start;
         static RotatedPiece[][] west_start;
         static RotatedPiece[][] start;
+        // The 4 non-center official Eternity II clues (piece 139/start is the 5th). Position and
+        // rotation independently re-derived and cross-checked three ways -- see the javadoc on
+        // BlackwoodSolver.HINT_PINS in the Java ports for the full derivation; identical values
+        // apply here unchanged since Get_Rotated_Pieces uses the same (T,R,B,L) rotation mapping.
+        static RotatedPiece[][] hint208;
+        static RotatedPiece[][] hint255;
+        static RotatedPiece[][] hint181;
+        static RotatedPiece[][] hint249;
         static Dictionary<ushort, List<RotatedPieceWithLeftBottom>> bottom_side_pieces_rotated;
         static RotatedPiece[][][] master_piece_lookup;
 
