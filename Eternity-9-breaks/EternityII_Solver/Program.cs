@@ -314,8 +314,12 @@ namespace EternityII_Solver
             var south_start_piece_rotated = middle_pieces.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.TopSide == 6).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
             var west_start_piece_rotated = middle_pieces.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.RightSide == 11).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
             var start_piece_rotated = start_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
-            var hint208_piece_rotated = hint208_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
-            var hint255_piece_rotated = hint255_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            // 208 and 255 get allowBreaks=true (see Util.hint_break_indexes) -- they're the two
+            // early, narrow-gate hints (fill-steps 34/45) that were plateauing hard. This lets
+            // either side of the pinned piece's required (west,south) mismatch instead of needing
+            // both simultaneously. 181/249/start are untouched -- they don't show this problem.
+            var hint208_piece_rotated = hint208_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            var hint255_piece_rotated = hint255_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
             var hint181_piece_rotated = hint181_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
             var hint249_piece_rotated = hint249_piece.Select(x => Util.Get_Rotated_Pieces(x)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 3).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
 

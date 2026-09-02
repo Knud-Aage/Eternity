@@ -28,6 +28,21 @@ namespace EternityII_Solver
         // overridable via ETERNITY_BREAK_INDEXES for tuning sweeps.
         private static List<int> break_indexes_allowed = Load_Break_Indexes_Allowed();
 
+        // 2026-09-02 experiment: 208 and 255 are pinned at fill-steps 34 and 45 respectively --
+        // both well before the general break schedule opens at 201 -- with a single-candidate
+        // table each, so if the (west,south) colours the search happens to produce there don't
+        // exactly match what the pinned piece needs, that branch dead-ends with zero fallback.
+        // This grants each of those two hints exactly one break of budget, letting hint208/255's
+        // OWN candidate tables (built with allowBreaks=true, see Program.cs) accept a one-side
+        // match instead of requiring both sides simultaneously.
+        //
+        // Deliberately kept OUT of break_indexes_allowed/ETERNITY_BREAK_INDEXES: that list also
+        // drives First_Break_Index(), which every ordinary (non-hint) cell uses to decide
+        // middles_no_break vs middles_with_break. Folding 34/45 into it would have dropped that
+        // cutoff from 201 to 34, silently making ~150+ unrelated cells break-tolerant too. This
+        // list feeds ONLY Get_Break_Array()'s cumulative budget, never First_Break_Index().
+        private static readonly List<int> hint_break_indexes = new List<int>() { 34, 45 };
+
         private static List<int> Load_Break_Indexes_Allowed()
         {
             string env = Environment.GetEnvironmentVariable("ETERNITY_BREAK_INDEXES");
@@ -609,7 +624,7 @@ namespace EternityII_Solver
             byte[] cumulativebreakArray = new byte[256];
             for (int i = 0; i < 256; i++)
             {
-                if (break_indexes_allowed.Contains(i))
+                if (break_indexes_allowed.Contains(i) || hint_break_indexes.Contains(i))
                     cumulativebreaksAllowed++;
 
                 cumulativebreakArray[i] = cumulativebreaksAllowed;
