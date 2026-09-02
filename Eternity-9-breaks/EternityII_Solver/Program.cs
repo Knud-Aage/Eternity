@@ -30,6 +30,14 @@ namespace EternityII_Solver
         // wait for a production-length attempt to time out on its own.
         static long node_cap = 50_000_000_000L;
 
+        // 2026-09-02: runtime switch for the 4 non-center official clues, so both modes can run
+        // from one branch instead of maintaining separate "hints"/"no hints" branches. Defaults
+        // OFF to match main/master's pre-existing behaviour -- set ETERNITY_NON_CENTER_HINTS=true
+        // to enable. The center pin (139) predates this switch and this whole 4-hint feature; it
+        // stays unconditional either way, matching what main/master already did before any of this.
+        static bool non_center_hints_enabled =
+            "true".Equals(Environment.GetEnvironmentVariable("ETERNITY_NON_CENTER_HINTS"), StringComparison.OrdinalIgnoreCase);
+
         static void Main()
         {
             string runLabel = Environment.GetEnvironmentVariable("ETERNITY_RUN_LABEL") ?? "default";
@@ -41,9 +49,10 @@ namespace EternityII_Solver
             if (!string.IsNullOrWhiteSpace(coresEnv)) number_virtual_cores = int.Parse(coresEnv);
 
             string breakIndexesDisplay = Environment.GetEnvironmentVariable("ETERNITY_BREAK_INDEXES") ?? "(default 201..239)";
-            Console.WriteLine("=== RUN {0}: break_indexes={1}, node_cap={2}, tune_seconds={3} ===",
+            Console.WriteLine("=== RUN {0}: break_indexes={1}, node_cap={2}, tune_seconds={3}, non_center_hints_enabled={4} ===",
                 runLabel, breakIndexesDisplay,
-                node_cap, tuneSeconds.HasValue ? tuneSeconds.Value.ToString() : "(unbounded)");
+                node_cap, tuneSeconds.HasValue ? tuneSeconds.Value.ToString() : "(unbounded)",
+                non_center_hints_enabled);
 
             Stopwatch runClock = Stopwatch.StartNew();
 
@@ -287,9 +296,15 @@ namespace EternityII_Solver
             var board_pieces = Util.Get_Pieces();
             var corner_pieces = board_pieces.Where(x => x.PieceType() == 2).ToList();
             var side_pieces = board_pieces.Where(x => x.PieceType() == 1).ToList();
-            var middle_pieces = board_pieces.Where(x => x.PieceType() == 0)
-                .Where(x => x.PieceNumber != 139 && x.PieceNumber != 208 && x.PieceNumber != 255 && x.PieceNumber != 181 && x.PieceNumber != 249)
-                .ToList(); // exclude the 5 official clue pieces
+            // Center (139) is excluded from the general pool unconditionally, matching
+            // main/master's pre-existing behaviour. The other 4 are only pulled out when the
+            // switch is on -- otherwise they must stay available to the general search like any
+            // other middle piece.
+            var middle_pieces = non_center_hints_enabled
+                ? board_pieces.Where(x => x.PieceType() == 0)
+                    .Where(x => x.PieceNumber != 139 && x.PieceNumber != 208 && x.PieceNumber != 255 && x.PieceNumber != 181 && x.PieceNumber != 249)
+                    .ToList()
+                : board_pieces.Where(x => x.PieceType() == 0).Where(x => x.PieceNumber != 139).ToList();
             var start_piece = board_pieces.Where(x => x.PieceNumber == 139).ToList();
             var hint208_piece = board_pieces.Where(x => x.PieceNumber == 208).ToList();
             var hint255_piece = board_pieces.Where(x => x.PieceNumber == 255).ToList();
@@ -439,13 +454,13 @@ namespace EternityII_Solver
                                     master_piece_lookup[row * 16 + col] = middles_with_break;
                             }
                         }
-                        else if (row == 2 && col == 2)
+                        else if (non_center_hints_enabled && row == 2 && col == 2)
                             master_piece_lookup[row * 16 + col] = hint181;
-                        else if (row == 2 && col == 13)
+                        else if (non_center_hints_enabled && row == 2 && col == 13)
                             master_piece_lookup[row * 16 + col] = hint249;
-                        else if (row == 13 && col == 2)
+                        else if (non_center_hints_enabled && row == 13 && col == 2)
                             master_piece_lookup[row * 16 + col] = hint208;
-                        else if (row == 13 && col == 13)
+                        else if (non_center_hints_enabled && row == 13 && col == 13)
                             master_piece_lookup[row * 16 + col] = hint255;
                         else
                         {
