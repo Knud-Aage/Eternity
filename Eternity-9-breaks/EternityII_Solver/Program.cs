@@ -186,7 +186,13 @@ namespace EternityII_Solver
                     // cost is what dominates the final count. Keep these two numbers
                     // in step -- saving below the tracker's floor writes files that
                     // nothing will ever read.
-                    if (solve_index >= 248)
+                    //
+                    // 2026-09-02: temporarily dropped to 219, matching Eternity2_GPU's
+                    // HARVEST_MIN_DEPTH -- the 5-clue pin fix just went in and this run
+                    // hasn't reached 248 yet, so lowering it gets an early completed
+                    // board out for inspection instead of waiting on the first record
+                    // past 248. Raise back once satisfied the fix is behaving.
+                    if (solve_index >= 219)
                     {
                         RotatedPiece[] board_to_save = new RotatedPiece[256];
 
@@ -430,13 +436,13 @@ namespace EternityII_Solver
                             }
                         }
                         else if (row == 2 && col == 2)
-                            master_piece_lookup[row * 16 + col] = hint208;
-                        else if (row == 2 && col == 13)
-                            master_piece_lookup[row * 16 + col] = hint255;
-                        else if (row == 13 && col == 2)
                             master_piece_lookup[row * 16 + col] = hint181;
-                        else if (row == 13 && col == 13)
+                        else if (row == 2 && col == 13)
                             master_piece_lookup[row * 16 + col] = hint249;
+                        else if (row == 13 && col == 2)
+                            master_piece_lookup[row * 16 + col] = hint208;
+                        else if (row == 13 && col == 13)
+                            master_piece_lookup[row * 16 + col] = hint255;
                         else
                         {
                             if (i < Util.First_Break_Index())
