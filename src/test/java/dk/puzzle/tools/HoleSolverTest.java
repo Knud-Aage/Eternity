@@ -269,7 +269,7 @@ class HoleSolverTest {
         int[] repaired = new int[256];
         repaired[0] = 42;
 
-        HoleSolver.ConflictSolveResult result = new HoleSolver.ConflictSolveResult(finalBoard, repaired);
+        HoleSolver.ConflictSolveResult result = new HoleSolver.ConflictSolveResult(finalBoard, repaired, false);
 
         assertSame(repaired, result.bestBoard(), "bestBoard must prefer the heuristic repair when present");
     }
@@ -278,7 +278,7 @@ class HoleSolverTest {
     void testBestBoardFallsBackToFinalWhenRepairedNull() {
         int[] finalBoard = new int[256];
 
-        HoleSolver.ConflictSolveResult result = new HoleSolver.ConflictSolveResult(finalBoard, null);
+        HoleSolver.ConflictSolveResult result = new HoleSolver.ConflictSolveResult(finalBoard, null, false);
 
         assertSame(finalBoard, result.bestBoard(), "bestBoard must fall back to finalBoard when no repair exists");
     }
