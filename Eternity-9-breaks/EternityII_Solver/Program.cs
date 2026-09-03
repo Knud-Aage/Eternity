@@ -49,7 +49,7 @@ namespace EternityII_Solver
             if (!string.IsNullOrWhiteSpace(coresEnv)) number_virtual_cores = int.Parse(coresEnv);
 
             string breakIndexesDisplay = Environment.GetEnvironmentVariable("ETERNITY_BREAK_INDEXES") ?? "(default 201..239)";
-            Console.WriteLine("=== RUN {0}: break_indexes={1}, node_cap={2}, tune_seconds={3}, non_center_hints_enabled={4} ===",
+            Util.Log("=== RUN {0}: break_indexes={1}, node_cap={2}, tune_seconds={3}, non_center_hints_enabled={4} ===",
                 runLabel, breakIndexesDisplay,
                 node_cap, tuneSeconds.HasValue ? tuneSeconds.Value.ToString() : "(unbounded)",
                 non_center_hints_enabled);
@@ -75,7 +75,7 @@ namespace EternityII_Solver
 
                 Prepare_Pieces_And_Heuristics();
 
-                Console.WriteLine("Solving... ({0:F0}s elapsed)", runClock.Elapsed.TotalSeconds);
+                Util.Log("Solving... ({0:F0}s elapsed)", runClock.Elapsed.TotalSeconds);
 
                 ConcurrentDictionary<int, long> index_counts = new ConcurrentDictionary<int, long>();
 
@@ -116,13 +116,13 @@ namespace EternityII_Solver
                 // to discard history for a number this small.
                 var genSorted = attemptMaxDepths.OrderByDescending(d => d).ToList();
                 long genNodes = attemptNodeCounts.Sum();
-                Console.WriteLine("=== GEN {0}: {1} attempts this run, {2} total nodes, {3:F0}s elapsed, best_depth={4} ===",
+                Util.Log("=== GEN {0}: {1} attempts this run, {2} total nodes, {3:F0}s elapsed, best_depth={4} ===",
                     runLabel, totalAttempts, genNodes, runClock.Elapsed.TotalSeconds, genSorted.Count > 0 ? genSorted[0] : 0);
                 foreach (int threshold in new[] { 245, 248, 249, 250, 251, 252, 253, 254, 255, 256 })
                 {
                     long reachedCount = genSorted.Count(d => d >= threshold);
                     if (reachedCount > 0)
-                        Console.WriteLine("GEN_REACH {0}\t{1}\t{2:F4}", threshold, reachedCount, (double)reachedCount / Math.Max(totalAttempts, 1));
+                        Util.Log("GEN_REACH {0}\t{1}\t{2:F4}", threshold, reachedCount, (double)reachedCount / Math.Max(totalAttempts, 1));
                 }
             }
 
@@ -133,17 +133,17 @@ namespace EternityII_Solver
                 double elapsed = runClock.Elapsed.TotalSeconds;
 
                 Console.WriteLine();
-                Console.WriteLine("=== SUMMARY {0}: {1} attempts, {2} total nodes, {3:F1}s, {4:F0} nodes/sec ===",
+                Util.Log("=== SUMMARY {0}: {1} attempts, {2} total nodes, {3:F1}s, {4:F0} nodes/sec ===",
                     runLabel, totalAttempts, totalNodes, elapsed, totalNodes / Math.Max(elapsed, 0.001));
 
                 foreach (int threshold in new[] { 200, 220, 240, 245, 248, 249, 250, 251, 252, 253, 254, 255, 256 })
                 {
                     long reachedCount = sorted.Count(d => d >= threshold);
-                    Console.WriteLine("REACH {0}\t{1}\t{2:F4}", threshold, reachedCount, (double)reachedCount / Math.Max(totalAttempts, 1));
+                    Util.Log("REACH {0}\t{1}\t{2:F4}", threshold, reachedCount, (double)reachedCount / Math.Max(totalAttempts, 1));
                 }
 
-                Console.WriteLine("BEST_DEPTH\t{0}", sorted.Count > 0 ? sorted[0] : 0);
-                Console.WriteLine("=== END SUMMARY {0} ===", runLabel);
+                Util.Log("BEST_DEPTH\t{0}", sorted.Count > 0 ? sorted[0] : 0);
+                Util.Log("=== END SUMMARY {0} ===", runLabel);
             }
         }
 

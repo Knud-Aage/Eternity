@@ -11,6 +11,15 @@ namespace EternityII_Solver
 {
     public static class Util
     {
+        // 2026-09-03: console output previously had no wall-clock timestamps, only relative
+        // "elapsed" counters, making it hard to tell when a line was written across restarts and
+        // multi-day runs. All logging goes through this so every line gets one consistently.
+        public static void Log(string format, params object[] args)
+        {
+            string message = args != null && args.Length > 0 ? string.Format(format, args) : format;
+            Console.WriteLine("[{0:yyyy-MM-dd HH:mm:ss}] {1}", DateTime.Now, message);
+        }
+
         public static readonly List<int> side_edges = new List<int>() { 1, 5, 9, 13, 17 };
         public static readonly List<int> middle_edges = new List<int>() { 2, 3, 4, 6, 7, 8, 10, 11, 12, 14, 15, 16, 18, 19, 20, 21, 22 };
         public static List<int> heuristic_sides = new List<int>() { 13, 16, 10 }; // There is a lot of overlap between these sides
@@ -428,7 +437,7 @@ namespace EternityII_Solver
                     if (!proc.WaitForExit(60000))
                     {
                         proc.Kill(entireProcessTree: true);
-                        Console.WriteLine("WARNING: HoleSolver labelling timed out for depth {0}, raw save kept unlabelled.", maxSolveIndex);
+                        Log("WARNING: HoleSolver labelling timed out for depth {0}, raw save kept unlabelled.", maxSolveIndex);
                         return;
                     }
                 }
@@ -465,7 +474,7 @@ namespace EternityII_Solver
                     completedLink = (lineEnd >= 0 ? afterMarker.Substring(0, lineEnd) : afterMarker).Trim();
                     if (completedLink.Length > 0)
                     {
-                        Console.WriteLine("COMPLETED_LINK {0}: {1}", labelledName ?? ("depth" + maxSolveIndex), completedLink);
+                        Log("COMPLETED_LINK {0}: {1}", labelledName ?? ("depth" + maxSolveIndex), completedLink);
                     }
                 }
 
@@ -507,7 +516,7 @@ namespace EternityII_Solver
             }
             catch (Exception e)
             {
-                Console.WriteLine("WARNING: HoleSolver labelling failed for depth {0}: {1}", maxSolveIndex, e.Message);
+                Log("WARNING: HoleSolver labelling failed for depth {0}: {1}", maxSolveIndex, e.Message);
             }
         }
 
@@ -548,13 +557,13 @@ namespace EternityII_Solver
                     if (!proc.WaitForExit(60000))
                     {
                         proc.Kill(entireProcessTree: true);
-                        Console.WriteLine("WARNING: Drive upload timed out for {0}", prefix);
+                        Log("WARNING: Drive upload timed out for {0}", prefix);
                     }
                 }
             }
             catch (Exception e)
             {
-                Console.WriteLine("WARNING: Drive upload failed for {0}: {1}", prefix, e.Message);
+                Log("WARNING: Drive upload failed for {0}: {1}", prefix, e.Message);
             }
         }
 
@@ -606,7 +615,7 @@ namespace EternityII_Solver
             }
             catch (Exception e)
             {
-                Console.WriteLine("WARNING: retention cleanup failed: {0}", e.Message);
+                Log("WARNING: retention cleanup failed: {0}", e.Message);
             }
         }
 
