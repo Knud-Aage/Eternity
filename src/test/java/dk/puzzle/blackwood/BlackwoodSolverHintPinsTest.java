@@ -22,6 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * off by default -- explicitly turned on here for the duration of this test class (and restored
  * after) since these tests are specifically about that feature. See
  * {@code BlackwoodSolverNoHintsTest} for coverage of the default (off) state.
+ *
+ * <p>2026-09-04: ported the GPU repo's 2026-09-02 hint208/hint255 break-tolerance experiment here
+ * -- it had only ever been applied to Eternity2_GPU and the C# solver, not this repo.
  */
 class BlackwoodSolverHintPinsTest {
 
@@ -59,19 +62,43 @@ class BlackwoodSolverHintPinsTest {
         assertEquals(expectedRotation, found.rotations(), "wrong rotation for piece " + expectedPiece);
     }
 
+    /**
+     * For hint208/hint255 (allowBreaks=true, 2026-09-02 experiment): every bucket must still hold
+     * only the pinned piece+rotation, in exactly one candidate each, but there should be MANY
+     * buckets now (one exact break-free match plus ~44 one-side-tolerant break variants) instead
+     * of just one -- otherwise the allowBreaks change silently did nothing.
+     */
+    private static void assertBreakTolerantPin(BwRotatedPiece[][] table, int expectedPiece, int expectedRotation) {
+        assertNotNull(table, "table must exist");
+        int nonEmptyBuckets = 0;
+        boolean sawExactMatch = false;
+        for (BwRotatedPiece[] bucket : table) {
+            if (bucket == null || bucket.length == 0) continue;
+            nonEmptyBuckets++;
+            assertEquals(1, bucket.length, "each bucket must still have exactly one candidate");
+            BwRotatedPiece found = bucket[0];
+            assertEquals(expectedPiece, found.pieceNumber(), "wrong piece pinned");
+            assertEquals(expectedRotation, found.rotations(), "wrong rotation for piece " + expectedPiece);
+            if (found.breakCount() == 0) sawExactMatch = true;
+        }
+        assertTrue(nonEmptyBuckets > 1,
+                "expected many break-tolerant buckets for piece " + expectedPiece + ", found only " + nonEmptyBuckets);
+        assertTrue(sawExactMatch, "the break-free exact match must still be present for piece " + expectedPiece);
+    }
+
     @Test
     void centerPinIsPiece139AtRotation2() {
         assertPin(solver.start, 139, 2);
     }
 
     @Test
-    void hint208PinIsCorrect() {
-        assertPin(solver.hint208, 208, 2);
+    void hint208PinIsBreakTolerant() {
+        assertBreakTolerantPin(solver.hint208, 208, 2);
     }
 
     @Test
-    void hint255PinIsCorrect() {
-        assertPin(solver.hint255, 255, 2);
+    void hint255PinIsBreakTolerant() {
+        assertBreakTolerantPin(solver.hint255, 255, 2);
     }
 
     @Test
@@ -82,6 +109,21 @@ class BlackwoodSolverHintPinsTest {
     @Test
     void hint249PinIsCorrect() {
         assertPin(solver.hint249, 249, 3);
+    }
+
+    @Test
+    void hintBreakIndexesDoNotDisturbGeneralFirstBreakIndex() {
+        assertEquals(201, BwUtil.firstBreakIndex(),
+                "adding hint-specific break points must not move the general break-schedule cutoff");
+    }
+
+    @Test
+    void hintBreakBudgetStacksCorrectlyWithGeneralSchedule() {
+        int[] breakArray = BwUtil.getBreakArray();
+        assertEquals(1, breakArray[34], "hint208's break budget should unlock at step 34");
+        assertEquals(2, breakArray[45], "hint255's break budget should unlock at step 45");
+        assertEquals(2, breakArray[200], "budget must stay at 2 right up to the general schedule");
+        assertEquals(3, breakArray[201], "general schedule's first entry (201) should add on top");
     }
 
     @Test

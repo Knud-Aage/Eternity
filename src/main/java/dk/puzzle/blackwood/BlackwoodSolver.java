@@ -234,8 +234,10 @@ public class BlackwoodSolver {
         southStart = buildTable(middlePieces, false, rp -> rp.topSide() == 6, rand);
         westStart = buildTable(middlePieces, false, rp -> rp.rightSide() == 11, rand);
         start = buildTable(List.of(hintPiece.apply(139)), false, rp -> rp.rotations() == 2, rand);
-        hint208 = buildTable(List.of(hintPiece.apply(208)), false, rp -> rp.rotations() == 2, rand);
-        hint255 = buildTable(List.of(hintPiece.apply(255)), false, rp -> rp.rotations() == 2, rand);
+        // allowBreaks=true (2026-09-04, porting the GPU/C# 2026-09-02 experiment): grants these two
+        // hints the 1-break budget from BwUtil.HINT_BREAK_INDEXES, see its javadoc for why.
+        hint208 = buildTable(List.of(hintPiece.apply(208)), true, rp -> rp.rotations() == 2, rand);
+        hint255 = buildTable(List.of(hintPiece.apply(255)), true, rp -> rp.rotations() == 2, rand);
         hint181 = buildTable(List.of(hintPiece.apply(181)), false, rp -> rp.rotations() == 2, rand);
         hint249 = buildTable(List.of(hintPiece.apply(249)), false, rp -> rp.rotations() == 3, rand);
 
