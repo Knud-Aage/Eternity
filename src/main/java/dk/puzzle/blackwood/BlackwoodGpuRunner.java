@@ -233,16 +233,22 @@ public class BlackwoodGpuRunner {
     // 2026-08-25: raised 12->100. Measured cost is actually ~0.3s/board (eternity_solver.log:
     // 12 boards score in 3-4s wall clock per harvest), and the eligible population dwarfs the old
     // sample -- a launch sampled at the same time showed depth[min=244 mean=246.6 max=251] across
-    // all 16384 threads, i.e. the ENTIRE population already clears HARVEST_MIN_DEPTH=240, so a
-    // top-12-by-depth cut was scoring under 0.1% of it. That matters because depth doesn't cleanly
-    // predict the post-HoleSolver conflict count (observed directly: depth-250 boards scoring
-    // 15/15/17 conflicts alongside depth-248 boards ranging 14-18), so a narrow top-N window misses
-    // better boards sitting just below the max depth. 100 boards/harvest is ~30s, still only ~1-2%
-    // of the ~22-25min interval between harvests at current launch speed -- HARVEST_INTERVAL has
-    // enough headroom on its own that it doesn't need to shrink to afford the bigger sample.
+    // all 16384 threads, i.e. the ENTIRE population already cleared the then-current
+    // HARVEST_MIN_DEPTH of 240, so a top-12-by-depth cut was scoring under 0.1% of it. That matters
+    // because depth doesn't cleanly predict the post-HoleSolver conflict count (observed directly:
+    // depth-250 boards scoring 15/15/17 conflicts alongside depth-248 boards ranging 14-18), so a
+    // narrow top-N window misses better boards sitting just below the max depth. 100 boards/harvest
+    // is ~30s, still only ~1-2% of the ~22-25min interval between harvests at current launch
+    // speed -- HARVEST_INTERVAL has enough headroom on its own that it doesn't need to shrink to
+    // afford the bigger sample.
+    //
+    // 2026-09-04: this repo's own copy of HARVEST_MIN_DEPTH had drifted out of sync with
+    // Eternity2_GPU's -- lowered there from 240 to 219 back on 2026-09-02 (temporary diagnostic,
+    // same rationale as C#'s save gate), but this repo doesn't currently run its own live process
+    // separately from Eternity2_GPU, so the drift went unnoticed until now. Brought back in step.
     private static final int HARVEST_INTERVAL = 300;
     private static final int HARVEST_SAMPLE = 100;
-    private static final int HARVEST_MIN_DEPTH = 240;
+    private static final int HARVEST_MIN_DEPTH = 219;
     /** Boards already scored, so a stable population isn't re-scored every harvest. */
     private static final Set<String> harvestedFingerprints = new HashSet<>();
     private static final int HARVEST_MEMORY_CAP = 200_000;
