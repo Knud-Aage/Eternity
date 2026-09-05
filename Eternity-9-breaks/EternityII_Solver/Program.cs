@@ -197,11 +197,20 @@ namespace EternityII_Solver
                     // nothing will ever read.
                     //
                     // 2026-09-02: temporarily dropped to 219, matching Eternity2_GPU's
-                    // HARVEST_MIN_DEPTH -- the 5-clue pin fix just went in and this run
-                    // hasn't reached 248 yet, so lowering it gets an early completed
-                    // board out for inspection instead of waiting on the first record
-                    // past 248. Raise back once satisfied the fix is behaving.
-                    if (solve_index >= 219)
+                    // HARVEST_MIN_DEPTH, to get an early completed board out for
+                    // inspection of the just-landed 5-clue pin fix. That fix has been
+                    // solid for days now, and 219 turned out to have a real cost: saving
+                    // (and pruning) far more attempts than needed made PruneAboveThreshold's
+                    // unlocked, called-from-every-worker-thread delete sequence race far
+                    // more often, piling up orphaned baseboard files locally and on Drive
+                    // (RawBoard.txt deleted first with no exists-check, baseboard deleted
+                    // last, so the loser of a concurrent prune leaves its baseboard behind).
+                    //
+                    // 2026-09-05: restored, at 246 rather than the original 248 -- 248 was
+                    // calibrated for the no-hints regime, which reaches slightly deeper
+                    // than this hints-enabled run since it isn't carrying the 5 pinned
+                    // clue cells' extra constraint. 246 is the hints-adjusted equivalent.
+                    if (solve_index >= 246)
                     {
                         RotatedPiece[] board_to_save = new RotatedPiece[256];
 
