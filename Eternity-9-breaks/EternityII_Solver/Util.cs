@@ -616,7 +616,11 @@ namespace EternityII_Solver
                 string conflictsStr = conflicts >= 0 ? conflicts.ToString() : "?";
                 string line = string.Format("{0}  conflicts={1,-3} depth={2,-3}  {3}  {4}\n",
                     timestamp, conflictsStr, depth, prefix, link);
-                System.IO.File.AppendAllText(logFile, line, Encoding.UTF8);
+                // Encoding.UTF8 writes a BOM on file creation; the Java ports' equivalent
+                // (StandardCharsets.UTF_8) does not, so a plain UTF8Encoding(false) here keeps a
+                // fresh copy of this file byte-identical in spirit -- no stray bytes before the
+                // first timestamp for something that greps this file to line up with.
+                System.IO.File.AppendAllText(logFile, line, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
             }
             catch (Exception e)
             {
