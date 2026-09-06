@@ -35,7 +35,9 @@ namespace EternityII_Solver
         // OFF to match main/master's pre-existing behaviour -- set ETERNITY_NON_CENTER_HINTS=true
         // to enable. The center pin (139) predates this switch and this whole 4-hint feature; it
         // stays unconditional either way, matching what main/master already did before any of this.
-        static bool non_center_hints_enabled =
+        // internal, not the file-default private: Util.PruneAboveThreshold reads this too, to pick
+        // the right save-retention floor for the current regime (see its own comment there).
+        internal static bool non_center_hints_enabled =
             "true".Equals(Environment.GetEnvironmentVariable("ETERNITY_NON_CENTER_HINTS"), StringComparison.OrdinalIgnoreCase);
 
         static void Main()

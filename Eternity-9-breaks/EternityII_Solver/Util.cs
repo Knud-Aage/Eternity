@@ -495,6 +495,16 @@ namespace EternityII_Solver
                     if (completedLink.Length > 0)
                     {
                         Log("COMPLETED_LINK {0}: {1}", labelledName ?? ("depth" + maxSolveIndex), completedLink);
+
+                        // 2026-09-06: this solver had no persistent completed-links file at all --
+                        // only whatever stdout redirect a launch happened to use that time, which
+                        // has no stable name across restarts (csharp_stdout_246.log, then
+                        // _fixed.log, ...). Matches the Java ports' gpu_completed_links.log: one
+                        // small, append-only, ALWAYS-at-this-path file, so a link is always
+                        // findable without checking Drive or guessing which redirect is current.
+                        Match conflictMatch = labelledName != null ? Regex.Match(labelledName, @"^Errors(\d+)_") : Match.Empty;
+                        int conflicts = conflictMatch.Success ? int.Parse(conflictMatch.Groups[1].Value) : -1;
+                        AppendCompletedLink(labelledName ?? ("depth" + maxSolveIndex), conflicts, maxSolveIndex, completedLink, eternityRoot);
                     }
                 }
 
@@ -587,6 +597,33 @@ namespace EternityII_Solver
             }
         }
 
+        /// <summary>
+        /// Appends one line to logs/csharp_completed_links.log, at a fixed path under eternityRoot
+        /// regardless of how this run's own stdout happens to be redirected. Best-effort: a failure
+        /// here must never affect the save that already succeeded. Same shape as the Java ports'
+        /// appendCompletedLink (BlackwoodGpuRunner.java / BlackwoodSolver.java) -- timestamp,
+        /// conflicts, depth, name, link -- though prefix here already carries the _RawBoard.txt
+        /// suffix (matching this file's own COMPLETED_LINK convention), where Java's does not.
+        /// </summary>
+        private static void AppendCompletedLink(string prefix, int conflicts, int depth, string link, string eternityRoot)
+        {
+            try
+            {
+                string logDir = Path.Combine(eternityRoot, "logs");
+                Directory.CreateDirectory(logDir);
+                string logFile = Path.Combine(logDir, "csharp_completed_links.log");
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                string conflictsStr = conflicts >= 0 ? conflicts.ToString() : "?";
+                string line = string.Format("{0}  conflicts={1,-3} depth={2,-3}  {3}  {4}\n",
+                    timestamp, conflictsStr, depth, prefix, link);
+                System.IO.File.AppendAllText(logFile, line, Encoding.UTF8);
+            }
+            catch (Exception e)
+            {
+                Log("WARNING: Could not append to csharp_completed_links.log: {0}", e.Message);
+            }
+        }
+
         private static void PruneAboveThreshold(string saveDir)
         {
             try
@@ -600,15 +637,23 @@ namespace EternityII_Solver
                 if (conflictsByFile.Count == 0) return;
 
                 // Normally "within 1 of best-on-disk", which tightens forever as the record
-                // improves -- fine near 471, but on the way there it means every future 12
-                // (already rare on its own) stops being saved/uploaded/kept the moment anything
-                // ever beats it, however far off that might be. This floor keeps <=12
+                // improves -- fine near 471, but on the way there it means every future good
+                // result stops being saved/uploaded/kept the moment anything ever beats it,
+                // however far off that might be. This floor keeps results at or below it
                 // permanently save-worthy regardless of how much better minOnDisk gets, so
                 // results stay visible instead of thinning out over time. Mirror any change here
-                // in the Java ports' ALWAYS_SAVE_AT_OR_BELOW (BlackwoodGpuRunner.java,
+                // in the Java ports' alwaysSaveAtOrBelow() (BlackwoodGpuRunner.java,
                 // BlackwoodSolver.java in both repos).
+                //
+                // 2026-09-06: default now depends on which regime is running -- 12 (468/480) was
+                // the open/no-hints track's rare-good-result threshold; the five-clue regime's
+                // equivalent is 18 (462/480), one better than the first genuinely clue-compliant
+                // find (461/480) once the pin-rotation fix landed. An explicit ETERNITY_SAVE_FLOOR
+                // still overrides either default.
                 string saveFloorEnv = Environment.GetEnvironmentVariable("ETERNITY_SAVE_FLOOR");
-                int saveFloor = string.IsNullOrWhiteSpace(saveFloorEnv) ? 12 : int.Parse(saveFloorEnv);
+                int saveFloor = string.IsNullOrWhiteSpace(saveFloorEnv)
+                    ? (Program.non_center_hints_enabled ? 18 : 12)
+                    : int.Parse(saveFloorEnv);
                 int keepThreshold = Math.Max(saveFloor, conflictsByFile.Values.Min() + 1);
 
                 // 2026-08-18: the baseboard is now a THIRD sibling (renamed onto the same prefix
