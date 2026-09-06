@@ -110,10 +110,10 @@ public class HoleSolver {
 
     private static final List<CluePin> CLUE_PINS = List.of(
             new CluePin(135, 139, 270), // centre / mandatory starter piece
-            new CluePin(34, 208, 270),
-            new CluePin(45, 255, 270),
-            new CluePin(210, 181, 270),
-            new CluePin(221, 249, 0));
+            new CluePin(34, 208, 0),    // 2026-09-06: was 270
+            new CluePin(45, 255, 0),    // was 270
+            new CluePin(210, 181, 0),   // was 270
+            new CluePin(221, 249, 90)); // was 0
 
     public static void main(String[] args) {
         if (args.length < 1) {

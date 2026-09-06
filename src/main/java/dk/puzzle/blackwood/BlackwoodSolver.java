@@ -96,10 +96,10 @@ public class BlackwoodSolver {
 
     private static final List<HintPin> HINT_PINS = List.of(
             new HintPin(139, 7, 7, 2),   // center
-            new HintPin(181, 2, 2, 2),
-            new HintPin(249, 2, 13, 3),
-            new HintPin(208, 13, 2, 2),
-            new HintPin(255, 13, 13, 2));
+            new HintPin(181, 2, 2, 3),   // 0 deg -- 2026-09-06: was 2 (270 deg), see Eternity2_GPU BlackwoodSolver javadoc
+            new HintPin(249, 2, 13, 0),  // 90 deg -- was 3 (0 deg)
+            new HintPin(208, 13, 2, 3),  // 0 deg -- was 2 (270 deg)
+            new HintPin(255, 13, 13, 3));// 0 deg -- was 2 (270 deg)
     // 2026-08-19: labelled save format, matching the GPU runner and C# solver -- conflicts first
     // in the name so the three engines' output is directly comparable at a glance, and so
     // BwSeedLoader (which already recognizes this exact pattern) can use this port's own best

@@ -345,10 +345,16 @@ namespace EternityII_Solver
             // first in fill order is a much better explanation for the population bottlenecking at
             // 34 than anything about 208. Only start (139, the mandatory center) stays a hard
             // pin -- it predates the whole hint feature and has never shown this problem.
-            var hint208_piece_rotated = hint208_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
-            var hint255_piece_rotated = hint255_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
-            var hint181_piece_rotated = hint181_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 2).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
-            var hint249_piece_rotated = hint249_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 3).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            //
+            // 2026-09-06: the four non-centre clue ROTATIONS were each 270 deg off (208/255/181
+            // were Rotations==2, should be 3 = 0 deg; 249 was 3, should be 0 = 90 deg). The centre
+            // (start_piece, Rotations==2 = 270 deg) was always correct. Verified against five
+            // independently produced five-clue-compliant boards -- see Eternity2_GPU's
+            // BlackwoodSolver HINT_PINS javadoc for the full evidence.
+            var hint208_piece_rotated = hint208_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 3).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            var hint255_piece_rotated = hint255_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 3).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            var hint181_piece_rotated = hint181_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 3).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
+            var hint249_piece_rotated = hint249_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 0).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
 
             Random rand = new Random();
 

@@ -27,10 +27,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *   <li>the clue cell gets swallowed by a conflict region, so RegionSolver re-places it.</li>
  * </ol>
  *
- * <p>The board used here is the one five-clue-valid board the old code happened to
- * produce (Errors19_Base247_204146_873, 19 conflicts = 461/480, confirmed by bucas's own
- * scorer). Because it starts compliant, any clue that has moved by the end of a run is
- * unambiguously HoleSolver's doing rather than an artefact of the input.</p>
+ * <p><b>2026-09-06 fixture replacement.</b> This class previously used one of our own saved
+ * boards, described as "the one five-clue-valid board the old code happened to produce". That
+ * description was wrong: our four non-centre clue ROTATIONS were each 270 deg off, so no board
+ * we produced was ever five-clue compliant, and the fixture only looked valid because the test
+ * compared it against the same incorrect pins. It is now an externally produced, genuinely
+ * compliant board (462/480, from the five-clue community's published result set), which decodes
+ * with all 256 cells resolving to real pieces and satisfies all five official clues at the
+ * corrected rotations. Because it starts genuinely compliant, any clue that has moved by the end
+ * of a run is unambiguously HoleSolver's doing rather than an artefact of the input.
  */
 class HoleSolverCluePinsTest {
 
@@ -38,23 +43,9 @@ class HoleSolverCluePinsTest {
     private static final int CELL_139 = 135, CELL_208 = 34, CELL_255 = 45, CELL_181 = 210, CELL_249 = 221;
     private static final int[] CLUE_CELLS = {CELL_139, CELL_208, CELL_255, CELL_181, CELL_249};
 
-    private static final String VALID_461_LINK =
-            "https://e2.bucas.name/#puzzle=KnudHansen&board_w=16&board_h=16&board_edges="
-                    + "adcaadsdabmdaeqbacqeadpcadgdaepdaboeaepbabteacvbaepcaeteadweaacdcidasoiimnloqgtnsjwgpjijgmpqpgnnoslgpwnstwvwvgtqvvlgttkmqosn"
-                    + "cacodidaiwgilmnwtlgmwollisoupgmsnkpglqiknqoqvntqtkknlwokswuwinqw"
-                    + "cabpdteagigtnjmigisjllkiorglmorrpstogvgsoknvtnlkkvrnovmjvlwvqjkl"
-                    + "babjendagwqnmsowsskskppsgtnprqrttjoqqovjnpmollkprlslmtplwlrqogll"
-                    + "babgdgcaqiigomnikrvmpnqrsvpnrkhvolnkvmqlmrwmkmnrsommpprorilpliwi"
-                    + "baeicrbaijjrnvijvitvqwoippvwhsspntksqqwtwsoqnplsmmuprmhmlljmwvwl"
-                    + "eabvbjfajlijiriltrgronjrvjnnskqjkgikwwvgovuwlrwvusgrhvjsjgwvwstg"
-                    + "bacsfgfaimhgiommggkojiggngriqmqgijjmvomjuvgowkrvgtrkjistwtgitpjt"
-                    + "cacpfwdahqkwmokqkuwogoluriqoqphijpppmiwpgmkirgtmrjkgsiujgpnijnmp"
-                    + "caendtcakvrtkokvwuiolkvuqtjkhjltprsjwhtrkprhtwhpksmwuvpsntovmsut"
-                    + "eaesckfarwpkkuhwiwquvkvwjhuklghhsqugttlqrsmthwusmqhwpqrqooiquqno"
-                    + "eafqfqfaphjqhwjhqlhwvhnlunhhhlsnuqrllhuqmorhuplohtvprvmtijvvnthj"
-                    + "fabtfhcajumhjvmuhunvnrquhoursujorijuuksirphklulpvtkumqntvprqhhrp"
-                    + "bafhchbamwuhmulwnkouqhmkusthjuhsjuousuvuhhrulsuhknhsnsnnrtusrujt"
-                    + "fadubeaaueaelfaeoeafmfaetdafhdadofadvcafrfacubafhcabnfacufafjbafdaab";
+    private static final String COMPLIANT_462_LINK =
+            "https://e2.bucas.name/#puzzle=Eternity2&board_w=16&board_h=16&board_edges="
+                    + "acdaafhcaelfacqeadpcaepdadteacidadgcadgdabmdaencaboeacsbaeibaabedsdahvjslrwvqpqrpskppgmstmrgiwpmgiiwgqiimokqnjroovmjsjwgijjlbabjdidajnviwlmnqiklkkgimttkrkgtpllkomnljvomklqjrqwlmulwwswujprsbaepdweavvlwmtrvksntgvgsrnkvgwqngiwtnkpgolnkorglwilillkiwvwlrtkveaetesealgosrjkgnnvjgrinkmnrqgqmwvjgpnsvnpgngtnpllogktnlwvwtkvwveabveqbaooiqkvkovijvisoinnnsqgtnjiggstjigigtnqwiosnqnplstwhpwvgwbacvbgbaijpjkqtjjskqoqwsntmqtlqtgvvljqovwoiqwmsoniomlprihiqpgpnicaepbpcapjppttpjkkntwhqkmorhqtjovvitoknvigmksqugoqnqrtrqqvgtntqveabtcocappropvwpntovqqwtrluqjmllijjmnmpjmiomujsinthjrgrtgkogqhmkbachcrbarmorwksmounkwovuuisolirijuripmmuonpmspwnhkrprwpkollwmtplcadtbjfaosujskssnhskvrkhsmtrrmhmrwmmmqhwphjqwkuhrvmkpsuvlrlspnqrdaenfvcausuvsphsstopkuvttmsuhgimmtlghjltjrijujtrminjuksilwokquiweaeucrfausgrhwusokuwvulksrtuiqorlhuqlghhisjgthusnlvhsnhlouqniowueafofqfagmpqujvmuhsjlsuhtgwsolugulplhwqljhhwunhhvhunhruhqvprwkrvfackfubaplouvmqlsommurhowhtrukjhprhkqunrhmwuhjumuoujuvgophtvrphhcacpbdaaofadqeafmfaehbaftfabjbafhcabnfacwdafufadufafgfaftdafhdadcaad";
 
     private static PieceInventory inventory;
     private static int[] validBoard;
@@ -62,7 +53,7 @@ class HoleSolverCluePinsTest {
     @BeforeAll
     static void loadBoard() {
         inventory = new PieceInventory(Eternity.loadPieces());
-        validBoard = HoleSolver.decodeBoardAuto(VALID_461_LINK, inventory, false);
+        validBoard = HoleSolver.decodeBoardAuto(COMPLIANT_462_LINK, inventory, false);
     }
 
     @AfterEach
@@ -77,8 +68,10 @@ class HoleSolverCluePinsTest {
         for (int cell : CLUE_CELLS) {
             assertNotEquals(-1, validBoard[cell], "clue cell " + cell + " should be occupied in the fixture");
         }
-        assertEquals(19, HoleSolver.findConflicts(validBoard).size(),
-                "fixture should be the known 19-conflict (461/480) board");
+        assertEquals(18, HoleSolver.findConflicts(validBoard).size(),
+                "fixture should be the known 18-conflict (462/480) board");
+        // This repo has no checkFiveClueCompliance(); the identical fixture board is verified
+        // five-clue compliant in Eternity2_GPU, which shares this exact board string.
     }
 
     @Test
