@@ -492,6 +492,7 @@ namespace EternityII_Solver
                     }
                 }
             }
+            Apply_Negative_Facts();
 
             heuristic_array = new int[256];
             for (int i = 0; i < 256; i++)
@@ -508,6 +509,88 @@ namespace EternityII_Solver
                     heuristic_array[i] = (int)(((((float)i - 76) * (float)0.6538)) + 89);
                 else if (i <= max_heuristic_index)
                     heuristic_array[i] = (int)(((((float)i - 102) / 4.4615)) + 106);
+            }
+        }
+
+        // Eighteen (piece, cell, rotation) placements proven impossible under the strict-five-clue
+        // regime by exhaustive SAT/DRAT certificate: Horvath, "Eighteen Certified Impossible
+        // Placements in Eternity II with the Five Official Clues Fixed",
+        // github.com/blackencino/eternity-ii-negative-facts, field/certificates/manifest.json.
+        // Fields are given exactly as published there: Piece is 1-256, X/YFromTop are 0-based
+        // board coordinates from the left/top, Orientation is the paper's own 0-3 CCW-from-
+        // reference convention (their field/e2_candidate_cnf.py, oriented_edges()).
+        //
+        // 2026-09-07: ported from the Java ports' BlackwoodSolver, where this table and its two
+        // conversions (see Apply_Negative_Facts below) were verified against our own 5 already-
+        // corrected official clue placements -- the paper's own hardcoded HINTS tuples convert,
+        // cell-for-cell and rotation-for-rotation, to exactly our clue values for all 5 clues.
+        static readonly (int Piece, int X, int YFromTop, int Orientation)[] negative_facts =
+        {
+            (122, 1, 14, 1),
+            (149, 3, 14, 1),
+            (212, 3, 14, 0),
+            (124, 14, 14, 2),
+            (149, 14, 12, 2),
+            (212, 14, 12, 1),
+            (124, 14, 3, 3),
+            (131, 3, 1, 1),
+            (161, 3, 1, 1),
+            (177, 3, 1, 3),
+            (192, 3, 1, 1),
+            (244, 3, 1, 0),
+            (250, 3, 1, 3),
+            (112, 12, 1, 0),
+            (198, 12, 1, 3),
+            (236, 12, 1, 1),
+            (131, 14, 1, 1),
+            (161, 14, 1, 1),
+        };
+
+        // Removes the 18 negative_facts placements from their specific cells only. Several
+        // master_piece_lookup entries above are shared BY REFERENCE (middles_no_break,
+        // middles_with_break, etc.) across many cells, so each affected cell gets its own
+        // filtered clone here rather than mutating a shared array -- otherwise a fact proven for
+        // one cell would wrongly also strip that (piece, rotation) from every other cell reusing
+        // the same array object. Gated on non_center_hints_enabled, since the proof assumes all
+        // five clues fixed at their official position and rotation. Safe to call unconditionally
+        // otherwise: this solver has no GPU/native table layer expecting master_piece_lookup
+        // entries to be reference-identical to a fixed set of objects (unlike Eternity2_GPU's
+        // Java port, where the equivalent method is deliberately left uncalled -- see its own
+        // BlackwoodSolver for why).
+        static void Apply_Negative_Facts()
+        {
+            if (!non_center_hints_enabled)
+                return;
+
+            var facts_by_cell = new Dictionary<int, List<(int Piece, int Rotation)>>();
+            foreach (var fact in negative_facts)
+            {
+                int cell = (15 - fact.YFromTop) * 16 + fact.X;
+                int rotation = (4 - fact.Orientation) % 4;
+                if (!facts_by_cell.TryGetValue(cell, out var list))
+                {
+                    list = new List<(int, int)>();
+                    facts_by_cell[cell] = list;
+                }
+                list.Add((fact.Piece, rotation));
+            }
+
+            foreach (var entry in facts_by_cell)
+            {
+                var original = master_piece_lookup[entry.Key];
+                if (original == null)
+                    continue;
+
+                var filtered = new RotatedPiece[original.Length][];
+                for (int bucket = 0; bucket < original.Length; bucket++)
+                {
+                    var candidates = original[bucket];
+                    filtered[bucket] = candidates == null
+                        ? null
+                        : candidates.Where(c => !entry.Value.Any(
+                            f => f.Piece == c.PieceNumber && f.Rotation == c.Rotations)).ToArray();
+                }
+                master_piece_lookup[entry.Key] = filtered;
             }
         }
 
