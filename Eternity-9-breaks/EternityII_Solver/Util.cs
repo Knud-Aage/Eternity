@@ -37,6 +37,17 @@ namespace EternityII_Solver
         // overridable via ETERNITY_BREAK_INDEXES for tuning sweeps.
         private static List<int> break_indexes_allowed = Load_Break_Indexes_Allowed();
 
+        // 2026-09-17: ported from the Java/GPU solvers' DOUBLE_BREAK_ENABLED experiment, already
+        // validated there (beats or ties single-break on every depth statistic and on final
+        // HoleSolver conflict count, over paired same-seed trials). Allows ONE hardcoded step to
+        // accept a candidate that needs BOTH sides broken at once, instead of the normal max of
+        // one -- motivated by a REPLAY finding that breaking past a plateau needed a double break
+        // at ONE cell, not two single breaks at different cells. Same step (239, the last entry of
+        // the general break schedule above) as the Java ports, for direct comparability.
+        public static readonly bool DOUBLE_BREAK_ENABLED =
+            "true".Equals(Environment.GetEnvironmentVariable("ETERNITY_DOUBLE_BREAK"), StringComparison.OrdinalIgnoreCase);
+        public const int DOUBLE_BREAK_STEP = 239;
+
         // 2026-09-02 experiment, extended 2026-09-04 to all four non-center hints: grants each
         // hint's candidate table (built with allowBreaks=true, see Program.cs) exactly one break
         // of budget, so if the (west,south) colours the search happens to produce at its cell
@@ -149,7 +160,8 @@ namespace EternityII_Solver
                     }
 
                     if ((rotations_breaks_0 == 0) ||
-                        ((rotations_breaks_0 == 1) && (allowbreaks)))
+                        ((rotations_breaks_0 == 1) && (allowbreaks)) ||
+                        ((rotations_breaks_0 == 2) && (allowbreaks) && (DOUBLE_BREAK_ENABLED)))
                     {
                         if (side_breaks_0 == 0)
                         {
@@ -190,7 +202,8 @@ namespace EternityII_Solver
                     }
 
                     if ((rotations_breaks_1 == 0) ||
-                        ((rotations_breaks_1 == 1) && (allowbreaks)))
+                        ((rotations_breaks_1 == 1) && (allowbreaks)) ||
+                        ((rotations_breaks_1 == 2) && (allowbreaks) && (DOUBLE_BREAK_ENABLED)))
                     {
                         if (side_breaks_1 == 0)
                         {
@@ -233,7 +246,8 @@ namespace EternityII_Solver
                     }
 
                     if ((rotations_breaks_2 == 0) ||
-                        ((rotations_breaks_2 == 1) && (allowbreaks)))
+                        ((rotations_breaks_2 == 1) && (allowbreaks)) ||
+                        ((rotations_breaks_2 == 2) && (allowbreaks) && (DOUBLE_BREAK_ENABLED)))
                     {
                         if (side_breaks_2 == 0)
                         {
@@ -276,7 +290,8 @@ namespace EternityII_Solver
                     }
 
                     if ((rotations_breaks_3 == 0) ||
-                        ((rotations_breaks_3 == 1) && (allowbreaks)))
+                        ((rotations_breaks_3 == 1) && (allowbreaks)) ||
+                        ((rotations_breaks_3 == 2) && (allowbreaks) && (DOUBLE_BREAK_ENABLED)))
                     {
                         if (side_breaks_3 == 0)
                         {
@@ -702,7 +717,14 @@ namespace EternityII_Solver
             byte[] cumulativebreakArray = new byte[256];
             for (int i = 0; i < 256; i++)
             {
-                if (break_indexes_allowed.Contains(i) || hint_break_indexes.Contains(i))
+                // DOUBLE_BREAK_STEP (239) is already a member of break_indexes_allowed, so this
+                // REPLACES its normal +1 with +2 at that one step rather than stacking on top of
+                // it -- the search loop's own effective-cap fix (Program.cs) is what actually
+                // restricts breakCount==2 candidates to this exact step; this just makes sure the
+                // cumulative ceiling has the extra unit of budget available when it gets there.
+                if (DOUBLE_BREAK_ENABLED && i == DOUBLE_BREAK_STEP)
+                    cumulativebreaksAllowed += 2;
+                else if (break_indexes_allowed.Contains(i) || hint_break_indexes.Contains(i))
                     cumulativebreaksAllowed++;
 
                 cumulativebreakArray[i] = cumulativebreaksAllowed;

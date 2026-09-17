@@ -261,12 +261,20 @@ namespace EternityII_Solver
                 if (piece_candidates != null)
                 {
                     byte breaks_this_turn = (byte)(break_array[solve_index] - cumulative_breaks[solve_index - 1]);
+                    // breaks_this_turn is a cumulative ceiling-minus-spent value that can naturally
+                    // exceed 1 at steps OTHER than DOUBLE_BREAK_STEP too, wherever the search has
+                    // been frugal earlier -- without this cap, a breakCount==2 candidate would leak
+                    // into dozens of unrelated steps instead of only the one it's meant for. Ported
+                    // from the same fix in the Java solvers, found there by direct measurement.
+                    byte effective_break_cap = (Util.DOUBLE_BREAK_ENABLED && solve_index == Util.DOUBLE_BREAK_STEP)
+                        ? breaks_this_turn
+                        : (byte)(breaks_this_turn < 1 ? breaks_this_turn : 1);
                     int try_index = piece_index_to_try_next[solve_index];
 
                     int pieceCandidateLength = piece_candidates.Length;
                     for (int i = try_index; i < pieceCandidateLength; i++)
                     {
-                        if (piece_candidates[i].Break_Count > breaks_this_turn)
+                        if (piece_candidates[i].Break_Count > effective_break_cap)
                             break;
 
                         if (!piece_used[piece_candidates[i].PieceNumber])
@@ -300,6 +308,23 @@ namespace EternityII_Solver
                     solve_index--;
                 }
             }
+        }
+
+        // Each bucket gets its own Random rather than sharing one across all 14 tables built in
+        // Prepare_Pieces_And_Heuristics(): with a shared instance, widening one table's candidate
+        // count (e.g. DOUBLE_BREAK_ENABLED admitting breakCount==2 candidates) shifts how many
+        // rand.Next() calls it consumes while sorting, which silently desyncs the jitter of every
+        // OTHER table built afterward from that same shared stream. Found and fixed the identical
+        // way in the Java/GPU solvers when double-break first widened their tables there.
+        static RotatedPiece[][] Sort_Buckets_With_Jitter(Dictionary<ushort, List<RotatedPieceWithLeftBottom>> buckets)
+        {
+            var result = new RotatedPiece[529][];
+            foreach (var m in buckets)
+            {
+                Random bucketRand = new Random();
+                result[m.Key] = m.Value.OrderByDescending(x => x.Score + bucketRand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
+            }
+            return result;
         }
 
         static void Prepare_Pieces_And_Heuristics()
@@ -358,63 +383,20 @@ namespace EternityII_Solver
             var hint181_piece_rotated = hint181_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 3).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
             var hint249_piece_rotated = hint249_piece.Select(x => Util.Get_Rotated_Pieces(x, true)).SelectMany(x => x).Where(x => x.RotatedPiece.Rotations == 0).GroupBy(x => x.LeftBottom).ToDictionary(x => x.Key, y => y.ToList());
 
-            Random rand = new Random();
-
-            corners = new RotatedPiece[529][];
-            foreach (var m in corner_pieces_rotated)
-                corners[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            left_sides = new RotatedPiece[529][];
-            foreach (var m in left_side_pieces_rotated)
-                left_sides[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            top_sides = new RotatedPiece[529][];
-            foreach (var m in top_side_pieces_rotated)
-                top_sides[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            right_sides_with_breaks = new RotatedPiece[529][];
-            foreach (var m in right_side_pieces_with_breaks_rotated)
-                right_sides_with_breaks[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            right_sides_without_breaks = new RotatedPiece[529][];
-            foreach (var m in right_side_pieces_without_breaks_rotated)
-                right_sides_without_breaks[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            middles_with_break = new RotatedPiece[529][];
-            foreach (var m in middle_pieces_rotated_with_breaks)
-                middles_with_break[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            middles_no_break = new RotatedPiece[529][];
-            foreach (var m in middle_pieces_rotated_without_breaks)
-                middles_no_break[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            south_start = new RotatedPiece[529][];
-            foreach (var m in south_start_piece_rotated)
-                south_start[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            west_start = new RotatedPiece[529][];
-            foreach (var m in west_start_piece_rotated)
-                west_start[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            start = new RotatedPiece[529][];
-            foreach (var m in start_piece_rotated)
-                start[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            hint208 = new RotatedPiece[529][];
-            foreach (var m in hint208_piece_rotated)
-                hint208[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            hint255 = new RotatedPiece[529][];
-            foreach (var m in hint255_piece_rotated)
-                hint255[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            hint181 = new RotatedPiece[529][];
-            foreach (var m in hint181_piece_rotated)
-                hint181[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
-
-            hint249 = new RotatedPiece[529][];
-            foreach (var m in hint249_piece_rotated)
-                hint249[m.Key] = m.Value.OrderByDescending(x => x.Score + rand.Next(0, 99)).Select(x => x.RotatedPiece).ToArray();
+            corners = Sort_Buckets_With_Jitter(corner_pieces_rotated);
+            left_sides = Sort_Buckets_With_Jitter(left_side_pieces_rotated);
+            top_sides = Sort_Buckets_With_Jitter(top_side_pieces_rotated);
+            right_sides_with_breaks = Sort_Buckets_With_Jitter(right_side_pieces_with_breaks_rotated);
+            right_sides_without_breaks = Sort_Buckets_With_Jitter(right_side_pieces_without_breaks_rotated);
+            middles_with_break = Sort_Buckets_With_Jitter(middle_pieces_rotated_with_breaks);
+            middles_no_break = Sort_Buckets_With_Jitter(middle_pieces_rotated_without_breaks);
+            south_start = Sort_Buckets_With_Jitter(south_start_piece_rotated);
+            west_start = Sort_Buckets_With_Jitter(west_start_piece_rotated);
+            start = Sort_Buckets_With_Jitter(start_piece_rotated);
+            hint208 = Sort_Buckets_With_Jitter(hint208_piece_rotated);
+            hint255 = Sort_Buckets_With_Jitter(hint255_piece_rotated);
+            hint181 = Sort_Buckets_With_Jitter(hint181_piece_rotated);
+            hint249 = Sort_Buckets_With_Jitter(hint249_piece_rotated);
 
             board_search_sequence = Util.Get_Board_Order();
             break_array = Util.Get_Break_Array();
