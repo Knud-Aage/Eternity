@@ -724,7 +724,9 @@ namespace EternityII_Solver
                 // cumulative ceiling has the extra unit of budget available when it gets there.
                 if (DOUBLE_BREAK_ENABLED && i == DOUBLE_BREAK_STEP)
                     cumulativebreaksAllowed += 2;
-                else if (break_indexes_allowed.Contains(i) || hint_break_indexes.Contains(i))
+                // The hint grants are only meaningful when the hints are pinned. With hints off they
+                // would pre-fund 4 extra breaks (ceiling 14 instead of 10), measured at ~+4 conflicts.
+                else if (break_indexes_allowed.Contains(i) || (Program.non_center_hints_enabled && hint_break_indexes.Contains(i)))
                     cumulativebreaksAllowed++;
 
                 cumulativebreakArray[i] = cumulativebreaksAllowed;
