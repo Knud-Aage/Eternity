@@ -131,7 +131,7 @@ class BlackwoodSolverHintPinsTest {
         // earlier hint's break usage can starve a later one out of its own budget. See
         // BwUtilTest for the fuller checkpoint list; this test just pins down the four unlock
         // points themselves.
-        int[] breakArray = BwUtil.getBreakArray();
+        int[] breakArray = solver.breakArray; // prepared with hints enabled, so this also checks the wiring
         assertEquals(1, breakArray[34], "hint181's own break budget should unlock at its own step, 34");
         assertEquals(2, breakArray[45], "hint249's own break budget should unlock at its own step, 45");
         assertEquals(2, breakArray[187], "budget must stay at 2 right up until hint208's own step");
@@ -140,6 +140,22 @@ class BlackwoodSolverHintPinsTest {
         assertEquals(4, breakArray[201], "general schedule's first entry (201) should add on top");
         assertEquals(13, breakArray[246], "budget must stay at 13 right up until hint255's own step");
         assertEquals(14, breakArray[247], "hint255's own break budget should unlock at its own step, 247");
+    }
+
+    @Test
+    void solverPreparedWithoutHintsGetsNoHintBreakGrants() throws Exception {
+        boolean saved = BlackwoodSolver.NON_CENTER_HINTS_ENABLED;
+        BlackwoodSolver.NON_CENTER_HINTS_ENABLED = false;
+        try {
+            BlackwoodSolver noHints = new BlackwoodSolver(190, Path.of("build", "test-output"), 1, PIECES_PATH);
+            noHints.prepare();
+            assertEquals(0, noHints.breakArray[200], "no hint grants may pre-fund the budget before step 201");
+            assertEquals(1, noHints.breakArray[201]);
+            assertEquals(BwUtil.BREAK_INDEXES_ALLOWED.length, noHints.breakArray[255],
+                    "with hints off the ceiling must be the general schedule alone");
+        } finally {
+            BlackwoodSolver.NON_CENTER_HINTS_ENABLED = saved;
+        }
     }
 
     @Test

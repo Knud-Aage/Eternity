@@ -88,6 +88,10 @@ public final class BwUtil {
     // Folding these in would have dropped that cutoff from 201 to 34, silently making ~150+
     // unrelated cells break-tolerant too. This array feeds ONLY getBreakArray()'s cumulative
     // budget, never firstBreakIndex().
+    //
+    // Only granted when the hints are enabled (see getBreakArray). With hints off there is no hint
+    // cell to spend them on, so they would just pre-fund 4 extra breaks for ordinary cells: a
+    // ceiling of 14 instead of 10, which measured about +4 conflicts at every depth.
     public static final int[] HINT_BREAK_INDEXES = {34, 45, 188, 247};
 
     /**
@@ -253,8 +257,12 @@ public final class BwUtil {
         return min; // 201
     }
 
-    /** Cumulative count of unlocked break-budget steps at or before each index. Mirrors Util.Get_Break_Array(). */
-    public static int[] getBreakArray() {
+    /**
+     * Cumulative count of unlocked break-budget steps at or before each index. Mirrors
+     * Util.Get_Break_Array(). The four HINT_BREAK_INDEXES grants are added only when
+     * {@code nonCenterHintsEnabled}.
+     */
+    public static int[] getBreakArray(boolean nonCenterHintsEnabled) {
         int[] arr = new int[256];
         int cumulative = 0;
         for (int i = 0; i < 256; i++) {
@@ -262,7 +270,7 @@ public final class BwUtil {
             for (int allowed : BREAK_INDEXES_ALLOWED) {
                 if (allowed == i) { unlockedHere = true; break; }
             }
-            if (!unlockedHere) {
+            if (!unlockedHere && nonCenterHintsEnabled) {
                 for (int allowed : HINT_BREAK_INDEXES) {
                     if (allowed == i) { unlockedHere = true; break; }
                 }

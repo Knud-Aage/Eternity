@@ -253,7 +253,7 @@ public class BlackwoodSolver {
         BwUtil.BoardOrder order = BwUtil.getBoardOrder();
         boardOrderRow = order.rows();
         boardOrderCol = order.cols();
-        breakArray = BwUtil.getBreakArray();
+        breakArray = BwUtil.getBreakArray(NON_CENTER_HINTS_ENABLED);
         heuristicArray = BwUtil.getHeuristicArray();
 
         int firstBreakIndex = BwUtil.firstBreakIndex();

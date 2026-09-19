@@ -147,7 +147,7 @@ class BwUtilTest {
         // not be dragged down to 34 by the hint-specific early break points.
         assertEquals(201, BwUtil.firstBreakIndex());
 
-        int[] arr = BwUtil.getBreakArray();
+        int[] arr = BwUtil.getBreakArray(true);
         // 2026-09-04: HINT_BREAK_INDEXES {34, 45, 188, 247} now has one entry per non-center
         // hint's own fill-step (34=hint181, 45=hint249, 188=hint208, 247=hint255 -- see the
         // corrected write-up on HINT_BREAK_INDEXES for how this was verified), each adding 1 to
@@ -178,6 +178,35 @@ class BwUtilTest {
         assertEquals(13, arr[246]);
         assertEquals(14, arr[247]);
         assertEquals(14, arr[255]);
+    }
+
+    @Test
+    void testBreakArrayWithoutHintsIsJustTheGeneralSchedule() {
+        // Regression: the four hint grants (34/45/188/247) used to be applied even with hints off,
+        // raising the ceiling from Blackwood's 10 to 14 and costing ~4 conflicts at every depth.
+        int[] arr = BwUtil.getBreakArray(false);
+        for (int i = 0; i < BwUtil.BREAK_INDEXES_ALLOWED[0]; i++) {
+            assertEquals(0, arr[i], "no break budget may exist before the first general break step, at " + i);
+        }
+        int[] expected = new int[256];
+        int cumulative = 0;
+        for (int i = 0; i < 256; i++) {
+            for (int allowed : BwUtil.BREAK_INDEXES_ALLOWED) {
+                if (allowed == i) cumulative++;
+            }
+            expected[i] = cumulative;
+        }
+        assertArrayEquals(expected, arr);
+        assertEquals(BwUtil.BREAK_INDEXES_ALLOWED.length, arr[255],
+                "with hints off the final ceiling must equal the schedule length");
+        assertEquals(1, arr[201]);
+    }
+
+    @Test
+    void testHintGrantsAddExactlyFourBreaksWhenHintsEnabled() {
+        int[] off = BwUtil.getBreakArray(false);
+        int[] on = BwUtil.getBreakArray(true);
+        assertEquals(BwUtil.HINT_BREAK_INDEXES.length, on[255] - off[255]);
     }
 
     @Test
