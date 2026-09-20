@@ -392,6 +392,18 @@ public class HoleSolver {
             }
         }
 
+        if (repaired != null) {
+            // Last stage: exact search for a better arrangement of the last cells of the fill order (see TailOptimizer).
+            int[] tailBoard = TailOptimizer.improve(repaired, pinned, 0);
+            if (tailBoard != null && findConflicts(tailBoard).size() < findConflicts(repaired).size()) {
+                if (verbose) {
+                    System.out.println("Tail optimizer: " + findConflicts(repaired).size() + " -> "
+                            + findConflicts(tailBoard).size() + " edge conflicts.");
+                }
+                repaired = tailBoard;
+            }
+        }
+
         return new ConflictSolveResult(finalBoard, repaired, anyRegionBudgetExhausted);
     }
 
