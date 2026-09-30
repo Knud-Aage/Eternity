@@ -397,7 +397,7 @@ public class Eternity {
             }
 
             if (i == 256) {
-                logger.info("Loaded {} pieces from pieces.csv.", i);
+                logger.debug("Loaded {} pieces from pieces.csv.", i);
                 return pieces;
             } else {
                 logger.warn("pieces.csv only contained {} pieces, expected 256. Using mock data.", i);
