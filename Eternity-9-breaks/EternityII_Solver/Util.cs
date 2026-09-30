@@ -423,11 +423,66 @@ namespace EternityII_Solver
             TryLabelWithConflictCount(link, maxSolveIndex, path, Path.Combine(path, filename));
         }
 
+        // Guards everything from HoleSolver's own output discovery through the upload-check below.
+        // All 20 workers share eternityRoot (where HoleSolver writes its Errors*_Base<depth>_* output,
+        // matched only by depth+recency, not a unique id) and saveDir (prune + upload-check) -- with no
+        // lock, two workers completing at the same depth within the same second raced on each other's
+        // files ("being used by another process" / "could not find file" / "access denied", 246 times
+        // over the first 5.5 days of this run, silently skipping the upload for every affected board).
+        // Cheap to serialize: this only runs for depth>=246 boards, a small fraction of all attempts.
+        //
+        // 2026-09-30: the solver now runs as TWO processes (a P-core arm and an E-core arm, 10 workers each)
+        // that share eternityRoot, saveDir and csharp_completed_links.log, so this in-process lock is
+        // paired with a named cross-process mutex (below), held for the same span.
+        private static readonly object LabelAndUploadLock = new object();
+
+        // Created on first use inside EnterCrossProcessLock, never in a static initializer: a failure there
+        // would poison this whole static class (every Log call included) instead of just this lock.
+        private static System.Threading.Mutex crossProcessLock;
+        private static bool crossProcessLockUnavailable;
+
+        // Called with LabelAndUploadLock already held, so only one thread per process gets here at a time
+        // (that also makes the lazy creation safe). Returns true when the mutex is held by this thread.
+        private static bool EnterCrossProcessLock()
+        {
+            try
+            {
+                if (crossProcessLockUnavailable) return false;
+                if (crossProcessLock == null)
+                    crossProcessLock = new System.Threading.Mutex(false, @"Local\EternityII_Solver_LabelAndUpload");
+                crossProcessLock.WaitOne();
+                return true;
+            }
+            catch (System.Threading.AbandonedMutexException)
+            {
+                // The other solver process was ended (e.g. a restart) while one of its workers held the mutex.
+                // Windows hands the mutex to us anyway; the shared folders are consistent enough to carry on
+                // (worst case one half-labelled board, which the next prune or upload check cleans up).
+                return true;
+            }
+            catch (Exception e)
+            {
+                crossProcessLockUnavailable = true;
+                Log("WARNING: cross-process label/upload lock unavailable ({0}); using the in-process lock only.", e.Message);
+                return false;
+            }
+        }
+
+        private static void ExitCrossProcessLock()
+        {
+            try { crossProcessLock.ReleaseMutex(); } catch (Exception) { }
+        }
+
         private static void TryLabelWithConflictCount(string link, ushort maxSolveIndex, string saveDir, string baseboardFilePath)
         {
             const string eternityRoot = @"C:\Users\knuda\IdeaProjects\Eternity";
             try
             {
+                lock (LabelAndUploadLock)
+                {
+                bool crossProcessHeld = EnterCrossProcessLock();
+                try
+                {
                 // HoleSolver loads pieces.csv via a bare relative FileReader("pieces.csv")
                 // -- confirmed 2026-08-16 by reading Eternity.loadPieces() directly, after
                 // an earlier version of this method set WorkingDirectory to saveDir and
@@ -555,8 +610,14 @@ namespace EternityII_Solver
                     if (conflictMatch.Success && !string.IsNullOrEmpty(completedLink) &&
                         System.IO.File.Exists(Path.Combine(saveDir, prefix + "_RawBoard.txt")))
                     {
-                        UploadRecordToDrive(prefix, int.Parse(conflictMatch.Groups[1].Value), completedLink, "CSharp-9break");
+                        UploadRecordToDrive(prefix, int.Parse(conflictMatch.Groups[1].Value), completedLink, "C#");
                     }
+                }
+                }
+                finally
+                {
+                    if (crossProcessHeld) ExitCrossProcessLock();
+                }
                 }
             }
             catch (Exception e)
