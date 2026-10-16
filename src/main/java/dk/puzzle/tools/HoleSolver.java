@@ -402,6 +402,27 @@ public class HoleSolver {
                 }
                 repaired = tailBoard;
             }
+
+            // Then every swap-with-re-rotation and two-piece turn that lowers the count, with neutral steps in between
+            // (see PairMovePolish). Only worth it on boards near the keep threshold (13 without hints, 18 with), so it
+            // skips anything more than two conflicts above that.
+            int[] pairBoard = PairMovePolish.improve(repaired, pinned, NON_CENTER_HINTS_ENABLED);
+            if (pairBoard != null && findConflicts(pairBoard).size() < findConflicts(repaired).size()) {
+                if (verbose) {
+                    System.out.println("Pair polish: " + findConflicts(repaired).size() + " -> "
+                            + findConflicts(pairBoard).size() + " edge conflicts.");
+                }
+                repaired = pairBoard;
+                // moving pieces around can open the tail block up again
+                tailBoard = TailOptimizer.improve(repaired, pinned, 0);
+                if (tailBoard != null && findConflicts(tailBoard).size() < findConflicts(repaired).size()) {
+                    if (verbose) {
+                        System.out.println("Tail optimizer: " + findConflicts(repaired).size() + " -> "
+                                + findConflicts(tailBoard).size() + " edge conflicts.");
+                    }
+                    repaired = tailBoard;
+                }
+            }
         }
 
         return new ConflictSolveResult(finalBoard, repaired, anyRegionBudgetExhausted);
