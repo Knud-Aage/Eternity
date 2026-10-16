@@ -423,18 +423,32 @@ namespace EternityII_Solver
             TryLabelWithConflictCount(link, maxSolveIndex, path, Path.Combine(path, filename));
         }
 
-        // Guards everything from HoleSolver's own output discovery through the upload-check below.
-        // All 20 workers share eternityRoot (where HoleSolver writes its Errors*_Base<depth>_* output,
-        // matched only by depth+recency, not a unique id) and saveDir (prune + upload-check) -- with no
+        // Guards everything from HoleSolver's own output discovery through the prune below (the Drive upload
+        // itself runs after the lock is released, see TryLabelWithConflictCount).
+        // All workers (10 per arm, two arms) share eternityRoot (where HoleSolver writes its Errors*_Base<depth>_*
+        // output, matched only by depth+recency, not a unique id) and saveDir (prune + upload-check) -- with no
         // lock, two workers completing at the same depth within the same second raced on each other's
         // files ("being used by another process" / "could not find file" / "access denied", 246 times
         // over the first 5.5 days of this run, silently skipping the upload for every affected board).
-        // Cheap to serialize: this only runs for depth>=246 boards, a small fraction of all attempts.
+        // Cheap to serialize only because attempts are long: every attempt makes about 4.3 labelled saves at
+        // depth>=246 and lasts about 25 minutes. Lowering the save depth would make this section the bottleneck.
         //
         // 2026-09-30: the solver now runs as TWO processes (a P-core arm and an E-core arm, 10 workers each)
         // that share eternityRoot, saveDir and csharp_completed_links.log, so this in-process lock is
         // paired with a named cross-process mutex (below), held for the same span.
         private static readonly object LabelAndUploadLock = new object();
+
+        // How long a worker waits for the mutex before giving up on it. A legitimate wait is the other arm's workers
+        // queueing one HoleSolver run (at most 60 s) at a time; a holder that is alive but frozen from outside
+        // (debugger, WER dump, suspended process) would otherwise block every worker that reaches depth>=246 for good,
+        // with nothing in the log. ETERNITY_LABEL_LOCK_TIMEOUT_SECONDS overrides the 10 minutes (used by the tests).
+        private static readonly TimeSpan CrossProcessLockTimeout = TimeSpan.FromSeconds(ReadLockTimeoutSeconds());
+
+        private static int ReadLockTimeoutSeconds()
+        {
+            int seconds;
+            return int.TryParse(Environment.GetEnvironmentVariable("ETERNITY_LABEL_LOCK_TIMEOUT_SECONDS"), out seconds) && seconds > 0 ? seconds : 600;
+        }
 
         // Created on first use inside EnterCrossProcessLock, never in a static initializer: a failure there
         // would poison this whole static class (every Log call included) instead of just this lock.
@@ -450,7 +464,11 @@ namespace EternityII_Solver
                 if (crossProcessLockUnavailable) return false;
                 if (crossProcessLock == null)
                     crossProcessLock = new System.Threading.Mutex(false, @"Local\EternityII_Solver_LabelAndUpload");
-                crossProcessLock.WaitOne();
+                if (!crossProcessLock.WaitOne(CrossProcessLockTimeout))
+                {
+                    Log("WARNING: gave up after {0:N0} s waiting for the label/upload lock held by the other solver process; carrying on with the in-process lock only.", CrossProcessLockTimeout.TotalSeconds);
+                    return false;
+                }
                 return true;
             }
             catch (System.Threading.AbandonedMutexException)
@@ -458,6 +476,7 @@ namespace EternityII_Solver
                 // The other solver process was ended (e.g. a restart) while one of its workers held the mutex.
                 // Windows hands the mutex to us anyway; the shared folders are consistent enough to carry on
                 // (worst case one half-labelled board, which the next prune or upload check cleans up).
+                Log("WARNING: the other solver process ended while holding the label/upload lock (a restart?); taking it over.");
                 return true;
             }
             catch (Exception e)
@@ -476,6 +495,10 @@ namespace EternityII_Solver
         private static void TryLabelWithConflictCount(string link, ushort maxSolveIndex, string saveDir, string baseboardFilePath)
         {
             const string eternityRoot = @"C:\Users\knuda\IdeaProjects\Eternity";
+            // Filled in under the lock, used after it is released: the Drive upload (with its retries) needs only these
+            // three values, so a slow or retried upload no longer holds up the other workers of both arms.
+            string uploadPrefix = null, uploadLink = null;
+            int uploadConflicts = 0;
             try
             {
                 lock (LabelAndUploadLock)
@@ -494,7 +517,9 @@ namespace EternityII_Solver
                 string classpath = eternityRoot + @"\target\classes;" +
                     System.IO.File.ReadAllText(Path.Combine(eternityRoot, "cp.txt")).Trim();
 
-                DateTime launchTime = DateTime.Now;
+                // UTC on both sides of the file-time comparison below: local times repeat for an hour when the clocks go
+                // back (03:00 -> 02:00 on Sunday 2026-10-25), and a labelling call in flight at that moment found no files.
+                DateTime launchTimeUtc = DateTime.UtcNow;
 
                 var psi = new ProcessStartInfo
                 {
@@ -513,6 +538,8 @@ namespace EternityII_Solver
                 psi.ArgumentList.Add(maxSolveIndex.ToString()); // baseLabel -> "BaseNNN" in the output filename
 
                 var stdout = new StringBuilder();
+                var stderr = new StringBuilder();
+                int exitCode;
                 using (var proc = Process.Start(psi))
                 {
                     // Read async while waiting -- HoleSolver's own verbose per-region
@@ -521,6 +548,9 @@ namespace EternityII_Solver
                     // real cause of the timeout warning below firing even on boards
                     // that otherwise complete in seconds.
                     proc.OutputDataReceived += (s, e) => { if (e.Data != null) stdout.AppendLine(e.Data); };
+                    // stderr used to be thrown away; it is the only place a bad classpath, a wrong JDK path or a Java
+                    // exception shows up (kept to the first ~4 KB, enough to say what happened)
+                    proc.ErrorDataReceived += (s, e) => { if (e.Data != null && stderr.Length < 4000) stderr.AppendLine(e.Data); };
                     proc.BeginOutputReadLine();
                     proc.BeginErrorReadLine();
 
@@ -530,6 +560,8 @@ namespace EternityII_Solver
                         Log("WARNING: HoleSolver labelling timed out for depth {0}, raw save kept unlabelled.", maxSolveIndex);
                         return;
                     }
+                    proc.WaitForExit(); // lets the async readers deliver their last lines before stdout is parsed
+                    exitCode = proc.ExitCode;
                 }
 
                 // Move the two files this specific invocation just wrote (matched by the
@@ -538,7 +570,7 @@ namespace EternityII_Solver
                 // are never touched) from the project root into saveDir.
                 string pattern = "Errors*_Base" + maxSolveIndex + "_*";
                 var newFiles = Directory.GetFiles(eternityRoot, pattern)
-                    .Where(f => System.IO.File.GetLastWriteTime(f) >= launchTime.AddSeconds(-1))
+                    .Where(f => System.IO.File.GetLastWriteTimeUtc(f) >= launchTimeUtc.AddSeconds(-1))
                     .ToList();
                 foreach (string f in newFiles)
                 {
@@ -557,6 +589,11 @@ namespace EternityII_Solver
                 int markerIdx = captured.IndexOf(marker, StringComparison.Ordinal);
                 string labelledName = newFiles.Select(Path.GetFileName).FirstOrDefault(n => n.Contains("_RawBoard.txt"));
                 string completedLink = null;
+                // A failed labelling run used to leave no trace at all (a bad cp.txt or JDK path, a rebuilt target\classes,
+                // an exception inside HoleSolver): the raw save just stayed unlabelled and the log showed no warning.
+                if (exitCode != 0 || markerIdx < 0 || labelledName == null)
+                    Log("WARNING: HoleSolver labelling for depth {0} did not complete cleanly (exit code {1}, final result printed: {2}, Errors*_RawBoard.txt written: {3}); raw save kept unlabelled. Output: {4}",
+                        maxSolveIndex, exitCode, markerIdx >= 0 ? "yes" : "no", labelledName != null ? "yes" : "no", Brief(stderr.Length > 0 ? stderr.ToString() : captured));
                 if (markerIdx >= 0)
                 {
                     string afterMarker = captured.Substring(markerIdx + marker.Length).TrimStart('\r', '\n');
@@ -610,7 +647,10 @@ namespace EternityII_Solver
                     if (conflictMatch.Success && !string.IsNullOrEmpty(completedLink) &&
                         System.IO.File.Exists(Path.Combine(saveDir, prefix + "_RawBoard.txt")))
                     {
-                        UploadRecordToDrive(prefix, int.Parse(conflictMatch.Groups[1].Value), completedLink, "C#");
+                        // uploaded after the lock is released (see uploadPrefix at the top)
+                        uploadPrefix = prefix;
+                        uploadConflicts = int.Parse(conflictMatch.Groups[1].Value);
+                        uploadLink = completedLink;
                     }
                 }
                 }
@@ -619,6 +659,8 @@ namespace EternityII_Solver
                     if (crossProcessHeld) ExitCrossProcessLock();
                 }
                 }
+
+                if (uploadPrefix != null) UploadRecordToDrive(uploadPrefix, uploadConflicts, uploadLink, "C#");
             }
             catch (Exception e)
             {
@@ -631,8 +673,28 @@ namespace EternityII_Solver
         /// (dk.puzzle.io.DriveUploadCli) rather than reimplemented here, since RecordManager's actual
         /// Drive upload logic (auth, folder lookup, multipart upload) only exists on the Java side.
         /// Same "never let this affect the save that already succeeded" wrapping as the HoleSolver call.
+        /// 2026-10-16: the CLI exits 0 even when the upload failed (RecordManager.uploadToDrive swallows every exception and
+        /// only prints ">>> [GOOGLE DRIVE FEJL]" to stderr), so a failed upload used to be invisible and was never retried
+        /// (146 attempts against 145 successes in 15 days). Now stderr and the exit code are read, a failed attempt is
+        /// retried (4 attempts, 10 / 30 / 60 s apart) and a final failure is logged as a WARNING.
         /// </summary>
         private static void UploadRecordToDrive(string prefix, int conflicts, string completedLink, string source)
+        {
+            const int attempts = 4;
+            int[] pauseSeconds = { 10, 30, 60 };
+            for (int attempt = 1; attempt <= attempts; attempt++)
+            {
+                string failure = TryUploadOnce(prefix, conflicts, completedLink, source);
+                if (failure == null) return;
+                Log("WARNING: Drive upload attempt {0} of {1} failed for {2}: {3}", attempt, attempts, prefix, failure);
+                if (attempt < attempts) System.Threading.Thread.Sleep(pauseSeconds[attempt - 1] * 1000);
+            }
+            Log("WARNING: Drive upload GAVE UP for {0} ({1} conflicts) after {2} attempts; the board is still in the save folder and its link in csharp_completed_links.log.",
+                prefix, conflicts, attempts);
+        }
+
+        /// <summary>One upload attempt. Returns null on success, otherwise a short description of what went wrong.</summary>
+        private static string TryUploadOnce(string prefix, int conflicts, string completedLink, string source)
         {
             try
             {
@@ -658,19 +720,38 @@ namespace EternityII_Solver
                 psi.ArgumentList.Add(source);
                 psi.ArgumentList.Add(completedLink);
 
+                var stderr = new StringBuilder();
                 using (var proc = Process.Start(psi))
                 {
+                    proc.OutputDataReceived += (s, e) => { }; // drained so a chatty child cannot fill the pipe; not needed
+                    proc.ErrorDataReceived += (s, e) => { if (e.Data != null && stderr.Length < 4000) stderr.AppendLine(e.Data); };
+                    proc.BeginOutputReadLine();
+                    proc.BeginErrorReadLine();
+
                     if (!proc.WaitForExit(60000))
                     {
                         proc.Kill(entireProcessTree: true);
-                        Log("WARNING: Drive upload timed out for {0}", prefix);
+                        return "timed out after 60 s";
                     }
+                    proc.WaitForExit(); // lets the async readers deliver their last lines
+                    string err = stderr.ToString();
+                    if (proc.ExitCode != 0) return "exit code " + proc.ExitCode + ": " + Brief(err);
+                    if (err.Contains("GOOGLE DRIVE FEJL")) return Brief(err);
                 }
+                return null;
             }
             catch (Exception e)
             {
-                Log("WARNING: Drive upload failed for {0}: {1}", prefix, e.Message);
+                return e.Message;
             }
+        }
+
+        // One-line, length-limited rendering of a child process's output for a log line.
+        private static string Brief(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return "(no output)";
+            string oneLine = Regex.Replace(text.Trim(), @"\s*[\r\n]+\s*", " | ");
+            return oneLine.Length <= 300 ? oneLine : oneLine.Substring(0, 300) + "...";
         }
 
         /// <summary>
