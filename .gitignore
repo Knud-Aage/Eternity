@@ -41,3 +41,8 @@ build/
 ### Generated log analysis ###
 logs/progress.csv
 logs/progress_daily_summary.csv
+
+### Google OAuth client secret and Drive tokens: never commit ###
+credentials.json
+tokens/
+StoredCredential
