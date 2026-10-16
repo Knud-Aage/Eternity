@@ -405,7 +405,7 @@ public class HoleSolver {
 
             // Then every swap-with-re-rotation and two-piece turn that lowers the count, with neutral steps in between
             // (see PairMovePolish). Only worth it on boards near the keep threshold (13 without hints, 18 with), so it
-            // skips anything more than two conflicts above that.
+            // skips boards above 14 conflicts without hints and above 19 with.
             int[] pairBoard = PairMovePolish.improve(repaired, pinned, NON_CENTER_HINTS_ENABLED);
             if (pairBoard != null && findConflicts(pairBoard).size() < findConflicts(repaired).size()) {
                 if (verbose) {

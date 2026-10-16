@@ -56,12 +56,12 @@ class PairMovePolishTest {
     }
 
     private static void defaults() {
-        PairMovePolish.configure(true, 3, 400, 3_000L, 15, 20);
+        PairMovePolish.configure(true, 3, 400, 3_000L, 14, 19);
     }
 
     @BeforeEach
     void generousLimits() {
-        PairMovePolish.configure(true, 3, 400, 120_000L, 15, 20);
+        PairMovePolish.configure(true, 3, 400, 120_000L, 14, 19);
     }
 
     @AfterEach

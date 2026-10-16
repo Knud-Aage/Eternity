@@ -36,11 +36,11 @@ public final class PairMovePolish {
     private static volatile int neutralDepth = 3;
     private static volatile int maxNodes = 400;
     private static volatile long maxMillis = 3_000L;
-    // Keep thresholds are 13 conflicts without hints and 18 with. The ceiling sits two above them: a single run can remove
-    // two conflicts (a 15 became a 13 on a replay of 239 saved boards), and a board that lands on the threshold is the
-    // one that counts. Boards further out are not worth the time.
-    private static volatile int maxConflicts = 15;
-    private static volatile int maxConflictsWithHints = 20;
+    // Keep thresholds are 13 conflicts without hints and 18 with. Without hints the ceiling sits one above: a 14 can become
+    // a keepable 13 (10 of 300 real 14s did), while a 15 hardly ever reaches 13 (0 of 300) and an 11 is out of reach from
+    // there. With hints it sits one above as well (18 + 1).
+    private static volatile int maxConflicts = 14;
+    private static volatile int maxConflictsWithHints = 19;
 
     private static final AtomicLong tried = new AtomicLong(), improvedBoards = new AtomicLong(),
             conflictsRemoved = new AtomicLong(), scans = new AtomicLong(), cappedSearches = new AtomicLong(),
@@ -92,7 +92,7 @@ public final class PairMovePolish {
     /**
      * @param board        complete 256-cell board (not modified)
      * @param pinned       cells that must not move (clue pieces), or null; the centre cell never moves either way
-     * @param hintsEnabled picks the conflict ceiling above which the polish is skipped (15 without hints, 20 with)
+     * @param hintsEnabled picks the conflict ceiling above which the polish is skipped (14 without hints, 19 with)
      * @return a board with strictly fewer conflicts using the same pieces, or null if none was found (or disabled)
      */
     public static int[] improve(int[] board, boolean[] pinned, boolean hintsEnabled) {
