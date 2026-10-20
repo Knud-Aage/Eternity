@@ -14,7 +14,7 @@ REM   ETERNITY_TUNE_SECONDS       bounded tuning run instead of running forever
 REM   ETERNITY_VIRTUAL_CORES      override the 28-thread default (Parallel.For uses N-1)
 REM   ETERNITY_BREAK_INDEXES      override the 10-entry general break schedule
 REM   ETERNITY_SOLUTIONS_DIR      override the default EternitySolutions_CSharpCPU save folder
-REM   ETERNITY_SAVE_FLOOR         override the 12-conflict permanent-save floor
+REM   ETERNITY_SAVE_FLOOR         override the 13-conflict permanent-save floor
 
 cd /d "%~dp0"
 

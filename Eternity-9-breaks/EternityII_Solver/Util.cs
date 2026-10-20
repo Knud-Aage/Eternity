@@ -811,9 +811,12 @@ namespace EternityII_Solver
                 // equivalent is 18 (462/480), one better than the first genuinely clue-compliant
                 // find (461/480) once the pin-rotation fix landed. An explicit ETERNITY_SAVE_FLOOR
                 // still overrides either default.
+                //
+                // 2026-10-20: the no-hints floor is now 13 (467/480): with an 11 on disk the window
+                // "within 1 of best" is 12, which would have deleted every 13.
                 string saveFloorEnv = Environment.GetEnvironmentVariable("ETERNITY_SAVE_FLOOR");
                 int saveFloor = string.IsNullOrWhiteSpace(saveFloorEnv)
-                    ? (Program.non_center_hints_enabled ? 18 : 12)
+                    ? (Program.non_center_hints_enabled ? 18 : 13)
                     : int.Parse(saveFloorEnv);
                 int keepThreshold = Math.Max(saveFloor, conflictsByFile.Values.Min() + 1);
 
