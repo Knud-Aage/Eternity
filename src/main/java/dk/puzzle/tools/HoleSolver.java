@@ -423,6 +423,27 @@ public class HoleSolver {
                     repaired = tailBoard;
                 }
             }
+
+            // Last, a randomised search that re-places 4 to 8 pieces exactly, round after round, and drifts across boards of
+            // equal cost (see PlateauLns). Same ceiling as the pair polish: it skips boards above 14 conflicts without hints
+            // and above 19 with.
+            int[] lnsBoard = PlateauLns.improve(repaired, pinned, NON_CENTER_HINTS_ENABLED);
+            if (lnsBoard != null && findConflicts(lnsBoard).size() < findConflicts(repaired).size()) {
+                if (verbose) {
+                    System.out.println("Plateau LNS: " + findConflicts(repaired).size() + " -> "
+                            + findConflicts(lnsBoard).size() + " edge conflicts.");
+                }
+                repaired = lnsBoard;
+                // moving pieces around can open the tail block up again
+                tailBoard = TailOptimizer.improve(repaired, pinned, 0);
+                if (tailBoard != null && findConflicts(tailBoard).size() < findConflicts(repaired).size()) {
+                    if (verbose) {
+                        System.out.println("Tail optimizer: " + findConflicts(repaired).size() + " -> "
+                                + findConflicts(tailBoard).size() + " edge conflicts.");
+                    }
+                    repaired = tailBoard;
+                }
+            }
         }
 
         return new ConflictSolveResult(finalBoard, repaired, anyRegionBudgetExhausted);
