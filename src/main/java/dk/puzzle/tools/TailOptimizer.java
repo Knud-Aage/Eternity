@@ -29,19 +29,36 @@ public final class TailOptimizer {
     private static final AtomicLong tried = new AtomicLong(), improvedBoards = new AtomicLong(),
             conflictsRemoved = new AtomicLong(), cappedRungs = new AtomicLong(), nanosSpent = new AtomicLong();
 
+    // Each setting is parsed on its own: one malformed value must not discard the settings read after it.
     static {
         try {
             int[] r = parseInts(System.getenv("ETERNITY_TAIL_OPT_RUNGS"));
-            long[] c = parseLongs(System.getenv("ETERNITY_TAIL_OPT_NODES"));
             if (r != null && r.length > 0) rungs = r;
+        } catch (NumberFormatException e) {
+            warnMalformed("ETERNITY_TAIL_OPT_RUNGS", e);
+        }
+        try {
+            long[] c = parseLongs(System.getenv("ETERNITY_TAIL_OPT_NODES"));
             if (c != null && c.length > 0) rungNodeCaps = c;
+        } catch (NumberFormatException e) {
+            warnMalformed("ETERNITY_TAIL_OPT_NODES", e);
+        }
+        try {
             String ms = System.getenv("ETERNITY_TAIL_OPT_MILLIS");
             if (ms != null && !ms.isBlank()) maxMillis = Long.parseLong(ms.trim());
+        } catch (NumberFormatException e) {
+            warnMalformed("ETERNITY_TAIL_OPT_MILLIS", e);
+        }
+        try {
             String mc = System.getenv("ETERNITY_TAIL_OPT_MAX_CONFLICTS");
             if (mc != null && !mc.isBlank()) maxConflicts = Integer.parseInt(mc.trim());
         } catch (NumberFormatException e) {
-            System.err.println("TailOptimizer: ignoring malformed ETERNITY_TAIL_OPT_* setting (" + e.getMessage() + ")");
+            warnMalformed("ETERNITY_TAIL_OPT_MAX_CONFLICTS", e);
         }
+    }
+
+    private static void warnMalformed(String name, NumberFormatException e) {
+        System.err.println("TailOptimizer: ignoring malformed " + name + " (" + e.getMessage() + ")");
     }
 
     private static int[] parseInts(String s) {
@@ -170,6 +187,7 @@ public final class TailOptimizer {
     }
 
     private static Outcome runRung(int[] board, boolean[] pinned, int k, long nodeCap, long deadline, int rotation) {
+        if (k <= 0 || k > 256) return new Outcome(null, 0, false); // a bad rung size (env setting) would index CELL_OF_STEP out of range
         int[] cells = new int[k];
         int n = 0;
         for (int s = 256 - k; s < 256; s++) {
@@ -199,21 +217,12 @@ public final class TailOptimizer {
     private static boolean samePieces(int[] a, int[] b, int[] cells) {
         int[] x = new int[cells.length], y = new int[cells.length];
         for (int i = 0; i < cells.length; i++) {
-            x[i] = canonical(a[cells[i]]);
-            y[i] = canonical(b[cells[i]]);
+            x[i] = BoardChecks.canonical(a[cells[i]]);
+            y[i] = BoardChecks.canonical(b[cells[i]]);
         }
         Arrays.sort(x);
         Arrays.sort(y);
         return Arrays.equals(x, y);
-    }
-
-    private static int canonical(int p) {
-        int best = p, q = p;
-        for (int i = 0; i < 3; i++) {
-            q = PieceUtils.rotate(q);
-            if (q < best) best = q;
-        }
-        return best;
     }
 
     // ------------------------------------------------------------------ the search

@@ -20,6 +20,7 @@ import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Deque;
 import java.util.List;
+import java.util.function.UnaryOperator;
 
 /**
  * Given a bucas.name record link (any puzzle name), finds every connected
@@ -394,59 +395,61 @@ public class HoleSolver {
 
         if (repaired != null) {
             // Last stage: exact search for a better arrangement of the last cells of the fill order (see TailOptimizer).
-            int[] tailBoard = TailOptimizer.improve(repaired, pinned, 0);
-            if (tailBoard != null && findConflicts(tailBoard).size() < findConflicts(repaired).size()) {
-                if (verbose) {
-                    System.out.println("Tail optimizer: " + findConflicts(repaired).size() + " -> "
-                            + findConflicts(tailBoard).size() + " edge conflicts.");
-                }
-                repaired = tailBoard;
-            }
+            UnaryOperator<int[]> tail = b -> TailOptimizer.improve(b, pinned, 0);
+            repaired = polishStage("Tail optimizer", repaired, verbose, tail);
 
             // Then every swap-with-re-rotation and two-piece turn that lowers the count, with neutral steps in between
             // (see PairMovePolish). Only worth it on boards near the keep threshold (13 without hints, 18 with), so it
             // skips boards above 14 conflicts without hints and above 19 with.
-            int[] pairBoard = PairMovePolish.improve(repaired, pinned, NON_CENTER_HINTS_ENABLED);
-            if (pairBoard != null && findConflicts(pairBoard).size() < findConflicts(repaired).size()) {
-                if (verbose) {
-                    System.out.println("Pair polish: " + findConflicts(repaired).size() + " -> "
-                            + findConflicts(pairBoard).size() + " edge conflicts.");
-                }
-                repaired = pairBoard;
+            UnaryOperator<int[]> pair = b -> PairMovePolish.improve(b, pinned, NON_CENTER_HINTS_ENABLED);
+            int[] afterPair = polishStage("Pair polish", repaired, verbose, pair);
+            if (afterPair != repaired) {
                 // moving pieces around can open the tail block up again
-                tailBoard = TailOptimizer.improve(repaired, pinned, 0);
-                if (tailBoard != null && findConflicts(tailBoard).size() < findConflicts(repaired).size()) {
-                    if (verbose) {
-                        System.out.println("Tail optimizer: " + findConflicts(repaired).size() + " -> "
-                                + findConflicts(tailBoard).size() + " edge conflicts.");
-                    }
-                    repaired = tailBoard;
-                }
+                repaired = polishStage("Tail optimizer", afterPair, verbose, tail);
             }
 
             // Last, a randomised search that re-places 4 to 8 pieces exactly, round after round, and drifts across boards of
             // equal cost (see PlateauLns). Same ceiling as the pair polish: it skips boards above 14 conflicts without hints
             // and above 19 with.
-            int[] lnsBoard = PlateauLns.improve(repaired, pinned, NON_CENTER_HINTS_ENABLED);
-            if (lnsBoard != null && findConflicts(lnsBoard).size() < findConflicts(repaired).size()) {
-                if (verbose) {
-                    System.out.println("Plateau LNS: " + findConflicts(repaired).size() + " -> "
-                            + findConflicts(lnsBoard).size() + " edge conflicts.");
-                }
-                repaired = lnsBoard;
-                // moving pieces around can open the tail block up again
-                tailBoard = TailOptimizer.improve(repaired, pinned, 0);
-                if (tailBoard != null && findConflicts(tailBoard).size() < findConflicts(repaired).size()) {
-                    if (verbose) {
-                        System.out.println("Tail optimizer: " + findConflicts(repaired).size() + " -> "
-                                + findConflicts(tailBoard).size() + " edge conflicts.");
-                    }
-                    repaired = tailBoard;
-                }
+            int[] afterLns = polishStage("Plateau LNS", repaired, verbose,
+                    b -> PlateauLns.improve(b, pinned, NON_CENTER_HINTS_ENABLED));
+            if (afterLns != repaired) {
+                repaired = polishAfterPlateauGain(afterLns, verbose, pair, tail);
             }
         }
 
         return new ConflictSolveResult(finalBoard, repaired, anyRegionBudgetExhausted);
+    }
+
+    /**
+     * Runs one optional polish stage on {@code board} and returns its result when it has strictly fewer edge conflicts,
+     * otherwise {@code board} itself (same reference). A stage that throws leaves the board as it was: an optional
+     * improvement must never cost the caller the board the earlier stages already produced.
+     */
+    private static int[] polishStage(String name, int[] board, boolean verbose, UnaryOperator<int[]> stage) {
+        try {
+            int[] improved = stage.apply(board);
+            if (improved == null) return board;
+            int before = findConflicts(board).size(), after = findConflicts(improved).size();
+            if (after >= before) return board;
+            if (verbose) {
+                System.out.println(name + ": " + before + " -> " + after + " edge conflicts.");
+            }
+            return improved;
+        } catch (RuntimeException e) {
+            System.err.println("HoleSolver: " + name + " failed, keeping the board as it was: " + e);
+            return board;
+        }
+    }
+
+    /**
+     * What runs once the plateau LNS has lowered the count. The LNS re-places 2 to 8 pieces, which can open up a one- or two-piece move for the
+     * pair polish as well as the tail block for the tail optimizer, so both get another pass: the pair polish first, then the tail optimizer on
+     * whatever that left (the tail optimizer runs even when the pair polish found nothing, as it did before this method existed).
+     */
+    static int[] polishAfterPlateauGain(int[] afterLns, boolean verbose, UnaryOperator<int[]> pair, UnaryOperator<int[]> tail) {
+        int[] afterPair = polishStage("Pair polish", afterLns, verbose, pair);
+        return polishStage("Tail optimizer", afterPair, verbose, tail);
     }
 
     // ------------------------------------------------------------------

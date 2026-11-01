@@ -47,20 +47,11 @@ public final class PairMovePolish {
             nanosSpent = new AtomicLong();
 
     static {
-        try {
-            neutralDepth = envInt("ETERNITY_PAIR_POLISH_DEPTH", neutralDepth);
-            maxNodes = envInt("ETERNITY_PAIR_POLISH_NODES", maxNodes);
-            maxMillis = envInt("ETERNITY_PAIR_POLISH_MILLIS", (int) maxMillis);
-            maxConflicts = envInt("ETERNITY_PAIR_POLISH_MAX_CONFLICTS", maxConflicts);
-            maxConflictsWithHints = envInt("ETERNITY_PAIR_POLISH_MAX_CONFLICTS_HINTS", maxConflictsWithHints);
-        } catch (NumberFormatException e) {
-            System.err.println("PairMovePolish: ignoring malformed ETERNITY_PAIR_POLISH_* setting (" + e.getMessage() + ")");
-        }
-    }
-
-    private static int envInt(String name, int fallback) {
-        String v = System.getenv(name);
-        return v == null || v.isBlank() ? fallback : Integer.parseInt(v.trim());
+        neutralDepth = EnvSettings.envInt("PairMovePolish", "ETERNITY_PAIR_POLISH_DEPTH", neutralDepth);
+        maxNodes = EnvSettings.envInt("PairMovePolish", "ETERNITY_PAIR_POLISH_NODES", maxNodes);
+        maxMillis = EnvSettings.envInt("PairMovePolish", "ETERNITY_PAIR_POLISH_MILLIS", (int) maxMillis);
+        maxConflicts = EnvSettings.envInt("PairMovePolish", "ETERNITY_PAIR_POLISH_MAX_CONFLICTS", maxConflicts);
+        maxConflictsWithHints = EnvSettings.envInt("PairMovePolish", "ETERNITY_PAIR_POLISH_MAX_CONFLICTS_HINTS", maxConflictsWithHints);
     }
 
     private PairMovePolish() {
@@ -119,7 +110,7 @@ public final class PairMovePolish {
         nanosSpent.addAndGet(System.nanoTime() - start);
         if (cost >= before) return null;
 
-        if (TailOptimizer.countConflicts(current) != cost || !samePieces(board, current) || movedLocked(board, current, locked)) {
+        if (TailOptimizer.countConflicts(current) != cost || !BoardChecks.samePieces(board, current) || BoardChecks.movedLocked(board, current, locked)) {
             System.err.println("PairMovePolish: discarded an inconsistent result (expected " + cost + " conflicts)");
             return null;
         }
@@ -302,33 +293,5 @@ public final class PairMovePolish {
         long h = 0xcbf29ce484222325L;
         for (int v : b) h = (h ^ v) * 0x100000001b3L;
         return h;
-    }
-
-    /** Every piece must still be there exactly once (compared up to rotation). */
-    private static boolean samePieces(int[] a, int[] b) {
-        int[] x = new int[256], y = new int[256];
-        for (int i = 0; i < 256; i++) {
-            x[i] = canonical(a[i]);
-            y[i] = canonical(b[i]);
-        }
-        Arrays.sort(x);
-        Arrays.sort(y);
-        return Arrays.equals(x, y);
-    }
-
-    private static boolean movedLocked(int[] a, int[] b, boolean[] locked) {
-        for (int i = 0; i < 256; i++) {
-            if (locked[i] && a[i] != b[i]) return true;
-        }
-        return false;
-    }
-
-    private static int canonical(int p) {
-        int best = p, q = p;
-        for (int i = 0; i < 3; i++) {
-            q = PieceUtils.rotate(q);
-            if (q < best) best = q;
-        }
-        return best;
     }
 }

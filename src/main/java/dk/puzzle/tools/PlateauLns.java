@@ -49,21 +49,12 @@ public final class PlateauLns {
             cappedRounds = new AtomicLong(), timedOut = new AtomicLong(), discarded = new AtomicLong(), nanosSpent = new AtomicLong();
 
     static {
-        try {
-            rounds = envInt("ETERNITY_LNS_ROUNDS", rounds);
-            deepRounds = envInt("ETERNITY_LNS_DEEP_ROUNDS", deepRounds);
-            deepAtOrBelow = envInt("ETERNITY_LNS_DEEP_AT_OR_BELOW", deepAtOrBelow);
-            maxMillis = envInt("ETERNITY_LNS_MILLIS", (int) maxMillis);
-            maxConflicts = envInt("ETERNITY_LNS_MAX_CONFLICTS", maxConflicts);
-            maxConflictsWithHints = envInt("ETERNITY_LNS_MAX_CONFLICTS_HINTS", maxConflictsWithHints);
-        } catch (NumberFormatException e) {
-            System.err.println("PlateauLns: ignoring malformed ETERNITY_LNS_* setting (" + e.getMessage() + ")");
-        }
-    }
-
-    private static int envInt(String name, int fallback) {
-        String v = System.getenv(name);
-        return v == null || v.isBlank() ? fallback : Integer.parseInt(v.trim());
+        rounds = EnvSettings.envInt("PlateauLns", "ETERNITY_LNS_ROUNDS", rounds);
+        deepRounds = EnvSettings.envInt("PlateauLns", "ETERNITY_LNS_DEEP_ROUNDS", deepRounds);
+        deepAtOrBelow = EnvSettings.envInt("PlateauLns", "ETERNITY_LNS_DEEP_AT_OR_BELOW", deepAtOrBelow);
+        maxMillis = EnvSettings.envInt("PlateauLns", "ETERNITY_LNS_MILLIS", (int) maxMillis);
+        maxConflicts = EnvSettings.envInt("PlateauLns", "ETERNITY_LNS_MAX_CONFLICTS", maxConflicts);
+        maxConflictsWithHints = EnvSettings.envInt("PlateauLns", "ETERNITY_LNS_MAX_CONFLICTS_HINTS", maxConflictsWithHints);
     }
 
     private PlateauLns() {
@@ -148,7 +139,8 @@ public final class PlateauLns {
         if (search.bestCost >= before) return null;
 
         int[] best = search.best;
-        if (TailOptimizer.countConflicts(best) != search.bestCost || !samePieces(board, best) || movedLocked(board, best, locked)) {
+        if (TailOptimizer.countConflicts(best) != search.bestCost || !BoardChecks.samePieces(board, best)
+                || BoardChecks.movedLocked(board, best, locked)) {
             System.err.println("PlateauLns: discarded an inconsistent result (expected " + search.bestCost + " conflicts)");
             discarded.incrementAndGet();
             return null;
@@ -500,31 +492,4 @@ public final class PlateauLns {
         return (piece >>> (24 - 8 * direction)) & 0xFF;
     }
 
-    /** Every piece must still be there exactly once (compared up to rotation). */
-    private static boolean samePieces(int[] a, int[] b) {
-        int[] x = new int[256], y = new int[256];
-        for (int i = 0; i < 256; i++) {
-            x[i] = canonical(a[i]);
-            y[i] = canonical(b[i]);
-        }
-        Arrays.sort(x);
-        Arrays.sort(y);
-        return Arrays.equals(x, y);
-    }
-
-    private static boolean movedLocked(int[] a, int[] b, boolean[] locked) {
-        for (int i = 0; i < 256; i++) {
-            if (locked[i] && a[i] != b[i]) return true;
-        }
-        return false;
-    }
-
-    private static int canonical(int p) {
-        int best = p, q = p;
-        for (int i = 0; i < 3; i++) {
-            q = PieceUtils.rotate(q);
-            if (q < best) best = q;
-        }
-        return best;
-    }
 }
